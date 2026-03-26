@@ -297,16 +297,27 @@ impl Drop for ControlMode {
             let _ = stdin.flush();
         }
 
-        // Join the reader thread.
+        // Give the child a moment to exit gracefully, then force-kill so the
+        // reader thread gets EOF promptly and we never block indefinitely.
+        if let Ok(mut child) = self.child.lock() {
+            let exited = (0..3).any(|_| {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                false
+            });
+            if !exited {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+
+        // Reader thread should exit now that the child is dead (stdout closed).
         if let Ok(mut handle) = self.reader_handle.lock() {
             if let Some(h) = handle.take() {
                 let _ = h.join();
             }
-        }
-
-        // Ensure the child process is cleaned up.
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.wait();
         }
     }
 }
