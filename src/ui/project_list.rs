@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{List, ListItem, ListState, Paragraph},
     Frame,
@@ -197,7 +197,7 @@ pub(super) fn render_scroll_indicators(
     let items_above = offset;
     let items_below = total_items.saturating_sub(offset + visible_count);
 
-    let indicator_style = Style::default().fg(Theme::TEXT_MUTED);
+    let indicator_style = Style::default().fg(Theme::text_muted());
 
     if items_above > 0 {
         let text = format!("\u{25b2} {items_above} ");
@@ -236,9 +236,9 @@ fn render_search_bar(
     use ratatui::widgets::{Block, Borders};
 
     let style = if is_active {
-        Style::default().fg(Theme::SEARCH_BAR)
+        Style::default().fg(Theme::search_bar())
     } else {
-        Style::default().fg(Theme::TEXT_MUTED)
+        Style::default().fg(Theme::text_muted())
     };
 
     let title = if !query.is_empty() {
@@ -306,7 +306,7 @@ fn build_highlighted_spans<'a>(
     base_style: Style,
 ) -> Vec<Span<'a>> {
     let highlight_style = base_style
-        .fg(Theme::ACCENT)
+        .fg(Theme::accent())
         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
 
     let mut spans = Vec::new();
@@ -382,11 +382,11 @@ fn render_session_section(
             Line::from(""),
             Line::from(Span::styled(
                 "No sessions yet",
-                Style::default().fg(Theme::TEXT_MUTED),
+                Style::default().fg(Theme::text_muted()),
             )),
             Line::from(Span::styled(
                 "Press Ctrl+N to create one",
-                Style::default().fg(Theme::TEXT_MUTED),
+                Style::default().fg(Theme::text_muted()),
             )),
         ])
         .block(block)
@@ -403,7 +403,6 @@ fn render_session_section(
         .enumerate()
         .map(|(i, info)| {
             let is_active = i == active_index;
-            let prefix = if is_active { "\u{25b8}" } else { " " };
             let is_admin = info.is_admin;
 
             // Determine if this session is dimmed (search active + no match).
@@ -412,18 +411,20 @@ fn render_session_section(
 
             let status_text = format_status_with_elapsed(info.status, elapsed_ms.get(i).copied());
             let name_style = if is_dimmed {
-                Style::default().fg(Theme::TEXT_MUTED)
+                Style::default().fg(Theme::text_muted())
             } else if is_active {
                 Theme::selected_item()
             } else {
                 Theme::normal_item()
             };
 
-            // Build prefix with optional admin badge
+            // Build prefix with optional admin badge. The active row is
+            // signalled by the list's highlight background, so no extra
+            // pointer glyph is needed.
             let prefix_str = if is_admin {
-                format!("{prefix} \u{2699} {} ", info.status.icon())
+                format!(" \u{2699} {} ", info.status.icon())
             } else {
-                format!("{prefix} {} ", info.status.icon())
+                format!(" {} ", info.status.icon())
             };
             let prefix_width = prefix_str.chars().count();
             let name_len = info.name.chars().count();
@@ -436,13 +437,13 @@ fn render_session_section(
             };
 
             let status_style = if is_dimmed {
-                Style::default().fg(Theme::TEXT_MUTED)
+                Style::default().fg(Theme::text_muted())
             } else {
                 Style::default().fg(super::status_color(info.status))
             };
 
             let prefix_style = if is_admin && !is_dimmed {
-                Style::default().fg(Theme::ADMIN_BADGE)
+                Style::default().fg(Theme::admin_badge())
             } else {
                 status_style
             };
@@ -464,9 +465,9 @@ fn render_session_section(
             let mut item_lines = vec![line1];
 
             if is_dimmed {
-                let dimmed = Style::default().fg(Theme::TEXT_MUTED);
+                let dimmed = Style::default().fg(Theme::text_muted());
                 item_lines.push(Line::from(vec![Span::styled(
-                    format!("    {}", info.role),
+                    format!("   {}", info.role),
                     dimmed,
                 )]));
                 let entries = build_repo_entries(info);
@@ -474,7 +475,7 @@ fn render_session_section(
                     let text = format_repo_entries_plain(&entries);
                     if !text.is_empty() {
                         item_lines.push(Line::from(vec![Span::styled(
-                            format!("    {text}"),
+                            format!("   {text}"),
                             dimmed,
                         )]));
                     }
@@ -482,12 +483,12 @@ fn render_session_section(
             } else if info.status == crate::session::SessionStatus::Provisioning {
                 let step_text = info.provisioning_step.as_deref().unwrap_or("Starting...");
                 item_lines.push(Line::from(vec![
-                    Span::styled("    \u{27f3} ", Style::default().fg(Theme::ACCENT)),
-                    Span::styled(step_text, Style::default().fg(Theme::ACCENT)),
+                    Span::styled("   \u{27f3} ", Style::default().fg(Theme::accent())),
+                    Span::styled(step_text, Style::default().fg(Theme::accent())),
                 ]));
             } else {
-                let role_style = Style::default().fg(Theme::ROLE_NAME);
-                let mut line2_spans = vec![Span::raw("    ")];
+                let role_style = Style::default().fg(Theme::role_name());
+                let mut line2_spans = vec![Span::raw("   ")];
                 append_name_spans(
                     &mut line2_spans,
                     &info.role,
@@ -497,27 +498,27 @@ fn render_session_section(
                 if info.vm_id.is_some() {
                     line2_spans.push(Span::styled(
                         " \u{00b7} ",
-                        Style::default().fg(Theme::TEXT_MUTED),
+                        Style::default().fg(Theme::text_muted()),
                     ));
-                    line2_spans.push(Span::styled("VM", Style::default().fg(Theme::ACCENT)));
+                    line2_spans.push(Span::styled("VM", Style::default().fg(Theme::accent())));
                 } else if info.container_id.is_some() {
                     line2_spans.push(Span::styled(
                         " \u{00b7} ",
-                        Style::default().fg(Theme::TEXT_MUTED),
+                        Style::default().fg(Theme::text_muted()),
                     ));
                     line2_spans.push(Span::styled(
                         "Container",
-                        Style::default().fg(Theme::ACCENT),
+                        Style::default().fg(Theme::accent()),
                     ));
                 }
                 item_lines.push(Line::from(line2_spans));
 
                 let entries = build_repo_entries(info);
                 if !entries.is_empty() {
-                    let repo_style = Style::default().fg(Theme::TEXT_PRIMARY);
-                    let branch_style = Style::default().fg(Theme::BRANCH_NAME);
-                    let muted = Style::default().fg(Theme::TEXT_MUTED);
-                    let mut line3_spans: Vec<Span<'static>> = vec![Span::raw("    ")];
+                    let repo_style = Style::default().fg(Theme::text_primary());
+                    let branch_style = Style::default().fg(Theme::branch_name());
+                    let muted = Style::default().fg(Theme::text_muted());
+                    let mut line3_spans: Vec<Span<'static>> = vec![Span::raw("   ")];
 
                     // Build the plain text for search matching.
                     let plain = format_repo_entries_plain(&entries);
@@ -562,7 +563,7 @@ fn render_session_section(
                 let divider_width = inner_width.max(1);
                 let divider = Line::from(Span::styled(
                     "\u{2500}".repeat(divider_width),
-                    Style::default().fg(Theme::TEXT_MUTED),
+                    Style::default().fg(Theme::text_muted()),
                 ));
                 item_lines.insert(0, divider);
             }
@@ -573,7 +574,8 @@ fn render_session_section(
 
     let list = List::new(items).block(block).highlight_style(
         Style::default()
-            .bg(Color::DarkGray)
+            .bg(Theme::selection_bg())
+            .fg(Theme::selection_fg())
             .add_modifier(Modifier::BOLD),
     );
 
@@ -684,7 +686,7 @@ mod tests {
 
     #[test]
     fn highlighted_spans_basic() {
-        let style = Style::default().fg(Theme::TEXT_PRIMARY);
+        let style = Style::default().fg(Theme::text_primary());
         let spans = build_highlighted_spans("foo-bar", &[0, 4], style);
         // Should produce: "f" (highlighted), "oo-" (normal), "b" (highlighted), "ar" (normal)
         assert_eq!(spans.len(), 4);
@@ -696,7 +698,7 @@ mod tests {
 
     #[test]
     fn highlighted_spans_empty_positions() {
-        let style = Style::default().fg(Theme::TEXT_PRIMARY);
+        let style = Style::default().fg(Theme::text_primary());
         let spans = build_highlighted_spans("hello", &[], style);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content, "hello");
@@ -704,7 +706,7 @@ mod tests {
 
     #[test]
     fn highlighted_spans_all_chars() {
-        let style = Style::default().fg(Theme::TEXT_PRIMARY);
+        let style = Style::default().fg(Theme::text_primary());
         let spans = build_highlighted_spans("abc", &[0, 1, 2], style);
         // All chars highlighted, no normal spans between them.
         assert_eq!(spans.len(), 3);
@@ -717,7 +719,7 @@ mod tests {
 
     #[test]
     fn append_name_spans_no_match_positions() {
-        let style = Style::default().fg(Theme::TEXT_PRIMARY);
+        let style = Style::default().fg(Theme::text_primary());
         let mut spans = Vec::new();
         append_name_spans(&mut spans, "hello", None, style);
         assert_eq!(spans.len(), 1);
@@ -726,7 +728,7 @@ mod tests {
 
     #[test]
     fn append_name_spans_empty_positions() {
-        let style = Style::default().fg(Theme::TEXT_PRIMARY);
+        let style = Style::default().fg(Theme::text_primary());
         let mut spans = Vec::new();
         append_name_spans(&mut spans, "hello", Some(&[]), style);
         assert_eq!(spans.len(), 1);
@@ -735,7 +737,7 @@ mod tests {
 
     #[test]
     fn append_name_spans_with_highlights() {
-        let style = Style::default().fg(Theme::TEXT_PRIMARY);
+        let style = Style::default().fg(Theme::text_primary());
         let mut spans = vec![Span::raw("prefix ")];
         append_name_spans(&mut spans, "foo-bar", Some(&[0, 4]), style);
         // prefix + "f" (highlighted) + "oo-" (normal) + "b" (highlighted) + "ar" (normal)
