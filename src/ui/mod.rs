@@ -4,6 +4,7 @@ pub mod automations_list_modal;
 pub mod automations_panel;
 pub mod branch_selector_modal;
 pub mod file_viewer;
+pub mod host_picker_modal;
 pub mod info_panel;
 pub mod layout;
 pub mod links;
