@@ -1,5 +1,6 @@
 pub mod agent_def;
 pub mod automation;
+pub mod host_def;
 pub mod keybindings;
 pub mod theme_config;
 
@@ -8,6 +9,7 @@ pub use automation::{
     parse_hhmm, preset_to_cron, Automation, AutomationAction, AutomationRun, AutomationRunStatus,
     AutomationSchedule, SchedulePreset,
 };
+pub use host_def::{HostDef, HostRegistry, SSH_BACKEND_PREFIX};
 pub use keybindings::{Action, Category, KeyBindings, KeyChord};
 pub use theme_config::{ThemePalette, ThemePreset};
 
