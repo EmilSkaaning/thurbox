@@ -43,3 +43,7 @@ node_modules/
 
 # Local orchestrator/agent worker workspaces (stray nested checkouts)
 thurbox/
+
+# SSH integration-test fixture (generated keypair + staged build-context key)
+scripts/test-ssh/.keys/
+scripts/test-ssh/authorized_keys

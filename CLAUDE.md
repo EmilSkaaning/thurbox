@@ -39,6 +39,24 @@ cargo test test_name                 # Run single test via cargo test
 bats scripts/install.bats            # Test install script (requires bats-core)
 ```
 
+### Remote SSH integration test
+
+The remote-session path (git-over-ssh + tmux-over-ssh control mode) has an
+**opt-in** end-to-end test, skipped by default so `cargo nextest run --all`
+stays hermetic. It runs against a throwaway sshd+tmux+git container under
+`scripts/test-ssh/`:
+
+```bash
+./scripts/test-ssh/up.sh                                   # build + start sshd on 127.0.0.1:2222
+THURBOX_SSH_IT=1 cargo nextest run --test ssh_integration  # gate: only runs when set
+./scripts/test-ssh/down.sh                                 # tear down
+```
+
+The test (`tests/ssh_integration.rs`) creates a worktree over ssh, spawns a real
+tmux session via `TmuxBackend::from_host`, and asserts a marker appears in the
+live vt100 capture. See `scripts/test-ssh/README.md` (env vars also let it point
+at any reachable host instead of the container).
+
 ## Installation Script
 
 **Location:** `scripts/install.sh`

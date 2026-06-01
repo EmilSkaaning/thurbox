@@ -1,0 +1,17 @@
+# Local SSH target for thurbox's remote-session integration test.
+#
+#   ./scripts/test-ssh/up.sh     # generate key, build, start, print exports
+#   THURBOX_SSH_IT=1 cargo nextest run --test ssh_integration
+#   ./scripts/test-ssh/down.sh   # stop + remove
+#
+# Bound to 127.0.0.1 only — this is a throwaway test fixture, not a server.
+services:
+  sshd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: thurbox-test-sshd
+    container_name: thurbox-test-sshd
+    ports:
+      - "127.0.0.1:${THURBOX_SSH_PORT:-2222}:22"
+    # No restart policy: this exists only for the duration of a test run.
