@@ -115,93 +115,13 @@ fn parse_agent_metrics(raw: &serde_json::Value) -> crate::session::AgentMetrics 
     }
 }
 
-pub use modals::{AutomationActionKind, AutomationField, TaskActionKind, TaskField, TriggerKind};
+pub use modals::{
+    AutomationActionKind, AutomationField, TaskActionKind, TaskField, TextInput, TriggerKind,
+};
 
 /// Ticks (~10 ms each) to wait after spawning a session before pasting its
 /// automation prompt, giving the agent CLI time to come up (~3 s).
 const AGENT_BOOT_DELAY_TICKS: u64 = 300;
-
-pub(crate) struct TextInput {
-    pub(crate) buffer: String,
-    pub(crate) cursor: usize,
-}
-
-#[allow(dead_code)] // some editing methods only exercised by tests
-impl TextInput {
-    fn new() -> Self {
-        Self {
-            buffer: String::new(),
-            cursor: 0,
-        }
-    }
-
-    fn insert(&mut self, c: char) {
-        let byte_pos = self.byte_offset();
-        self.buffer.insert(byte_pos, c);
-        self.cursor += 1;
-    }
-
-    fn backspace(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
-            let byte_pos = self.byte_offset();
-            self.buffer.remove(byte_pos);
-        }
-    }
-
-    fn delete(&mut self) {
-        let byte_pos = self.byte_offset();
-        if byte_pos < self.buffer.len() {
-            self.buffer.remove(byte_pos);
-        }
-    }
-
-    fn move_left(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
-    }
-
-    fn move_right(&mut self) {
-        let char_count = self.buffer.chars().count();
-        if self.cursor < char_count {
-            self.cursor += 1;
-        }
-    }
-
-    fn home(&mut self) {
-        self.cursor = 0;
-    }
-
-    fn end(&mut self) {
-        self.cursor = self.buffer.chars().count();
-    }
-
-    fn clear(&mut self) {
-        self.buffer.clear();
-        self.cursor = 0;
-    }
-
-    fn set(&mut self, value: &str) {
-        self.buffer = value.to_string();
-        self.cursor = value.chars().count();
-    }
-
-    fn value(&self) -> &str {
-        &self.buffer
-    }
-
-    fn cursor_pos(&self) -> usize {
-        self.cursor
-    }
-
-    /// Convert char-based cursor position to byte offset.
-    fn byte_offset(&self) -> usize {
-        self.buffer
-            .char_indices()
-            .nth(self.cursor)
-            .map(|(i, _)| i)
-            .unwrap_or(self.buffer.len())
-    }
-}
 
 pub enum AppMessage {
     KeyPress(KeyCode, KeyModifiers),
@@ -883,7 +803,6 @@ impl App {
         self.set_status(StatusLevel::Success, format!("Restored '{session_name}'"));
     }
 
-    /// Open the restore deleted sessions modal (Ctrl+U).
     /// Open the theme picker, pre-selecting the currently active preset.
     fn open_theme_picker(&mut self) {
         let active = self.db.get_active_theme().ok().flatten();
