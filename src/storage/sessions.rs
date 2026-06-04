@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use rusqlite::params;
+use rusqlite::{params, ToSql};
 
 use crate::session::SessionId;
 use crate::sync::{current_time_millis, SharedSession, SharedWorktree};
@@ -156,10 +156,14 @@ impl Database {
 
     /// List all active (non-deleted) sessions.
     pub fn list_active_sessions(&self) -> rusqlite::Result<Vec<SharedSession>> {
-        self.query_sessions("s.deleted_at IS NULL")
+        self.query_sessions("s.deleted_at IS NULL", &[])
     }
 
-    fn query_sessions(&self, condition: &str) -> rusqlite::Result<Vec<SharedSession>> {
+    fn query_sessions(
+        &self,
+        condition: &str,
+        bind: &[&dyn ToSql],
+    ) -> rusqlite::Result<Vec<SharedSession>> {
         let sql = format!(
             "SELECT s.id, s.name, s.agent, s.backend_id, s.backend_type, \
              s.agent_session_id, s.cwd, s.additional_dirs, s.shell_backend_id, \
@@ -171,7 +175,7 @@ impl Database {
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map([], row_to_shared_session)?;
+        let rows = stmt.query_map(bind, row_to_shared_session)?;
 
         // Collect rows, merging multiple worktree rows into the same session
         let mut sessions: Vec<SharedSession> = Vec::new();
@@ -226,7 +230,8 @@ impl Database {
 
     /// Get a single active (non-deleted) session by its ID.
     pub fn get_session_by_id(&self, id: SessionId) -> rusqlite::Result<Option<SharedSession>> {
-        let sessions = self.query_sessions(&format!("s.deleted_at IS NULL AND s.id = '{id}'"))?;
+        let sessions =
+            self.query_sessions("s.deleted_at IS NULL AND s.id = ?1", &[&id.to_string()])?;
         Ok(sessions.into_iter().next())
     }
 
@@ -244,7 +249,7 @@ impl Database {
 
     /// List all soft-deleted sessions, most recently deleted first.
     pub fn list_deleted_sessions(&self) -> rusqlite::Result<Vec<DeletedSessionInfo>> {
-        self.query_deleted_sessions("s.deleted_at IS NOT NULL")
+        self.query_deleted_sessions("s.deleted_at IS NOT NULL", &[])
     }
 
     /// Get a single soft-deleted session by its ID.
@@ -252,12 +257,16 @@ impl Database {
         &self,
         id: SessionId,
     ) -> rusqlite::Result<Option<DeletedSessionInfo>> {
-        let sessions =
-            self.query_deleted_sessions(&format!("s.deleted_at IS NOT NULL AND s.id = '{id}'"))?;
+        let sessions = self
+            .query_deleted_sessions("s.deleted_at IS NOT NULL AND s.id = ?1", &[&id.to_string()])?;
         Ok(sessions.into_iter().next())
     }
 
-    fn query_deleted_sessions(&self, condition: &str) -> rusqlite::Result<Vec<DeletedSessionInfo>> {
+    fn query_deleted_sessions(
+        &self,
+        condition: &str,
+        bind: &[&dyn ToSql],
+    ) -> rusqlite::Result<Vec<DeletedSessionInfo>> {
         let sql = format!(
             "SELECT s.id, s.name, s.agent, s.agent_session_id, \
              s.cwd, s.deleted_at, \
@@ -269,7 +278,7 @@ impl Database {
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(bind, |row| {
             let id_str: String = row.get(0)?;
             let cwd: Option<String> = row.get(4)?;
             let deleted_at: i64 = row.get(5)?;

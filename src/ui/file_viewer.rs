@@ -330,7 +330,7 @@ impl FileViewerState {
     fn flatten(&self) -> Vec<FlatRow> {
         let mut out = Vec::new();
         for (i, root) in self.roots.iter().enumerate() {
-            push_flat(root, vec![i], 0, &mut out, true);
+            push_flat(root, &[i], 0, &mut out, true);
         }
         out
     }
@@ -406,7 +406,7 @@ impl Default for FileViewerState {
 
 fn push_flat(
     node: &FileNode,
-    index_path: Vec<usize>,
+    index_path: &[usize],
     depth: usize,
     out: &mut Vec<FlatRow>,
     is_root: bool,
@@ -421,7 +421,7 @@ fn push_flat(
             .unwrap_or_else(|| node.path.to_string_lossy().into_owned())
     };
     out.push(FlatRow {
-        index_path: index_path.clone(),
+        index_path: index_path.to_vec(),
         depth,
         label,
         is_dir: node.is_dir,
@@ -430,9 +430,9 @@ fn push_flat(
     if node.is_dir && node.expanded {
         if let Some(children) = &node.children {
             for (i, child) in children.iter().enumerate() {
-                let mut ip = index_path.clone();
+                let mut ip = index_path.to_vec();
                 ip.push(i);
-                push_flat(child, ip, depth + 1, out, false);
+                push_flat(child, &ip, depth + 1, out, false);
             }
         }
     }

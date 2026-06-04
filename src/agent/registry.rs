@@ -43,7 +43,9 @@ impl BackendRegistry {
 
     /// Return the default backend.
     pub fn default_backend(&self) -> &Arc<dyn SessionBackend> {
-        self.backends.get(&self.default_name).unwrap()
+        self.backends
+            .get(&self.default_name)
+            .expect("default backend is always registered in new()")
     }
 
     /// Check whether a backend with the given name is registered.
