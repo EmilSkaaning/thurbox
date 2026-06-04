@@ -3253,6 +3253,15 @@ impl App {
         query_lc: &str,
         with_content: bool,
     ) -> Vec<search::GlobalSearchResult> {
+        let mut sessions = self.search_sessions_meta(query);
+        if with_content {
+            self.search_sessions_content(query_lc, &mut sessions);
+        }
+        sessions
+    }
+
+    /// Session metadata matches (name / agent / branch) via fuzzy.
+    fn search_sessions_meta(&self, query: &str) -> Vec<search::GlobalSearchResult> {
         use search::{GlobalSearchResult, SearchKind, SearchTarget, MAX_PER_GROUP};
         let mut sessions: Vec<GlobalSearchResult> = Vec::new();
         for (i, session) in self.sessions.iter().enumerate() {
@@ -3273,10 +3282,17 @@ impl App {
                 });
             }
         }
-        if !with_content {
-            return sessions;
-        }
-        // Buffer content — skip sessions that already matched on metadata.
+        sessions
+    }
+
+    /// Append buffer-content matches to `sessions`, skipping any session that
+    /// already matched on metadata (so a session never yields two rows).
+    fn search_sessions_content(
+        &self,
+        query_lc: &str,
+        sessions: &mut Vec<search::GlobalSearchResult>,
+    ) {
+        use search::{GlobalSearchResult, SearchKind, SearchTarget, MAX_PER_GROUP};
         let already: std::collections::HashSet<usize> = sessions
             .iter()
             .filter_map(|r| match r.target {
@@ -3300,7 +3316,6 @@ impl App {
                 });
             }
         }
-        sessions
     }
 
     /// Task results: fuzzy title, falling back to a fuzzy description match with
