@@ -4,7 +4,7 @@
 //! `agents.toml` is launched through this single provider, which maps the
 //! session's resume/fork/session ids onto the definition's argument templates.
 
-use crate::session::{AgentDef, SessionConfig};
+use crate::session::{AgentDef, LaunchArgs, SessionConfig};
 
 use super::provider::AgentProvider;
 
@@ -31,11 +31,13 @@ impl AgentProvider for GenericProvider {
     }
 
     fn build_args(&self, config: &SessionConfig) -> Vec<String> {
-        self.def.build_args(
-            config.resume_session_id.as_deref(),
-            config.fork_session_id.as_deref(),
-            config.agent_session_id.as_deref(),
-        )
+        self.def.build_args(&LaunchArgs {
+            resume_id: config.resume_session_id.as_deref(),
+            fork_id: config.fork_session_id.as_deref(),
+            new_session_id: config.agent_session_id.as_deref(),
+            system_prompt: config.system_prompt.as_deref(),
+            extra_args: &config.extra_args,
+        })
     }
 }
 
@@ -70,5 +72,31 @@ mod tests {
         };
         let args = provider.build_args(&config);
         assert_eq!(args, vec!["--session-id", "new-id"]);
+    }
+
+    #[test]
+    fn provider_threads_system_prompt_and_extra_args() {
+        let mut def = builtin_registry().get("claude").unwrap().clone();
+        def.prompt_args = vec!["--append-system-prompt".into(), "{prompt}".into()];
+        let provider = GenericProvider::new(def);
+
+        let config = SessionConfig {
+            agent_session_id: Some("id-9".into()),
+            system_prompt: Some("be brief".into()),
+            extra_args: vec!["--permission-mode".into(), "plan".into()],
+            ..SessionConfig::default()
+        };
+        let args = provider.build_args(&config);
+        assert_eq!(
+            args,
+            vec![
+                "--session-id",
+                "id-9",
+                "--append-system-prompt",
+                "be brief",
+                "--permission-mode",
+                "plan"
+            ]
+        );
     }
 }

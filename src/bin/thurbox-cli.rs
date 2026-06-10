@@ -39,9 +39,12 @@ fn main() {
         }
     };
 
-    if let Err(e) = thurbox::cli::run(cli, &db) {
-        let msg = serde_json::json!({ "error": e }).to_string();
-        eprintln!("{msg}");
-        std::process::exit(1);
+    match thurbox::cli::run(cli, &db) {
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            let msg = serde_json::json!({ "error": e }).to_string();
+            eprintln!("{msg}");
+            std::process::exit(1);
+        }
     }
 }

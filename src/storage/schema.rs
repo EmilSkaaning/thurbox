@@ -2,10 +2,8 @@ use rusqlite::Connection;
 
 /// Current schema version. Incremented when schema changes.
 ///
-/// v29 is reserved by the in-flight `improve-agent-thurbox-cli` branch
-/// (`session_labels` + `session_spawn_config`); this branch takes v30.
-/// Gaps in the step table are fine (there is no v18 step either).
-pub const SCHEMA_VERSION: u32 = 30;
+/// (Gaps in the step table are fine — there is no v18 or v29 step.)
+pub const SCHEMA_VERSION: u32 = 31;
 
 /// A single migration step: applied when the stored version is below `target`.
 type MigrationStep = (u32, fn(&Connection) -> rusqlite::Result<()>);
@@ -136,6 +134,23 @@ pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_tasks_status
             ON tasks(status) WHERE deleted_at IS NULL;
+
+        CREATE TABLE IF NOT EXISTS session_labels (
+            session_id TEXT NOT NULL REFERENCES sessions(id),
+            key        TEXT NOT NULL,
+            value      TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (session_id, key)
+        );
+
+        CREATE TABLE IF NOT EXISTS session_spawn_config (
+            session_id    TEXT PRIMARY KEY REFERENCES sessions(id),
+            env           TEXT NOT NULL DEFAULT '',
+            extra_args    TEXT NOT NULL DEFAULT '',
+            system_prompt TEXT,
+            created_at    INTEGER NOT NULL,
+            updated_at    INTEGER NOT NULL
+        );
         ",
     )?;
 
@@ -196,6 +211,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         (27, migrate_v27_repo_parent_bookmarks),
         (28, migrate_v28_run_related_session),
         (30, migrate_v30_parent_session_id),
+        (31, migrate_v31_orchestration),
     ];
 
     for &(target, step) in steps {
@@ -850,14 +866,40 @@ fn migrate_v28_run_related_session(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 /// v29 → v30: add a nullable `parent_session_id` column to `sessions`
-/// (lead/worker linkage for orchestration; v29 belongs to another branch).
+/// (lead/worker linkage for orchestration; v29 was reserved by a branch
+/// that ultimately landed as v31).
 ///
-/// Fresh v30 databases already have the column from `initialize` and skip this
+/// Fresh databases already have the column from `initialize` and skip this
 /// step; existing databases get it via the ALTER. `let _` swallows the
 /// "duplicate column" error so a re-run is a no-op.
 fn migrate_v30_parent_session_id(conn: &Connection) -> rusqlite::Result<()> {
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT", []);
     Ok(())
+}
+
+/// v30 → v31: orchestration support — free-form session labels plus the
+/// per-spawn config (env / extra args / system prompt) that restart must
+/// reproduce. Side tables rather than `sessions` columns so the TUI's
+/// whole-row session upsert can't wipe them.
+fn migrate_v31_orchestration(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_labels (
+            session_id TEXT NOT NULL REFERENCES sessions(id),
+            key        TEXT NOT NULL,
+            value      TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (session_id, key)
+        );
+
+        CREATE TABLE IF NOT EXISTS session_spawn_config (
+            session_id    TEXT PRIMARY KEY REFERENCES sessions(id),
+            env           TEXT NOT NULL DEFAULT '',
+            extra_args    TEXT NOT NULL DEFAULT '',
+            system_prompt TEXT,
+            created_at    INTEGER NOT NULL,
+            updated_at    INTEGER NOT NULL
+        );",
+    )
 }
 
 #[cfg(test)]
@@ -1137,6 +1179,41 @@ mod tests {
             )
             .unwrap();
         assert!(parent.is_none());
+
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+    }
+
+    #[test]
+    fn migrate_from_v30_adds_orchestration_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Minimal v30 state: metadata only; the v31 step creates both tables.
+        conn.execute_batch(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO metadata (key, value) VALUES ('schema_version', '30');
+             CREATE TABLE sessions (id TEXT PRIMARY KEY);",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        for table in ["session_labels", "session_spawn_config"] {
+            let exists: bool = conn
+                .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1")
+                .unwrap()
+                .exists([table])
+                .unwrap();
+            assert!(exists, "{table} table should be created at v31");
+        }
+
+        // Re-running is idempotent (CREATE TABLE IF NOT EXISTS).
+        migrate_v31_orchestration(&conn).unwrap();
 
         let version: String = conn
             .query_row(

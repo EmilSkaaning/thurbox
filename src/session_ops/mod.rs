@@ -17,6 +17,11 @@ use std::collections::HashMap;
 
 use crate::session::SessionConfig;
 
+/// Seconds to let a freshly spawned agent CLI boot before an initial prompt
+/// is typed into its pane. Shared by `session create --prompt` and the
+/// automation/task spawn paths so all headless deliveries behave the same.
+pub(crate) const AGENT_BOOT_DELAY_SECS: u64 = 3;
+
 /// Decide whether to pass the agent's resume group vs starting fresh when
 /// (re)spawning. Returns `Some(id.clone())` only when a Claude transcript for
 /// that id already exists on disk under `CLAUDE_CONFIG_DIR`/`~/.claude`.
@@ -115,9 +120,116 @@ fn inject_thurbox_env(config: &mut SessionConfig, agent_session_id: &str) {
     }
 }
 
+/// Merge the three environment layers into `config.env`, lowest precedence
+/// first: agent-level defaults from `agents.toml`, then per-spawn `--env`
+/// overrides, then the thurbox-internal variables (which stay authoritative).
+///
+/// Shared by headless spawn and restart so both produce the same process env.
+pub(crate) fn merge_spawn_env(
+    config: &mut SessionConfig,
+    def: &crate::session::AgentDef,
+    spawn_env: &[(String, String)],
+    agent_session_id: &str,
+) {
+    for (k, v) in &def.env {
+        // `or_insert`: values already on the config (e.g. set by a TUI flow)
+        // outrank agent-level defaults, same as `App::build_spawn_inputs`.
+        config.env.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+    for (k, v) in spawn_env {
+        config.env.insert(k.clone(), v.clone());
+    }
+    inject_thurbox_env(config, agent_session_id);
+}
+
+/// The directory a headless session's agent process launches in: the primary
+/// cwd directly, or the multi-repo symlink workspace when the session spans
+/// several member dirs (worktree checkouts first, then non-duplicate
+/// additional dirs — mirroring the TUI's `session_member_dirs` ordering).
+///
+/// Shared by headless spawn and restart so both land in the same workspace.
+pub(crate) fn resolve_headless_process_cwd(
+    agent_session_id: &str,
+    primary_cwd: Option<std::path::PathBuf>,
+    worktrees: &[crate::sync::SharedWorktree],
+    additional_dirs: &[std::path::PathBuf],
+) -> Option<std::path::PathBuf> {
+    let mut members: Vec<(Option<String>, std::path::PathBuf)> = Vec::new();
+    if worktrees.is_empty() {
+        if let Some(cwd) = &primary_cwd {
+            members.push((crate::git::repo_display_name(cwd), cwd.clone()));
+        }
+    } else {
+        for wt in worktrees {
+            members.push((
+                crate::git::repo_display_name(&wt.repo_path),
+                wt.worktree_path.clone(),
+            ));
+        }
+    }
+    for dir in additional_dirs {
+        if !members.iter().any(|(_, d)| d == dir) {
+            members.push((crate::git::repo_display_name(dir), dir.clone()));
+        }
+    }
+    crate::workspace::resolve_process_cwd(Some(agent_session_id), primary_cwd, &members)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_spawn_env_layers_def_then_spawn_then_thurbox() {
+        let def = crate::session::AgentDef {
+            name: "x".into(),
+            command: "x".into(),
+            env: [
+                ("FROM_DEF".to_string(), "def".to_string()),
+                ("SHARED".to_string(), "def".to_string()),
+                ("THURBOX_SESSION_ID".to_string(), "spoofed".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            ..crate::session::AgentDef::default()
+        };
+        let spawn_env = vec![("SHARED".to_string(), "spawn".to_string())];
+
+        let mut config = SessionConfig::default();
+        config.env.insert("PRESET".into(), "config".into());
+        merge_spawn_env(&mut config, &def, &spawn_env, "sid-1");
+
+        // Agent defaults fill gaps but never override pre-existing values…
+        assert_eq!(config.env.get("FROM_DEF").map(String::as_str), Some("def"));
+        assert_eq!(config.env.get("PRESET").map(String::as_str), Some("config"));
+        // …per-spawn values beat agent defaults…
+        assert_eq!(config.env.get("SHARED").map(String::as_str), Some("spawn"));
+        // …and thurbox internals beat everything.
+        assert_eq!(
+            config.env.get("THURBOX_SESSION_ID").map(String::as_str),
+            Some("sid-1")
+        );
+    }
+
+    #[test]
+    fn headless_process_cwd_dedups_members_and_keeps_primary_for_single() {
+        use std::path::PathBuf;
+        let wt = crate::sync::SharedWorktree {
+            repo_path: PathBuf::from("/src/repo"),
+            worktree_path: PathBuf::from("/src/repo/worktrees/feat"),
+            branch: "feat".into(),
+        };
+        // The additional dir duplicates the worktree checkout: after dedup
+        // only one member remains, so the primary cwd is used directly (no
+        // workspace is built, no filesystem touched).
+        let out = resolve_headless_process_cwd(
+            "sid-1",
+            Some(wt.worktree_path.clone()),
+            std::slice::from_ref(&wt),
+            std::slice::from_ref(&wt.worktree_path),
+        );
+        assert_eq!(out, Some(wt.worktree_path));
+    }
 
     #[test]
     fn resume_id_is_none_when_no_transcript() {

@@ -977,15 +977,27 @@ impl App {
         // or the (idempotently rebuilt) symlink workspace for a multi-repo one.
         let cwd = session_process_cwd(&session.info);
 
+        // CLI-spawned sessions may carry per-spawn customizations
+        // (`--env`/`--extra-arg`/`--system-prompt`); restarting from the TUI
+        // must not drop them. TUI-created sessions have no row.
+        let spawn_cfg = self
+            .db
+            .get_session_spawn_config(session.info.id)
+            .unwrap_or_default()
+            .unwrap_or_default();
+
         let mut config = SessionConfig {
             resume_session_id: None,
             agent_session_id: Some(agent_session_id.clone()),
             cwd,
             agent,
             fork_session_id: None,
+            extra_args: spawn_cfg.extra_args.clone(),
+            system_prompt: spawn_cfg.system_prompt.clone(),
             ..SessionConfig::default()
         };
         let def = self.agent_def_for(&config.agent);
+        crate::session_ops::merge_spawn_env(&mut config, &def, &spawn_cfg.env, &agent_session_id);
         config.resume_session_id =
             crate::session_ops::resume_trigger_for(&def, &agent_session_id, &config.env);
 
@@ -1933,6 +1945,14 @@ impl App {
         }
         if config.agent_session_id.is_none() {
             config.agent_session_id = Some(uuid::Uuid::new_v4().to_string());
+        }
+
+        // Agent-level env defaults from agents.toml; anything already set on
+        // the config (per-spawn values) wins over them.
+        if let Some(def) = self.agents.get(&config.agent) {
+            for (k, v) in &def.env {
+                config.env.entry(k.clone()).or_insert_with(|| v.clone());
+            }
         }
 
         // Inject statusline env vars so the metrics script knows which session this is.
@@ -4635,13 +4655,10 @@ fn session_member_dirs(
     members
 }
 
-/// The directory the agent process should launch in.
-///
-/// For a single-member session that's the member itself (`primary_cwd`). For a
-/// multi-member session it is a per-session **symlink workspace** (built
-/// idempotently from the members) so the agent sees every repo as a
-/// subdirectory — agent-neutral, needing no per-CLI flag. On any failure it
-/// falls back to `primary_cwd`.
+/// The directory the agent process should launch in: the multi-repo symlink
+/// workspace, or `primary_cwd` when single-member. Thin adapter over
+/// [`crate::workspace::resolve_process_cwd`] feeding it the canonical
+/// [`session_member_dirs`] member set (repo display names included).
 fn resolve_process_cwd(
     agent_session_id: Option<&str>,
     primary_cwd: Option<PathBuf>,
@@ -4649,30 +4666,7 @@ fn resolve_process_cwd(
     additional_dirs: &[PathBuf],
 ) -> Option<PathBuf> {
     let members = session_member_dirs(primary_cwd.as_deref(), worktrees, additional_dirs);
-    if members.len() < 2 {
-        return primary_cwd;
-    }
-    let Some(id) = agent_session_id else {
-        return primary_cwd;
-    };
-
-    let pairs: Vec<(String, PathBuf)> = members
-        .into_iter()
-        .map(|(name, dir)| {
-            let label = name
-                .or_else(|| dir.file_name().and_then(|s| s.to_str()).map(String::from))
-                .unwrap_or_else(|| "repo".to_string());
-            (label, dir)
-        })
-        .collect();
-
-    match crate::workspace::ensure_workspace(id, &pairs) {
-        Ok(ws) => Some(ws),
-        Err(e) => {
-            error!("Failed to build multi-repo workspace: {e}");
-            primary_cwd
-        }
-    }
+    crate::workspace::resolve_process_cwd(agent_session_id, primary_cwd, &members)
 }
 
 /// The launch cwd for an *existing* session, derived from its persisted

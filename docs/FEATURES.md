@@ -193,12 +193,22 @@ Each definition (`session::AgentDef`) carries:
 - `resume_latest` — when true, restart resumes the agent's most
   recent session in the launch directory via **id-less** flags
   (see below).
+- `env` — environment variables injected into every session of this
+  agent (lowest precedence: per-spawn `--env` and the
+  thurbox-internal `THURBOX_*` variables override them).
+- `prompt_args` — emitted only when a system prompt is supplied at
+  spawn time (`thurbox-cli session create --system-prompt …`), with
+  `{prompt}` substituted (e.g.
+  `["--append-system-prompt", "{prompt}"]` for claude). Agents
+  without this template reject `--system-prompt` with an error.
 
 `agent::GenericProvider` builds the launch arguments by appending
 each group **only when its driving value is present**, substituting
-`{id}` token-by-token. Selection precedence is fork > resume >
-new-session id; static `args` follow. A group with no value is
-simply omitted — no unresolved-placeholder heuristics.
+`{id}` token-by-token. Emit order: session-selection group (fork >
+resume > new-session id), then `prompt_args`, then static `args`,
+then any per-spawn `--extra-arg` values (last, so they can override
+baked-in flags). A group with no value is simply omitted — no
+unresolved-placeholder heuristics.
 
 Only `claude` accepts the thurbox-generated id at creation
 (`--session-id {id}`), so only it resumes/forks by that exact id.
@@ -427,6 +437,92 @@ UUIDs are collision-free without coordination, simple to generate,
 and usable as map keys. Sequential IDs would work too, but UUIDs
 prevent bugs where an old session ID accidentally refers to a new
 session after recycling.
+
+---
+
+## Headless orchestration (`thurbox-cli session`)
+
+`thurbox-cli` exposes the primitives a supervisor script needs to
+fan work out across worker sessions without the TUI: spawn fully
+customized, tag, wait, harvest a structured result, clean up.
+
+### Spawn-time customization
+
+`session create` accepts, beyond
+`--name/--repo-path/--agent/--worktree-branch/--base-branch/--host`:
+
+- `--prompt <text>` — initial prompt typed into the pane after a
+  ~3 s boot delay (the automation-spawn mechanism). **One-shot**: it
+  is not persisted, so a restart never re-sends it. Delivery is
+  fire-and-forget — `session wait` before sending follow-ups. If
+  scheduling fails the create still succeeds and reports a
+  `prompt_delivery_error` field.
+- `--system-prompt <text>` — rendered through the agent's
+  `prompt_args` template (errors when the agent defines none).
+  Persisted; re-emitted on restart.
+- `--env KEY=VALUE` (repeatable) — process env overrides, layered
+  agent `env` < `--env` < thurbox-internal. Persisted.
+- `--extra-arg <arg>` (repeatable, hyphen-safe) — appended after all
+  configured arg groups so it can override them (e.g.
+  `--extra-arg --permission-mode --extra-arg plan` for claude).
+  Persisted.
+- `--add-dir <path>` (repeatable) — the session launches in the
+  multi-repo **symlink workspace** gathering the repo plus each
+  added dir (same machinery as the TUI's multi-repo picker;
+  `session_ops::resolve_headless_process_cwd`).
+- `--label key=value` (repeatable) — free-form tags stored in the
+  `session_labels` table.
+
+Per-spawn env/extra-args/system-prompt persist in the
+`session_spawn_config` side table (one row per session, written at
+spawn) so **both** the headless `session restart` and the TUI's
+`Ctrl+R` reproduce the exact invocation
+(`session_ops::restart::build_restart_invocation`). Side tables —
+not `sessions` columns — because the TUI's whole-row session upsert
+would wipe new columns on every `save_state()`.
+
+`--prompt`, `--add-dir`, `wait`, and `result` are **local-only** in
+v1; combining them with `--host` errors instead of silently
+degrading.
+
+### Polling primitives
+
+- `session wait <uuid> [--pattern <regex>] [--timeout 600]
+  [--interval 2000] [--lines 2000]` — blocks until the captured pane
+  text matches the regex (without `--pattern`: until the window
+  exits). Capture uses `-J`, so wrapped lines are joined before
+  matching.
+- `session result <uuid> [--marker '===RESULT==='] [--lines 2000]`
+  — finds the **last** marker in the pane (reruns overwrite) and
+  parses the JSON document after it. A truncated document (clean
+  EOF) counts as *pending* — the agent is still printing — not
+  *malformed*.
+
+Exit codes (0/1/2 keep their existing meanings — success, CLI
+error, init error):
+
+| Code | `session wait` | `session result` |
+|------|----------------|------------------|
+| 0 | pattern matched (no `--pattern`: window exited) | marker found, JSON valid (emitted as `result`) |
+| 1 | usage/DB error (bad uuid/regex, remote session) | same |
+| 3 | window died before the pattern matched | pending — no marker yet, or JSON still streaming |
+| 4 | timeout expired | malformed JSON after the marker |
+
+Match unique sentinels, not screen layout: agent TUIs redraw and
+clear panes, and `--lines` bounds the scan window, so a result older
+than the scanned scrollback is invisible.
+
+### Liveness + labels in `list`/`get`
+
+Every session JSON now carries `labels` (object), `alive`, and
+`last_activity` (tmux `#{window_activity}`, epoch seconds). Liveness
+comes from **one** batched `tmux list-windows` call per invocation;
+remote (`ssh:*`) sessions report `alive: null` — `session list`
+never opens an SSH connection, so a down host can't hang a
+supervisor. `session list --label k=v` filters (repeatable = AND).
+
+Future work: `session label --set/--unset` mutation, quiet-time
+heuristics on `window_activity`, remote `wait`/`result`.
 
 ---
 

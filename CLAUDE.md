@@ -197,6 +197,10 @@ args = []                               # always passed; bake a model here if yo
 resume_args = ["--resume", "{id}"]      # emitted when resuming
 fork_args = ["--resume", "{id}", "--fork-session"]
 new_session_args = ["--session-id", "{id}"]  # emitted on a fresh spawn
+env = { FOO = "bar" }                   # optional: env for every session of this agent
+prompt_args = ["--append-system-prompt", "{prompt}"]
+                                        # optional: emitted when a system prompt is
+                                        # supplied (session create --system-prompt)
 
 [[agents]]
 name = "codex"
@@ -207,12 +211,17 @@ resume_latest = true
 ```
 
 Each `*_args` group is appended only when its driving value is
-present, with `{id}` substituted; `args` is always passed. No
-model is ever passed — each agent uses its own default config
-(put `["--model", "opus"]` in `args` if you want to pin one).
-Agents that omit `resume_args` simply start fresh on restart (the
-live tmux process is what carries state across TUI restarts). Add
-your own `[[agents]]` entry to support any CLI — no recompile.
+present, with `{id}`/`{prompt}` substituted; `args` is always
+passed. Emit order: session-selection group (fork > resume >
+new-session), `prompt_args`, `args`, then any per-spawn
+`--extra-arg` values (last, so they can override). `env` is the
+lowest env layer (per-spawn `--env`, then thurbox-internal
+`THURBOX_*` vars override it). No model is ever passed — each agent
+uses its own default config (put `["--model", "opus"]` in `args` if
+you want to pin one). Agents that omit `resume_args` simply start
+fresh on restart (the live tmux process is what carries state across
+TUI restarts). Add your own `[[agents]]` entry to support any CLI —
+no recompile.
 
 **Session id pinning vs. `resume_latest`.** thurbox generates the
 `agent_session_id` (a UUID) and only `claude` accepts it at creation
@@ -241,7 +250,11 @@ workspace, so `--last`/`--continue` finds no parent session (multi-repo
   `build_args(&SessionConfig)`). `App::provider_for(&config)`
   picks the provider for the session's agent.
 
-A session stores only its **agent name**; there are no
+A session stores only its **agent name** plus, for CLI-spawned
+sessions, an opaque per-spawn pass-through record (`--env` /
+`--extra-arg` / `--system-prompt`, in the `session_spawn_config`
+side table, `storage::SpawnConfigRecord`) that restart re-applies
+verbatim. Thurbox never interprets these values — there are no
 per-session model/permission/prompt/tool knobs.
 
 ### Multi-repo sessions (symlink workspace)
@@ -261,10 +274,13 @@ then sees each repo as a subdirectory — fully agent-neutral, no
 git context); the workspace is a spawn-time process-cwd detail,
 derived idempotently on every launch from the persisted members and
 never stored. `workspace::ensure_workspace` / `remove_workspace`
-(`src/workspace.rs`) build and tear it down; the member set is the
-single `App::session_member_dirs` list that also feeds the rendered
-repo names, and `App::resolve_process_cwd` picks workspace-vs-primary.
-Single-repo sessions are unchanged (`cwd` = the repo directly).
+(`src/workspace.rs`) build and tear it down, and
+`workspace::resolve_process_cwd` picks workspace-vs-primary from a
+labeled member list. The TUI feeds it the single
+`App::session_member_dirs` list that also feeds the rendered repo
+names; the headless paths (spawn with `--add-dir`, restart) feed it
+`session_ops::resolve_headless_process_cwd`. Single-repo sessions
+are unchanged (`cwd` = the repo directly).
 
 ## Remote SSH Sessions
 
@@ -342,20 +358,44 @@ thurbox-cli session create --name demo --repo-path /path \
 # Spawn on a remote host from hosts.toml (worktree + tmux live remotely):
 thurbox-cli session create --name demo --repo-path /srv/repo \
     --host devbox --worktree-branch feat/x
-# Spawn a worker under a lead session (parent must exist):
-thurbox-cli session create --name worker --repo-path /path \
-    --parent <lead-uuid>
-thurbox-cli session list | jq
+# Orchestration: spawn a fully-customized worker under a lead session,
+# wait for its sentinel, harvest the JSON result:
+thurbox-cli session create --name w1 --repo-path /path \
+    --parent <lead-uuid> \
+    --prompt 'do X; print ===RESULT=== {"status":"ok"}' \
+    --env WORKER=1 --extra-arg --permission-mode --extra-arg plan \
+    --add-dir ~/admin --label wave=1
+thurbox-cli session wait <uuid> --pattern '===RESULT===' --timeout 1800
+thurbox-cli session result <uuid> | jq .result
+thurbox-cli session list --label wave=1 | jq
 thurbox-cli session list --parent <lead-uuid> | jq  # direct children only
 ```
 
 Subcommands: `session` (create/list/get/delete/restore/restart/
-send/capture), `automation` (alias `auto`:
+send/capture/wait/result), `automation` (alias `auto`:
 create/list/show/edit/remove/run/runs/tick), `task` (alias `todo`:
 create/list/show/edit/remove/run), `editor`, `config`
 (validate/show — strict-parses every config file / prints the
 effective resolved config; see `docs/CONFIG.md`). Pass
 `--pretty` for indented JSON.
+
+**Orchestration primitives** (see `docs/FEATURES.md` → "Headless
+orchestration" for the full design): `session create` takes
+`--prompt` (one-shot, typed after a ~3 s boot delay; never re-sent
+on restart), `--system-prompt` (via the agent's `prompt_args`
+template; errors if undefined), repeatable `--env KEY=VALUE` /
+`--extra-arg` / `--add-dir` / `--label key=value`. Env/extra-args/
+system-prompt persist in the `session_spawn_config` table so both
+headless `session restart` and the TUI `Ctrl+R` reproduce them
+(`session_ops::restart::build_restart_invocation`); labels live in
+`session_labels` and surface in `list`/`get` JSON (`labels`,
+`alive`, `last_activity` from one batched tmux call; `alive: null`
+for remote sessions — `list` never SSHes). `session wait` polls the
+pane for a regex; `session result` extracts the last
+`===RESULT===`-marked JSON. Both use exit codes 3 (pending /
+window died) and 4 (timeout / malformed) on top of the standard
+0/1/2. `--prompt`/`--add-dir`/`wait`/`result` are local-only and
+error with `--host`.
 
 `session delete <uuid>` **soft-deletes** by default — only the DB
 row is marked deleted (the TUI tears down the tmux window/worktree

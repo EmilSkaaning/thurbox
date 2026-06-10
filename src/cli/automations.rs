@@ -14,10 +14,6 @@ use crate::storage::automations::NewAutomation;
 use crate::storage::Database;
 use crate::sync::current_time_millis;
 
-/// Seconds to wait after a headless spawn before delivering the automation's
-/// prompt, giving the agent CLI time to start.
-const BOOT_DELAY_SECS: u64 = 3;
-
 #[derive(Subcommand, Debug)]
 pub enum Action {
     /// Create an automation.
@@ -341,9 +337,7 @@ fn fire_headless(
                 worktree_branch: worktree_branch.clone(),
                 base_branch: base_branch.clone(),
                 agent: agent.clone(),
-                agent_session_id: None,
-                host: None,
-                parent_session_id: None,
+                ..SpawnRequest::default()
             };
             match crate::session_ops::spawn_session_headless(db, req) {
                 Ok(result) => {
@@ -351,7 +345,7 @@ fn fire_headless(
                     match crate::agent::tmux::send_prompt_after_delay(
                         &name,
                         &auto.prompt,
-                        BOOT_DELAY_SECS,
+                        crate::session_ops::AGENT_BOOT_DELAY_SECS,
                     ) {
                         Ok(()) => (
                             AutomationRunStatus::Success,

@@ -43,6 +43,47 @@ fn workspace_dir(id: &str) -> io::Result<PathBuf> {
     Ok(base.join(segment))
 }
 
+/// The directory the agent process should launch in.
+///
+/// For a single-member session that's the member itself (`primary_cwd`). For
+/// a multi-member session it is the per-session **symlink workspace** (built
+/// idempotently from the members via [`ensure_workspace`]) so the agent sees
+/// every repo as a subdirectory — agent-neutral, needing no per-CLI flag.
+/// Member labels fall back to the directory's file name (then `"repo"`).
+/// Without an `agent_session_id` there is no stable workspace name, and on
+/// any build failure, it falls back to `primary_cwd`.
+pub fn resolve_process_cwd(
+    agent_session_id: Option<&str>,
+    primary_cwd: Option<PathBuf>,
+    members: &[(Option<String>, PathBuf)],
+) -> Option<PathBuf> {
+    if members.len() < 2 {
+        return primary_cwd;
+    }
+    let Some(id) = agent_session_id else {
+        return primary_cwd;
+    };
+
+    let pairs: Vec<(String, PathBuf)> = members
+        .iter()
+        .map(|(name, dir)| {
+            let label = name
+                .clone()
+                .or_else(|| dir.file_name().and_then(|s| s.to_str()).map(String::from))
+                .unwrap_or_else(|| "repo".to_string());
+            (label, dir.clone())
+        })
+        .collect();
+
+    match ensure_workspace(id, &pairs) {
+        Ok(ws) => Some(ws),
+        Err(e) => {
+            tracing::error!("Failed to build multi-repo workspace: {e}");
+            primary_cwd
+        }
+    }
+}
+
 /// (Re)build the symlink workspace for `id` from `members` and return its path.
 ///
 /// Idempotent: any existing workspace dir is removed first (it holds only
@@ -235,5 +276,47 @@ mod tests {
         assert_eq!(sanitize_segment("a/b\\c:d"), "a-b-c-d");
         assert_eq!(sanitize_segment("  .git  "), "git");
         assert_eq!(sanitize_segment("my repo"), "my-repo");
+    }
+
+    #[test]
+    fn resolve_single_member_is_primary() {
+        let cwd = PathBuf::from("/src/only");
+        let members = vec![(None, cwd.clone())];
+        assert_eq!(
+            resolve_process_cwd(Some("id-1"), Some(cwd.clone()), &members),
+            Some(cwd)
+        );
+    }
+
+    #[test]
+    fn resolve_multi_member_without_id_falls_back_to_primary() {
+        let primary = PathBuf::from("/src/a");
+        let members = vec![(None, primary.clone()), (None, PathBuf::from("/src/b"))];
+        assert_eq!(
+            resolve_process_cwd(None, Some(primary.clone()), &members),
+            Some(primary)
+        );
+    }
+
+    #[test]
+    fn resolve_multi_member_builds_workspace_with_file_name_labels() {
+        let base = temp_base();
+        let _g = TestPathGuard::new(&base);
+        let primary = base.join("repo-a");
+        let other = base.join("repo-b");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+
+        let members = vec![
+            (Some("named".to_string()), primary.clone()),
+            (None, other.clone()),
+        ];
+        let out = resolve_process_cwd(Some("sess-y"), Some(primary.clone()), &members).unwrap();
+
+        let ws_root = crate::paths::workspaces_directory().unwrap();
+        assert!(out.starts_with(&ws_root), "{out:?} not under {ws_root:?}");
+        assert_eq!(std::fs::read_link(out.join("named")).unwrap(), primary);
+        // Unnamed member labeled by its directory file name.
+        assert_eq!(std::fs::read_link(out.join("repo-b")).unwrap(), other);
     }
 }

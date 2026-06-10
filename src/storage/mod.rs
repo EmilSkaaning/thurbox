@@ -13,11 +13,14 @@
 pub mod audit;
 pub mod automations;
 pub mod keybindings;
+mod labels;
 pub mod repo_bookmarks;
 mod schema;
 mod sessions;
 mod settings;
+mod spawn_config;
 pub use sessions::DeletedSessionInfo;
+pub use spawn_config::SpawnConfigRecord;
 pub mod sync;
 pub mod tasks;
 mod worktrees;

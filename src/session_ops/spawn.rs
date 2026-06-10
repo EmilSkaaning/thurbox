@@ -3,18 +3,17 @@
 
 use std::path::PathBuf;
 
-use crate::session::{HostDef, SessionConfig, SessionId, DEFAULT_AGENT_NAME};
+use crate::session::{
+    HostDef, SessionConfig, SessionId, DEFAULT_AGENT_NAME, LOCAL_TMUX_BACKEND_TYPE,
+};
 use crate::storage::Database;
 use crate::sync::{SharedSession, SharedWorktree};
 
 /// Default base branch for `--worktree-branch` when none is given.
 const DEFAULT_BASE_BRANCH: &str = "main";
 
-/// Backend identifier for the local-tmux backend (matches `LocalTmuxBackend`).
-const LOCAL_TMUX_BACKEND_TYPE: &str = "local-tmux";
-
 /// Request to create a new headless session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SpawnRequest {
     /// Session name (used for the tmux window `tb-<name>`).
     pub name: String,
@@ -37,6 +36,24 @@ pub struct SpawnRequest {
     /// Optional parent session (lead/worker relationship for orchestration).
     /// Must reference an existing active session.
     pub parent_session_id: Option<SessionId>,
+    /// Initial prompt typed into the pane after a short boot delay. One-shot
+    /// (not persisted — restart must not re-send it). Local sessions only.
+    pub prompt: Option<String>,
+    /// System prompt substituted into the agent's `prompt_args` template.
+    /// Rejected when the agent defines no `prompt_args`. Persisted so restart
+    /// re-emits it.
+    pub system_prompt: Option<String>,
+    /// Per-spawn env overrides (`--env KEY=VAL`), applied over the agent's
+    /// `env` defaults. Persisted so restart reproduces them.
+    pub env: Vec<(String, String)>,
+    /// Per-spawn arguments appended after every templated arg group, so they
+    /// can override baked-in flags. Persisted so restart reproduces them.
+    pub extra_args: Vec<String>,
+    /// Extra member directories. The session launches in a multi-repo symlink
+    /// workspace gathering the primary dir plus these. Local sessions only.
+    pub additional_dirs: Vec<PathBuf>,
+    /// Free-form `key=value` labels persisted with the session.
+    pub labels: Vec<(String, String)>,
 }
 
 /// Result returned on successful headless spawn.
@@ -49,6 +66,10 @@ pub struct SpawnResult {
     pub cwd: PathBuf,
     pub worktrees: Vec<SharedWorktree>,
     pub parent_session_id: Option<SessionId>,
+    pub labels: Vec<(String, String)>,
+    /// Set when the spawn succeeded but the initial `--prompt` could not be
+    /// scheduled (the window is live and tracked either way).
+    pub prompt_delivery_error: Option<String>,
 }
 
 /// Spawn a new session inside `tmux -L thurbox`, persisting its state to the
@@ -58,6 +79,25 @@ pub fn spawn_session_headless(db: &Database, req: SpawnRequest) -> Result<SpawnR
     validate_parent_session(db, req.parent_session_id)?;
 
     let agent_name = resolve_agent_name(req.agent.as_deref());
+    let def = super::resolve_agent_def(&agent_name);
+
+    // `--system-prompt` needs an arg template to land in; failing fast beats
+    // silently launching an agent that never saw its instructions.
+    if req.system_prompt.is_some() && def.prompt_args.is_empty() {
+        return Err(format!(
+            "Agent '{agent_name}' defines no prompt_args in agents.toml; \
+             --system-prompt is not supported for it"
+        ));
+    }
+    // Prompt delivery and the symlink workspace are local-tmux mechanisms.
+    if req.host.is_some() {
+        if req.prompt.is_some() {
+            return Err("--prompt is local-only; use `session send` for remote sessions".into());
+        }
+        if !req.additional_dirs.is_empty() {
+            return Err("--add-dir is local-only (the symlink workspace is built locally)".into());
+        }
+    }
 
     // Resolve the optional remote host. `backend_type` is `local-tmux` or
     // `ssh:<host>`; `host` is the matching HostDef for remote git/tmux ops.
@@ -69,14 +109,30 @@ pub fn spawn_session_headless(db: &Database, req: SpawnRequest) -> Result<SpawnR
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+    // Multi-dir sessions launch in a symlink workspace gathering every member;
+    // `cwd` (the primary dir) is what gets persisted and displayed.
+    let process_cwd = if req.additional_dirs.is_empty() {
+        cwd.clone()
+    } else {
+        super::resolve_headless_process_cwd(
+            &agent_session_id,
+            Some(cwd.clone()),
+            &worktrees,
+            &req.additional_dirs,
+        )
+        .unwrap_or_else(|| cwd.clone())
+    };
+
     let mut config = SessionConfig {
         agent_session_id: Some(agent_session_id.clone()),
-        cwd: Some(cwd.clone()),
+        cwd: Some(process_cwd.clone()),
         agent: agent_name.clone(),
         backend: (backend_type != LOCAL_TMUX_BACKEND_TYPE).then(|| backend_type.clone()),
+        extra_args: req.extra_args.clone(),
+        system_prompt: req.system_prompt.clone(),
         ..SessionConfig::default()
     };
-    super::inject_thurbox_env(&mut config, &agent_session_id);
+    super::merge_spawn_env(&mut config, &def, &req.env, &agent_session_id);
 
     let (command, args) = super::build_agent_invocation(&config);
 
@@ -88,13 +144,19 @@ pub fn spawn_session_headless(db: &Database, req: SpawnRequest) -> Result<SpawnR
             &req.name,
             &command,
             &args,
-            Some(&cwd),
+            Some(&process_cwd),
             &config.env,
         )
         .map_err(|e| format!("Failed to spawn remote tmux window: {e:#}"))?,
         None => {
-            crate::agent::tmux::spawn_window(&req.name, &command, &args, Some(&cwd), &config.env)
-                .map_err(|e| format!("Failed to spawn tmux window: {e}"))?;
+            crate::agent::tmux::spawn_window(
+                &req.name,
+                &command,
+                &args,
+                Some(&process_cwd),
+                &config.env,
+            )
+            .map_err(|e| format!("Failed to spawn tmux window: {e}"))?;
             String::new()
         }
     };
@@ -108,7 +170,7 @@ pub fn spawn_session_headless(db: &Database, req: SpawnRequest) -> Result<SpawnR
         backend_type,
         agent_session_id: Some(agent_session_id.clone()),
         cwd: Some(cwd.clone()),
-        additional_dirs: Vec::new(),
+        additional_dirs: req.additional_dirs.clone(),
         worktrees: worktrees.clone(),
         shell_backend_id: None,
         parent_session_id: req.parent_session_id,
@@ -138,6 +200,38 @@ pub fn spawn_session_headless(db: &Database, req: SpawnRequest) -> Result<SpawnR
         return Err(format!("Failed to persist session: {e}"));
     }
 
+    // Best-effort side-table persistence: the session row exists and the
+    // window is live, so losing these must not fail the spawn — but it does
+    // degrade restart fidelity / list filtering, hence the loud log.
+    let spawn_cfg = crate::storage::SpawnConfigRecord {
+        env: req.env.clone(),
+        extra_args: req.extra_args.clone(),
+        system_prompt: req.system_prompt.clone(),
+    };
+    if !spawn_cfg.is_empty() {
+        if let Err(e) = db.set_session_spawn_config(session_id, &spawn_cfg) {
+            tracing::error!("failed to persist spawn config for '{}': {e}", req.name);
+        }
+    }
+    if !req.labels.is_empty() {
+        if let Err(e) = db.set_session_labels(session_id, &req.labels) {
+            tracing::error!("failed to persist labels for '{}': {e}", req.name);
+        }
+    }
+
+    // Schedule the one-shot initial prompt last, so it can't fire against a
+    // window we might still tear down above.
+    let mut prompt_delivery_error = None;
+    if let Some(prompt) = req.prompt.as_deref() {
+        if let Err(e) = crate::agent::tmux::send_prompt_after_delay(
+            &req.name,
+            prompt,
+            super::AGENT_BOOT_DELAY_SECS,
+        ) {
+            prompt_delivery_error = Some(format!("{e:#}"));
+        }
+    }
+
     Ok(SpawnResult {
         session_id,
         name: req.name,
@@ -146,6 +240,8 @@ pub fn spawn_session_headless(db: &Database, req: SpawnRequest) -> Result<SpawnR
         cwd,
         worktrees,
         parent_session_id: req.parent_session_id,
+        labels: req.labels,
+        prompt_delivery_error,
     })
 }
 
@@ -238,12 +334,7 @@ mod tests {
         SpawnRequest {
             name: name.into(),
             repo_path: PathBuf::from("/tmp"),
-            worktree_branch: None,
-            base_branch: None,
-            agent: None,
-            agent_session_id: None,
-            host: None,
-            parent_session_id: None,
+            ..SpawnRequest::default()
         }
     }
 
@@ -302,6 +393,52 @@ mod tests {
     fn resolve_agent_name_uses_explicit() {
         assert_eq!(resolve_agent_name(Some("codex")), "codex");
         assert_eq!(resolve_agent_name(Some("")), DEFAULT_AGENT_NAME);
+    }
+
+    #[test]
+    fn system_prompt_without_prompt_args_is_rejected() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _guard = crate::paths::TestPathGuard::new(temp.path());
+        let db = empty_db();
+        // The seeded built-in claude has no prompt_args template.
+        let err = spawn_session_headless(
+            &db,
+            SpawnRequest {
+                system_prompt: Some("be terse".into()),
+                ..req("demo")
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("prompt_args"), "got {err}");
+        assert!(err.contains("--system-prompt"), "got {err}");
+    }
+
+    #[test]
+    fn prompt_and_add_dir_are_local_only() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _guard = crate::paths::TestPathGuard::new(temp.path());
+        let db = empty_db();
+        let err = spawn_session_headless(
+            &db,
+            SpawnRequest {
+                host: Some("devbox".into()),
+                prompt: Some("hi".into()),
+                ..req("demo")
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("local-only"), "got {err}");
+
+        let err = spawn_session_headless(
+            &db,
+            SpawnRequest {
+                host: Some("devbox".into()),
+                additional_dirs: vec![PathBuf::from("/srv/other")],
+                ..req("demo")
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("local-only"), "got {err}");
     }
 
     #[test]

@@ -30,6 +30,15 @@ pub const BUILTIN_AGENTS_TOML: &str = r#"# Thurbox coding-agent definitions.
 #
 # Unknown keys are reported on startup (and fail `thurbox-cli config
 # validate`) but don't break the load — your agents stay in effect.
+#
+# Optional per-agent keys:
+#   env         — table of environment variables injected into every session
+#                 of this agent (per-spawn `--env` overrides them), e.g.
+#                 env = { FOO = "bar" }
+#   prompt_args — emitted when a system prompt is supplied at spawn time
+#                 (`thurbox-cli session create --system-prompt …`), with
+#                 {prompt} substituted, e.g. for claude:
+#                 prompt_args = ["--append-system-prompt", "{prompt}"]
 
 config_version = 1
 default = "claude"
@@ -328,5 +337,31 @@ mod tests {
         let reg = load_or_seed();
         assert_eq!(reg.default, "mine");
         assert_eq!(reg.get("mine").unwrap().command, "my-agent");
+    }
+
+    #[test]
+    fn load_or_seed_reads_agent_env_and_prompt_args() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _guard = crate::paths::TestPathGuard::new(temp.path());
+
+        let path = agents_config_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            concat!(
+                "default = \"mine\"\n",
+                "[[agents]]\n",
+                "name = \"mine\"\n",
+                "command = \"my-agent\"\n",
+                "prompt_args = [\"--system\", \"{prompt}\"]\n",
+                "env = { FOO = \"bar\" }\n",
+            ),
+        )
+        .unwrap();
+
+        let reg = load_or_seed();
+        let def = reg.get("mine").unwrap();
+        assert_eq!(def.env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(def.prompt_args, vec!["--system", "{prompt}"]);
     }
 }

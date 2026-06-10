@@ -7,6 +7,7 @@
 //! `agent::tmux`, and prints the result. No TUI, no event loop.
 
 use clap::{Parser, Subcommand};
+use serde_json::Value;
 
 use crate::storage::Database;
 
@@ -15,6 +16,22 @@ pub mod config;
 pub mod editor;
 pub mod sessions;
 pub mod tasks;
+
+/// Result of a subcommand: the JSON document to print plus the process
+/// exit code. Most commands exit 0 on success; polling-oriented commands
+/// (`session wait`, `session result`) use distinct non-zero codes to let
+/// scripts branch without parsing JSON.
+#[derive(Debug)]
+pub struct Outcome {
+    pub value: Value,
+    pub code: i32,
+}
+
+impl From<Value> for Outcome {
+    fn from(value: Value) -> Self {
+        Self { value, code: 0 }
+    }
+}
 
 /// Thurbox CLI — manage sessions, scheduled commands, and more.
 #[derive(Parser, Debug)]
@@ -59,23 +76,25 @@ pub enum Command {
     },
 }
 
-/// Run a parsed CLI invocation against `db` and write JSON to stdout.
-pub fn run(cli: Cli, db: &Database) -> Result<(), String> {
-    let value = match cli.command {
-        Command::Editor { action } => editor::run(action, db),
+/// Run a parsed CLI invocation against `db`, write JSON to stdout, and
+/// return the process exit code.
+pub fn run(cli: Cli, db: &Database) -> Result<i32, String> {
+    let outcome = match cli.command {
+        Command::Editor { action } => editor::run(action, db).map(Outcome::from),
         Command::Session { action } => sessions::run(action, db),
-        Command::Automation { action } => automations::run(action, db),
-        Command::Task { action } => tasks::run(action, db),
-        Command::Config { action } => config::run(action, db),
+        Command::Automation { action } => automations::run(action, db).map(Outcome::from),
+        Command::Task { action } => tasks::run(action, db).map(Outcome::from),
+        Command::Config { action } => config::run(action, db).map(Outcome::from),
     }?;
 
     let text = if cli.pretty {
-        serde_json::to_string_pretty(&value).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
+        serde_json::to_string_pretty(&outcome.value)
+            .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
     } else {
-        serde_json::to_string(&value).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
+        serde_json::to_string(&outcome.value).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
     };
     println!("{text}");
-    Ok(())
+    Ok(outcome.code)
 }
 
 #[cfg(test)]
@@ -90,7 +109,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Session {
-                action: sessions::Action::List { parent: None }
+                action: sessions::Action::List { .. }
             }
         ));
     }
@@ -171,7 +190,7 @@ mod tests {
         ])
         .unwrap();
         let Command::Session {
-            action: sessions::Action::List { parent },
+            action: sessions::Action::List { parent, .. },
         } = cli.command
         else {
             panic!("expected Session::List");
@@ -180,6 +199,58 @@ mod tests {
             parent.as_deref(),
             Some("0f4dec1e-9d4b-4c4f-9d05-3a3a3a3a3a3a")
         );
+    }
+
+    #[test]
+    fn parse_session_create_orchestration_flags() {
+        let cli = Cli::try_parse_from([
+            "thurbox-cli",
+            "session",
+            "create",
+            "--name",
+            "w1",
+            "--repo-path",
+            "/tmp/repo",
+            "--prompt",
+            "do the thing",
+            "--system-prompt",
+            "be terse",
+            "--env",
+            "WORKER=1",
+            "--env",
+            "MODE=ci",
+            "--extra-arg",
+            "--permission-mode",
+            "--extra-arg",
+            "plan",
+            "--add-dir",
+            "/srv/admin",
+            "--label",
+            "wave=1",
+        ])
+        .unwrap();
+        let Command::Session {
+            action:
+                sessions::Action::Create {
+                    prompt,
+                    system_prompt,
+                    env,
+                    extra_args,
+                    add_dirs,
+                    labels,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected Session::Create");
+        };
+        assert_eq!(prompt.as_deref(), Some("do the thing"));
+        assert_eq!(system_prompt.as_deref(), Some("be terse"));
+        assert_eq!(env, vec!["WORKER=1", "MODE=ci"]);
+        // Hyphen-leading values reach --extra-arg verbatim.
+        assert_eq!(extra_args, vec!["--permission-mode", "plan"]);
+        assert_eq!(add_dirs, vec![std::path::PathBuf::from("/srv/admin")]);
+        assert_eq!(labels, vec!["wave=1"]);
     }
 
     #[test]

@@ -866,6 +866,9 @@ mod tests {
         git(&["init", "-q"]);
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
+        // Don't inherit host-level commit signing: the signing agent may be
+        // unavailable in test environments, failing every commit.
+        git(&["config", "commit.gpgsign", "false"]);
         std::fs::write(repo.join("file.txt"), "hi").unwrap();
         git(&["add", "."]);
         git(&["commit", "-qm", "init"]);

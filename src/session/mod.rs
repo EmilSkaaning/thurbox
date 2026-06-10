@@ -6,12 +6,14 @@ pub mod settings;
 pub mod task;
 pub mod theme_config;
 
-pub use agent_def::{AgentDef, AgentRegistry};
+pub use agent_def::{AgentDef, AgentRegistry, LaunchArgs};
 pub use automation::{
     parse_hhmm, preset_to_cron, Automation, AutomationAction, AutomationRun, AutomationRunStatus,
     AutomationSchedule, SchedulePreset,
 };
-pub use host_def::{is_ssh_backend, HostDef, HostRegistry, SSH_BACKEND_PREFIX};
+pub use host_def::{
+    is_ssh_backend, HostDef, HostRegistry, LOCAL_TMUX_BACKEND_TYPE, SSH_BACKEND_PREFIX,
+};
 pub use keybindings::{Action, KeyBindings, KeyChord, KeyContext};
 pub use task::{Task, TaskStatus, SOURCE_LOCAL};
 pub use theme_config::{ThemePalette, ThemePreset};
@@ -244,8 +246,14 @@ pub struct SessionConfig {
     /// Fork from an existing session's conversation (agents that support it).
     pub fork_session_id: Option<String>,
     /// Environment variables injected into the spawned session process
-    /// (thurbox-internal: session id, metrics dir, etc.).
+    /// (agent-level defaults, per-spawn overrides, and thurbox-internal
+    /// variables, merged in that precedence order).
     pub env: HashMap<String, String>,
+    /// Per-spawn arguments appended after every templated group from the
+    /// agent definition, so they can override baked-in flags.
+    pub extra_args: Vec<String>,
+    /// System prompt substituted into the agent's `prompt_args` template.
+    pub system_prompt: Option<String>,
 }
 
 #[cfg(test)]

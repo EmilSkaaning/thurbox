@@ -12,10 +12,6 @@ use crate::session_ops::SpawnRequest;
 use crate::storage::tasks::NewTask;
 use crate::storage::Database;
 
-/// Seconds to wait after a headless spawn before delivering the task's title,
-/// giving the agent CLI time to start.
-const BOOT_DELAY_SECS: u64 = 3;
-
 #[derive(Subcommand, Debug)]
 pub enum Action {
     /// Create a task. With no `--session`/`--repo` it is a plain local todo.
@@ -190,13 +186,15 @@ fn run_task(db: &Database, task: &Task) -> Result<Value, String> {
                 worktree_branch: worktree_branch.clone(),
                 base_branch: base_branch.clone(),
                 agent: agent.clone(),
-                agent_session_id: None,
-                host: None,
-                parent_session_id: None,
+                ..SpawnRequest::default()
             };
             crate::session_ops::spawn_session_headless(db, req)?;
-            crate::agent::tmux::send_prompt_after_delay(&name, &prompt, BOOT_DELAY_SECS)
-                .map_err(|e| format!("spawned {name} but prompt delivery failed: {e}"))?;
+            crate::agent::tmux::send_prompt_after_delay(
+                &name,
+                &prompt,
+                crate::session_ops::AGENT_BOOT_DELAY_SECS,
+            )
+            .map_err(|e| format!("spawned {name} but prompt delivery failed: {e}"))?;
             mark_in_progress(db, task)?;
             Ok(json!({ "spawned": name, "id": task.id }))
         }

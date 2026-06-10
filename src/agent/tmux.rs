@@ -1079,6 +1079,37 @@ pub fn window_exists(session_name: &str) -> bool {
     list_window_names().contains(&want)
 }
 
+/// Window name → `#{window_activity}` (epoch seconds of last pane activity)
+/// for every window in the local thurbox tmux session, in one round-trip.
+/// Empty when the server is not running. Used by `thurbox-cli session
+/// list/get` to report liveness without a per-session tmux call.
+pub fn list_window_activity() -> std::collections::HashMap<String, u64> {
+    let Ok(out) = Command::new("tmux")
+        .args([
+            "-L",
+            TMUX_SOCKET,
+            "list-windows",
+            "-t",
+            TMUX_SESSION,
+            "-F",
+            "#{window_name}|#{window_activity}",
+        ])
+        .output()
+    else {
+        return std::collections::HashMap::new();
+    };
+    if !out.status.success() {
+        return std::collections::HashMap::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (name, activity) = line.split_once('|')?;
+            Some((name.to_string(), activity.parse().ok()?))
+        })
+        .collect()
+}
+
 /// Schedule a one-shot prompt delivery into a session's window after
 /// `delay_secs`, via a detached `tmux run-shell` timer.
 ///
