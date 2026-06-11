@@ -37,6 +37,10 @@ pub struct SpawnRequest {
     /// Optional parent session (lead/worker relationship for orchestration).
     /// Must reference an existing active session.
     pub parent_session_id: Option<SessionId>,
+    /// Task id this session is being spawned for (`Spawn` action), if any. The
+    /// durable task↔session link, persisted so the session keeps a friendly,
+    /// id-free name while still being recoverable after a restart.
+    pub spawn_task_id: Option<i64>,
 }
 
 /// Result returned on successful headless spawn.
@@ -113,6 +117,7 @@ pub fn spawn_session_headless(db: &Database, req: SpawnRequest) -> Result<SpawnR
         shell_backend_id: None,
         parent_session_id: req.parent_session_id,
         display_order: None,
+        spawn_task_id: req.spawn_task_id,
         tombstone: false,
         tombstone_at: None,
     };
@@ -245,6 +250,7 @@ mod tests {
             agent_session_id: None,
             host: None,
             parent_session_id: None,
+            spawn_task_id: None,
         }
     }
 
@@ -293,6 +299,7 @@ mod tests {
             shell_backend_id: None,
             parent_session_id: None,
             display_order: None,
+            spawn_task_id: None,
             tombstone: false,
             tombstone_at: None,
         };

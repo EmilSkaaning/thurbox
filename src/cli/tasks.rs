@@ -2,8 +2,9 @@
 //!
 //! Tasks are persisted to the shared database; the TUI's right-side panel reads
 //! them. `run` triggers a task's agent action headlessly (Send into a live tmux
-//! window, or Spawn a fresh session named `task-<id>-<title-slug>` seeded with
-//! the title).
+//! window, or Spawn a fresh session named after the task title, e.g.
+//! `Wire up SSH backend`, seeded with the title and linked back to the task via
+//! the session's `spawn_task_id`).
 
 use clap::Subcommand;
 use serde_json::{json, Value};
@@ -179,14 +180,17 @@ fn run_task(db: &Database, task: &Task) -> Result<Value, String> {
         }) => {
             let name = task.spawn_session_name();
             // Reuse an existing session window (re-trigger / restored session).
-            // Match by convention rather than exact name so legacy `task-<id>`
-            // sessions and spawns from a since-edited title are found too.
+            // Prefer the durable `spawn_task_id` link; fall back to the legacy
+            // name convention so pre-`spawn_task_id` `task-<id>` sessions and
+            // spawns from a since-edited title are still found. The tmux window
+            // is keyed by the session name, so check `window_exists(name)`.
             let existing = db
                 .list_active_sessions()
                 .map_err(|e| format!("list_active_sessions: {e}"))?
                 .into_iter()
+                .filter(|s| s.spawn_task_id == Some(task.id) || task.matches_spawn_session(&s.name))
                 .map(|s| s.name)
-                .find(|n| task.matches_spawn_session(n) && crate::agent::tmux::window_exists(n));
+                .find(|n| crate::agent::tmux::window_exists(n));
             if let Some(name) = existing {
                 crate::agent::tmux::send_prompt_now(&name, &prompt)
                     .map_err(|e| format!("send_prompt_now: {e}"))?;
@@ -202,6 +206,7 @@ fn run_task(db: &Database, task: &Task) -> Result<Value, String> {
                 agent_session_id: None,
                 host: None,
                 parent_session_id: None,
+                spawn_task_id: Some(task.id),
             };
             crate::session_ops::spawn_session_headless(db, req)?;
             crate::agent::tmux::send_prompt_after_delay(&name, &prompt, BOOT_DELAY_SECS)

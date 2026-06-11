@@ -134,6 +134,7 @@ mod tests {
             shell_backend_id: None,
             parent_session_id: None,
             display_order: None,
+            spawn_task_id: None,
             tombstone: false,
             tombstone_at: None,
         };

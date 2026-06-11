@@ -1318,6 +1318,7 @@ impl App {
         session.info.worktrees = shared.worktrees.iter().cloned().map(Into::into).collect();
         session.info.parent_session_id = shared.parent_session_id;
         session.info.display_order = shared.display_order;
+        session.info.spawn_task_id = shared.spawn_task_id;
         resolve_repo_display_names(&mut session.info);
     }
 
@@ -2001,6 +2002,9 @@ impl App {
         session.info.worktrees = worktrees;
         session.info.additional_dirs = additional_dirs;
         session.info.parent_session_id = parent_session_id;
+        // Persist the task link on the session itself (durable across restarts),
+        // so a task-spawned session can carry a friendly, id-free name.
+        session.info.spawn_task_id = task_prompt.as_ref().map(|(id, _)| *id);
 
         resolve_repo_display_names(&mut session.info);
         self.sessions.push(session);
@@ -2015,8 +2019,8 @@ impl App {
         // task to in progress.
         if let Some((task_id, title)) = task_prompt {
             let new_id = self.sessions[self.active_index].info.id;
-            // Record the link now — the session was named by the user, so the
-            // `task-<id>-<slug>` convention can't recover it later.
+            // Also keep the in-memory link for this run (cheap lookup; the
+            // persisted `spawn_task_id` is the source of truth across restarts).
             self.task_ui.task_session_links.insert(task_id, new_id);
             let prompt = self.task_agent_prompt(task_id, &title);
             self.send_prompt_to_session(new_id, &prompt, AGENT_BOOT_DELAY_TICKS);
@@ -2919,6 +2923,7 @@ impl App {
             spawned.info.additional_dirs = shared_session.additional_dirs.clone();
             spawned.info.parent_session_id = shared_session.parent_session_id;
             spawned.info.display_order = shared_session.display_order;
+            spawned.info.spawn_task_id = shared_session.spawn_task_id;
             self.sessions.push(spawned);
             self.save_state();
             tracing::debug!(
@@ -3017,6 +3022,7 @@ impl App {
             shell_backend_id: session.info.shell_backend_id.clone(),
             parent_session_id: session.info.parent_session_id,
             display_order: session.info.display_order,
+            spawn_task_id: session.info.spawn_task_id,
             tombstone: false,
             tombstone_at: None,
         }
@@ -3193,6 +3199,7 @@ impl App {
         session.info.worktrees = worktrees;
         session.info.parent_session_id = shared.parent_session_id;
         session.info.display_order = shared.display_order;
+        session.info.spawn_task_id = shared.spawn_task_id;
         resolve_repo_display_names(&mut session.info);
 
         // Re-adopt shell pane if one was persisted
@@ -3456,7 +3463,8 @@ impl App {
     /// queue `prompt` into it. The session is named `name`; a recurring caller
     /// reuses that session on later invocations (and after a TUI restart, where
     /// it is restored from the database by name). Shared by automations
-    /// (`auto-<id>`) and tasks (`task-<id>-<title-slug>`).
+    /// (`auto-<id>`) and tasks (named after the task title, linked back via
+    /// `spawn_task_id`).
     fn spawn_and_prompt(
         &mut self,
         name: String,
@@ -3828,9 +3836,11 @@ impl App {
     /// Indices into `self.sessions` of the **currently-open** sessions a task is
     /// related to, in display order:
     ///
-    /// - the session named by the spawn convention (`task-<id>-<title-slug>`,
-    ///   or the legacy bare `task-<id>`) — used by the headless `task run`
-    ///   (and what survives a restart; see [`Task::matches_spawn_session`]);
+    /// - the session whose persisted `spawn_task_id` is this task (the durable
+    ///   link that survives a restart), or, for legacy sessions predating that
+    ///   column, one matching the old name convention
+    ///   (`task-<id>-<title-slug>` / bare `task-<id>`; see
+    ///   [`Task::matches_spawn_session`]);
     /// - the target of a persisted `Send` action (`task.action`), when one is
     ///   set via the CLI; and
     /// - the in-memory `task_session_links` entry recorded when the task was
@@ -3849,7 +3859,8 @@ impl App {
         let linked = self.task_ui.task_session_links.get(&task.id).copied();
         let mut out = Vec::new();
         for (i, s) in self.sessions.iter().enumerate() {
-            let related = task.matches_spawn_session(&s.info.name)
+            let related = s.info.spawn_task_id == Some(task.id)
+                || task.matches_spawn_session(&s.info.name)
                 || send_target.is_some_and(|t| t == s.info.id)
                 || linked.is_some_and(|t| t == s.info.id);
             if related && !out.contains(&i) {
@@ -6042,7 +6053,7 @@ mod tests {
     }
 
     #[test]
-    fn task_related_sessions_match_spawn_name_and_send_target() {
+    fn task_related_sessions_match_spawn_task_id_and_legacy_name() {
         let mut app = app_with_sessions(2);
         let id = app
             .db
@@ -6050,13 +6061,22 @@ mod tests {
             .unwrap();
         app.refresh_tasks();
 
-        // No related session yet (generic stub names).
+        // No related session yet (generic stub names, no link).
         let task = app.db.get_task(id).unwrap().unwrap();
         assert!(app.task_related_session_indices(&task).is_empty());
 
-        // Rename session 1 to the spawn convention → it's related. Both the
-        // current slugged form and the legacy bare `task-<id>` must match.
+        // The durable link: a session carrying this task's `spawn_task_id` is
+        // related regardless of its (friendly) name.
+        app.sessions[1].info.spawn_task_id = Some(id);
+        assert_eq!(app.task_related_session_indices(&task), vec![1]);
+
+        // Legacy fallback: a pre-`spawn_task_id` session named by the old
+        // `task-<id>` convention is still recognized.
+        app.sessions[1].info.spawn_task_id = None;
         app.sessions[1].info.name = task.spawn_session_name();
+        // The friendly title ("t") is no longer a recovery anchor by itself.
+        assert!(app.task_related_session_indices(&task).is_empty());
+        app.sessions[1].info.name = format!("task-{id}-t");
         assert_eq!(app.task_related_session_indices(&task), vec![1]);
         app.sessions[1].info.name = format!("task-{id}");
         assert_eq!(app.task_related_session_indices(&task), vec![1]);
@@ -8203,6 +8223,7 @@ mod tests {
             shell_backend_id: None,
             parent_session_id: None,
             display_order: None,
+            spawn_task_id: None,
             tombstone: false,
             tombstone_at: None,
         }

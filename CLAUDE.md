@@ -526,7 +526,7 @@ sync, but the TUI editor never sets it.)
   scroll the preview, `n` new, `e`/`Enter` open the central-pane editor,
   `Space` cycle status, `r` open the **trigger-time action picker**, `o` **open
   the task's related session** (`App::open_task_related_session` — jumps to the
-  spawned `task-<id>-<slug>` window or a Send target, else a status hint), `d`/`Ctrl+D`
+  session spawned for the task or a Send target, else a status hint), `d`/`Ctrl+D`
   delete, `Esc` back to the session list. In the editor: field nav +
   `Enter`/`Ctrl+S` save (→ back to panel), `Esc` discard; the editor captures
   its keys before global bindings (so `e`/`d` edit text) via
@@ -541,6 +541,18 @@ sync, but the TUI editor never sets it.)
   `AGENT_BOOT_DELAY_TICKS`) and advances the task. The pending prompt is
   cleared on a manual `Ctrl+N` so a cancelled task-spawn can't leak into it.
   Both paths call `App::advance_task_to_in_progress`.
+- **Spawned-session naming** — a task-spawned session is named after the task
+  **title** (`Task::spawn_session_name`: title verbatim, whitespace collapsed,
+  path separators/`..`/leading-`.` sanitized away and capped to 64 bytes so it
+  satisfies `paths::validate_safe_name`), e.g. `Wire up SSH backend` rather than
+  the old `task-<id>-<title-slug>`. The durable task↔session link is the
+  persisted **`spawn_task_id`** column (schema v32) on `sessions` — set by the
+  headless `task run` Spawn path (`SpawnRequest.spawn_task_id`) and by the TUI
+  spawn tail (`finalize_spawned_session` sets `SessionInfo.spawn_task_id` from
+  the `pending_task_prompt`). Recovery (`App::task_related_session_indices`, the
+  headless re-trigger reuse) matches on `spawn_task_id` first, with the legacy
+  `Task::matches_spawn_session` name convention (`task-<id>[-slug]`) kept only as
+  a fallback for sessions created before the column existed.
 - **CLI**: `thurbox-cli task` (alias `todo`) —
   `create`/`list`/`show`/`edit`/`remove`/`run`. `create`/`edit` take an
   optional `--description` (markdown; `edit --description ""` clears it), and

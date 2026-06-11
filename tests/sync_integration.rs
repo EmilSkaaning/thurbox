@@ -23,6 +23,7 @@ fn make_session(id: SessionId, name: &str) -> SharedSession {
         shell_backend_id: None,
         parent_session_id: None,
         display_order: None,
+        spawn_task_id: None,
         tombstone: false,
         tombstone_at: None,
     }
@@ -370,6 +371,7 @@ fn db_session_metadata_preserved_across_instances() {
         shell_backend_id: None,
         parent_session_id: None,
         display_order: None,
+        spawn_task_id: None,
         tombstone: false,
         tombstone_at: None,
     };

@@ -126,39 +126,65 @@ impl Task {
         prompt
     }
 
-    /// Session name used when this task is dispatched via a `Spawn` action:
-    /// `task-<id>-<title-slug>` (e.g. `task-42-wire-up-ssh-backend`), capped at
-    /// [`SPAWN_SESSION_NAME_MAX`] chars. Falls back to plain `task-<id>` when
-    /// the title yields no slug. Shared by the headless `task run` path; use
-    /// [`matches_spawn_session`](Self::matches_spawn_session) to recognize the
-    /// session later (it also accepts the legacy bare `task-<id>` form).
+    /// Session name used when this task is dispatched via a `Spawn` action: the
+    /// task title made human-readable (case, spaces and accents preserved, e.g.
+    /// `Wire up SSH backend`). Runs of whitespace collapse to one space, and the
+    /// result is sanitized to satisfy [`crate::paths::validate_safe_name`] (which
+    /// the headless spawn enforces) and to round-trip cleanly as a tmux window
+    /// name: path separators become spaces, runs of `.` collapse to one, no
+    /// leading `.`, and the whole thing is capped to
+    /// [`SPAWN_SESSION_NAME_MAX`] **bytes** (never splitting a multi-byte glyph).
+    /// Falls back to `task-<id>` when the title yields nothing usable.
+    ///
+    /// The session no longer carries the task id in its name; the durable
+    /// task↔session link is the persisted `spawn_task_id` column instead (see
+    /// [`matches_spawn_session`](Self::matches_spawn_session) for the legacy
+    /// name-based fallback used only for pre-existing sessions).
     pub fn spawn_session_name(&self) -> String {
-        let prefix = format!("task-{}", self.id);
-        let budget = SPAWN_SESSION_NAME_MAX.saturating_sub(prefix.len() + 1);
-        let mut slug = String::new();
+        let mut name = String::with_capacity(self.title.len());
+        let mut pending_space = false;
         for c in self.title.chars() {
-            if c.is_ascii_alphanumeric() {
-                slug.push(c.to_ascii_lowercase());
-            } else if !slug.is_empty() && !slug.ends_with('-') {
-                slug.push('-');
+            // Path separators and whitespace both become a single space — the
+            // validator rejects `/`/`\\`, and tmux sanitizes them away anyway.
+            if c.is_whitespace() || c == '/' || c == '\\' {
+                pending_space = !name.is_empty();
+                continue;
             }
-            if slug.len() >= budget {
-                break;
+            if pending_space {
+                name.push(' ');
+                pending_space = false;
             }
+            // Collapse runs of `.` to a single one so `..` (rejected by the
+            // validator) can never appear, and drop a leading `.`.
+            if c == '.' && (name.is_empty() || name.ends_with('.')) {
+                continue;
+            }
+            name.push(c);
         }
-        slug.truncate(budget);
-        let slug = slug.trim_end_matches('-');
-        if slug.is_empty() {
-            prefix
+        // Cap by byte length to match the validator's 64-byte limit, stopping on
+        // a char boundary so a multi-byte glyph is never split.
+        if name.len() > SPAWN_SESSION_NAME_MAX {
+            let cut = (0..=SPAWN_SESSION_NAME_MAX)
+                .rev()
+                .find(|&i| name.is_char_boundary(i))
+                .unwrap_or(0);
+            name.truncate(cut);
+        }
+        let name = name.trim_end_matches([' ', '.']).to_string();
+        if name.is_empty() {
+            format!("task-{}", self.id)
         } else {
-            format!("{prefix}-{slug}")
+            name
         }
     }
 
-    /// Whether `name` is this task's spawned session: the current
-    /// `task-<id>-<slug>` convention or the legacy bare `task-<id>` (which
-    /// pre-slug sessions still carry; the title may also have been edited
-    /// since the spawn, so only the `task-<id>` part is significant).
+    /// Whether `name` is this task's spawned session by **name convention**.
+    ///
+    /// Spawned sessions are now linked durably by `spawn_task_id`, so this is
+    /// only a fallback for legacy sessions created before that column existed:
+    /// it accepts the old `task-<id>-<slug>` form and the bare `task-<id>`
+    /// (the `task-<id>` prefix is the only significant part, since the title
+    /// may have been edited since the spawn).
     pub fn matches_spawn_session(&self, name: &str) -> bool {
         let prefix = format!("task-{}", self.id);
         name == prefix
@@ -231,33 +257,96 @@ mod tests {
     }
 
     #[test]
-    fn spawn_session_name_slugs_the_title() {
+    fn spawn_session_name_is_the_title_verbatim() {
         assert_eq!(
             sample_task(None).spawn_session_name(),
-            "task-42-wire-up-ssh-backend"
+            "Wire up SSH backend"
         );
     }
 
     #[test]
-    fn spawn_session_name_collapses_symbols_and_caps_length() {
+    fn spawn_session_name_preserves_punctuation_and_accents() {
         let mut task = sample_task(None);
         task.title = "Fix: TUI crash!! (on concurrent CLI commands)".to_string();
         assert_eq!(
             task.spawn_session_name(),
-            "task-42-fix-tui-crash-on-concurrent-cli-commands"
+            "Fix: TUI crash!! (on concurrent CLI commands)"
         );
-        task.title = "x".repeat(200);
-        let name = task.spawn_session_name();
-        assert!(name.len() <= SPAWN_SESSION_NAME_MAX);
-        assert!(name.starts_with("task-42-x"));
-        // Truncation never leaves a dangling hyphen.
-        assert!(!name.ends_with('-'));
+        // Accents survive (the accept criterion's "Blabla Blablä" case).
+        task.title = "Blabla Blablä".to_string();
+        assert_eq!(task.spawn_session_name(), "Blabla Blablä");
     }
 
     #[test]
-    fn spawn_session_name_falls_back_to_bare_id() {
+    fn spawn_session_name_collapses_whitespace_and_caps_length() {
         let mut task = sample_task(None);
-        task.title = "??? !!!".to_string();
+        task.title = "  Wire   up\tSSH\n backend  ".to_string();
+        assert_eq!(task.spawn_session_name(), "Wire up SSH backend");
+        // Length is capped by byte count, and any trailing space is trimmed.
+        task.title = "x".repeat(200);
+        let name = task.spawn_session_name();
+        assert!(name.len() <= SPAWN_SESSION_NAME_MAX);
+        assert!(name.starts_with('x'));
+        // A multi-byte title is capped by bytes without splitting a glyph.
+        task.title = "é".repeat(200);
+        let name = task.spawn_session_name();
+        assert!(name.len() <= SPAWN_SESSION_NAME_MAX);
+        assert!(name.chars().all(|c| c == 'é'));
+    }
+
+    /// Mirror of `crate::paths::validate_safe_name`'s rules. Duplicated here
+    /// rather than imported because `session` may not reference other crate
+    /// modules (architecture rule); the headless spawn enforces the real one.
+    fn is_safe_name(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= 64
+            && !name.starts_with('.')
+            && !name.contains('/')
+            && !name.contains('\\')
+            && !name.contains("..")
+    }
+
+    #[test]
+    fn spawn_session_name_always_passes_validate_safe_name() {
+        // Titles with the characters the validator rejects (`/`, `\`, `..`,
+        // leading `.`) and over-long multi-byte titles must still produce a
+        // name the headless spawn accepts.
+        let mut task = sample_task(None);
+        for title in [
+            "feat/foo: wire it up",
+            "path\\to\\thing",
+            "weird.. name.. here",
+            "...leading dots",
+            &"é".repeat(200),
+            &"a/".repeat(100),
+        ] {
+            task.title = title.to_string();
+            let name = task.spawn_session_name();
+            assert!(
+                is_safe_name(&name),
+                "name {name:?} from title {title:?} is not a safe name"
+            );
+        }
+    }
+
+    #[test]
+    fn spawn_session_name_sanitizes_separators_and_dot_runs() {
+        let mut task = sample_task(None);
+        task.title = "feat/foo".to_string();
+        assert_eq!(task.spawn_session_name(), "feat foo");
+        task.title = "weird.. name".to_string();
+        assert_eq!(task.spawn_session_name(), "weird. name");
+        task.title = "...leading".to_string();
+        assert_eq!(task.spawn_session_name(), "leading");
+    }
+
+    #[test]
+    fn spawn_session_name_falls_back_to_bare_id_when_blank() {
+        let mut task = sample_task(None);
+        task.title = "   ".to_string();
+        assert_eq!(task.spawn_session_name(), "task-42");
+        // A title of only separators/dots also collapses to nothing usable.
+        task.title = "/// ...".to_string();
         assert_eq!(task.spawn_session_name(), "task-42");
     }
 

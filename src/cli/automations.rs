@@ -344,6 +344,7 @@ fn fire_headless(
                 agent_session_id: None,
                 host: None,
                 parent_session_id: None,
+                spawn_task_id: None,
             };
             match crate::session_ops::spawn_session_headless(db, req) {
                 Ok(result) => {

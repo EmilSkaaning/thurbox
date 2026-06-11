@@ -89,6 +89,12 @@ pub struct SharedSession {
     /// after all ordered sessions, in creation order.
     pub display_order: Option<i64>,
 
+    /// Task id this session was spawned for (`Spawn` action), if any. The
+    /// durable task↔session link: lets a spawned session display the friendly
+    /// task title while still being recoverable after a restart. `None` for
+    /// sessions not spawned from a task.
+    pub spawn_task_id: Option<i64>,
+
     /// Tombstone flag: true if this session was soft-deleted.
     /// Soft-deleted sessions are excluded from active listings.
     pub tombstone: bool,

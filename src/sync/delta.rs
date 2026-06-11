@@ -97,6 +97,7 @@ fn session_changed(old: &SharedSession, new: &SharedSession) -> bool {
         || old.worktrees != new.worktrees
         || old.parent_session_id != new.parent_session_id
         || old.display_order != new.display_order
+        || old.spawn_task_id != new.spawn_task_id
 }
 
 #[cfg(test)]
@@ -118,6 +119,7 @@ mod tests {
             shell_backend_id: None,
             parent_session_id: None,
             display_order: None,
+            spawn_task_id: None,
             tombstone: false,
             tombstone_at: None,
         }

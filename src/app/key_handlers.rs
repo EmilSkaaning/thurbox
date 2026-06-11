@@ -654,8 +654,8 @@ impl App {
                     self.open_task_action_picker(&task);
                 }
             }
-            // Jump to the task's related session terminal (the spawned
-            // `task-<id>-<slug>` window, or a persisted Send target).
+            // Jump to the task's related session terminal (the session spawned
+            // for this task, or a persisted Send target).
             KeyCode::Char('o') => self.open_task_related_session(),
             KeyCode::Char('d') => self.delete_selected_task(),
             _ => {}

@@ -48,9 +48,9 @@ impl Database {
                 "UPDATE sessions SET name = ?1, agent = ?2, \
                  backend_id = ?3, backend_type = ?4, agent_session_id = ?5, \
                  cwd = ?6, additional_dirs = ?7, shell_backend_id = ?8, \
-                 parent_session_id = ?9, display_order = ?10, updated_at = ?11, \
-                 deleted_at = NULL \
-                 WHERE id = ?12",
+                 parent_session_id = ?9, display_order = ?10, spawn_task_id = ?11, \
+                 updated_at = ?12, deleted_at = NULL \
+                 WHERE id = ?13",
                 params![
                     session.name,
                     session.agent,
@@ -62,6 +62,7 @@ impl Database {
                     session.shell_backend_id,
                     session.parent_session_id.map(|id| id.to_string()),
                     session.display_order,
+                    session.spawn_task_id,
                     now,
                     id_str,
                 ],
@@ -79,8 +80,8 @@ impl Database {
             self.conn.execute(
                 "INSERT INTO sessions (id, name, agent, backend_id, backend_type, \
                  agent_session_id, cwd, additional_dirs, shell_backend_id, \
-                 parent_session_id, display_order, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 parent_session_id, display_order, spawn_task_id, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     id_str,
                     session.name,
@@ -93,6 +94,7 @@ impl Database {
                     session.shell_backend_id,
                     session.parent_session_id.map(|id| id.to_string()),
                     session.display_order,
+                    session.spawn_task_id,
                     now,
                     now,
                 ],
@@ -176,7 +178,7 @@ impl Database {
         let sql = format!(
             "SELECT s.id, s.name, s.agent, s.backend_id, s.backend_type, \
              s.agent_session_id, s.cwd, s.additional_dirs, s.shell_backend_id, \
-             s.parent_session_id, s.display_order, \
+             s.parent_session_id, s.display_order, s.spawn_task_id, \
              w.repo_path, w.worktree_path, w.branch \
              FROM sessions s \
              LEFT JOIN worktrees w ON s.id = w.session_id AND w.deleted_at IS NULL \
@@ -370,9 +372,10 @@ fn row_to_shared_session(
     let shell_backend_id: Option<String> = row.get(8)?;
     let parent_str: Option<String> = row.get(9)?;
     let display_order: Option<i64> = row.get(10)?;
-    let wt_repo: Option<String> = row.get(11)?;
-    let wt_path: Option<String> = row.get(12)?;
-    let wt_branch: Option<String> = row.get(13)?;
+    let spawn_task_id: Option<i64> = row.get(11)?;
+    let wt_repo: Option<String> = row.get(12)?;
+    let wt_path: Option<String> = row.get(13)?;
+    let wt_branch: Option<String> = row.get(14)?;
 
     let additional_dirs: Vec<PathBuf> = if dirs_str.is_empty() {
         Vec::new()
@@ -396,6 +399,7 @@ fn row_to_shared_session(
             shell_backend_id,
             parent_session_id: parent_str.and_then(|s| s.parse().ok()),
             display_order,
+            spawn_task_id,
             tombstone: false,
             tombstone_at: None,
         },
@@ -421,6 +425,7 @@ mod tests {
             shell_backend_id: None,
             parent_session_id: None,
             display_order: None,
+            spawn_task_id: None,
             tombstone: false,
             tombstone_at: None,
         }
@@ -700,6 +705,32 @@ mod tests {
         let found = db.get_session_by_id(child.id).unwrap().unwrap();
         assert_eq!(found.name, "Worker 2");
         assert_eq!(found.parent_session_id, Some(parent.id));
+    }
+
+    #[test]
+    fn session_spawn_task_id_roundtrips() {
+        let db = Database::open_in_memory().unwrap();
+        let mut session = make_session("Wire up SSH backend");
+        session.spawn_task_id = Some(42);
+        db.upsert_session(&session).unwrap();
+
+        let found = db.get_session_by_id(session.id).unwrap().unwrap();
+        assert_eq!(found.spawn_task_id, Some(42));
+        // The friendly name persists verbatim alongside the durable link.
+        assert_eq!(found.name, "Wire up SSH backend");
+
+        // A non-task session keeps a NULL link.
+        let plain = make_session("manual");
+        db.upsert_session(&plain).unwrap();
+        let found = db.get_session_by_id(plain.id).unwrap().unwrap();
+        assert_eq!(found.spawn_task_id, None);
+
+        // An update preserves the link.
+        let mut renamed = session.clone();
+        renamed.name = "Renamed".into();
+        db.upsert_session(&renamed).unwrap();
+        let found = db.get_session_by_id(session.id).unwrap().unwrap();
+        assert_eq!(found.spawn_task_id, Some(42));
     }
 
     #[test]

@@ -197,6 +197,11 @@ pub struct SessionInfo {
     /// Manual position in the session list. `None` = never moved: renders
     /// after all ordered sessions, in creation order.
     pub display_order: Option<i64>,
+    /// Task id this session was spawned for (`Spawn` action), if any. The
+    /// durable task↔session link, recovered from the persisted session so the
+    /// task panel can find its session by id rather than name convention.
+    /// `None` for sessions not spawned from a task.
+    pub spawn_task_id: Option<i64>,
 }
 
 impl SessionInfo {
@@ -220,6 +225,7 @@ impl SessionInfo {
             repo_display_names: Vec::new(),
             parent_session_id: None,
             display_order: None,
+            spawn_task_id: None,
         }
     }
 }

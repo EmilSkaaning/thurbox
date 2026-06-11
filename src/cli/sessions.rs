@@ -129,6 +129,7 @@ pub fn run(action: Action, db: &Database) -> Result<Value, String> {
                 agent_session_id: None,
                 host,
                 parent_session_id,
+                spawn_task_id: None,
             };
             let res = crate::session_ops::spawn_session_headless(db, req)?;
             Ok(json!({
@@ -269,6 +270,7 @@ mod tests {
             shell_backend_id: None,
             parent_session_id: None,
             display_order: None,
+            spawn_task_id: None,
             tombstone: false,
             tombstone_at: None,
         };
@@ -306,6 +308,7 @@ mod tests {
             shell_backend_id: None,
             parent_session_id: None,
             display_order: None,
+            spawn_task_id: None,
             tombstone: false,
             tombstone_at: None,
         };
@@ -379,6 +382,7 @@ mod tests {
             shell_backend_id: None,
             parent_session_id: None,
             display_order: None,
+            spawn_task_id: None,
             tombstone: false,
             tombstone_at: None,
         };
@@ -414,6 +418,7 @@ mod tests {
             shell_backend_id: None,
             parent_session_id: None,
             display_order: None,
+            spawn_task_id: None,
             tombstone: false,
             tombstone_at: None,
         };
