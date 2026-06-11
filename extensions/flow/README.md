@@ -66,6 +66,7 @@ automation) untouched. It
 | `scripts/flow-snapshot.sh` | One-call backlog + sessions view |
 | `scripts/parse-result.sh` | Extract the worker `===RESULT===` sentinel |
 | `install.sh` | Idempotent, self-updating installer/bootstrapper |
+| `IMPROVEMENTS.md` | Architectural plan for the next round of flow enhancements |
 
 ## Uninstall
 
