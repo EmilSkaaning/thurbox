@@ -105,6 +105,7 @@ hardcoded.
 | `two_panel_min_cols` | `80` | width below which only the terminal renders |
 | `three_panel_min_cols` | `120` | width unlocking the optional third column |
 | `audit_retention_days` | `90` | audit-log history kept (pruned on startup) |
+| `task_retention_days` | `30` | days a done task is kept before auto-removal (soft-deleted on startup; `0` disables) |
 
 ## themes.toml
 

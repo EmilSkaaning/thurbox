@@ -783,7 +783,8 @@ impl App {
                 ("r", " run  "),
                 ("Space", " status  "),
                 ("n", " new  "),
-                ("d", " del"),
+                ("d", " del  "),
+                ("C", " clear done"),
             ]
         } else {
             &[
@@ -792,7 +793,8 @@ impl App {
                 ("o", " open  "),
                 ("Space", " status  "),
                 ("n", " new  "),
-                ("d", " del"),
+                ("d", " del  "),
+                ("C", " clear done"),
             ]
         };
         crate::ui::task_detail::render_task_detail(

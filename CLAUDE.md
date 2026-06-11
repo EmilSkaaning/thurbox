@@ -527,7 +527,8 @@ sync, but the TUI editor never sets it.)
   `Space` cycle status, `r` open the **trigger-time action picker**, `o` **open
   the task's related session** (`App::open_task_related_session` — jumps to the
   spawned `task-<id>-<slug>` window or a Send target, else a status hint), `d`/`Ctrl+D`
-  delete, `Esc` back to the session list. In the editor: field nav +
+  delete, `C` **clear all done tasks** (`App::clear_done_tasks`, guided lifecycle
+  cleanup), `Esc` back to the session list. In the editor: field nav +
   `Enter`/`Ctrl+S` save (→ back to panel), `Esc` discard; the editor captures
   its keys before global bindings (so `e`/`d` edit text) via
   `handle_automation_pane_capture`.
@@ -542,12 +543,21 @@ sync, but the TUI editor never sets it.)
   cleared on a manual `Ctrl+N` so a cancelled task-spawn can't leak into it.
   Both paths call `App::advance_task_to_in_progress`.
 - **CLI**: `thurbox-cli task` (alias `todo`) —
-  `create`/`list`/`show`/`edit`/`remove`/`run`. `create`/`edit` take an
+  `create`/`list`/`show`/`edit`/`remove`/`run`/`cleanup`. `create`/`edit` take an
   optional `--description` (markdown; `edit --description ""` clears it), and
   `task_to_json` emits a `description` field. `create` with neither
   `--session` nor `--repo` is a plain local todo; `run` triggers the
-  Send/Spawn action headlessly. Tasks do **not** participate in sync
+  Send/Spawn action headlessly. `cleanup` soft-deletes done tasks (all of them,
+  or `--older-than-days N` for the retention sweep), returning `{cleared: N}`.
+  Tasks do **not** participate in sync
   (`SharedState`) and have no run-history table (audited via `audit_log`).
+- **Lifecycle / cleanup** — done tasks don't accumulate without bound. On every
+  DB open (`storage::Database::open`) `prune_done_tasks` soft-deletes done tasks
+  last updated more than `task_retention_days` ago (`settings.toml`, default 30;
+  `0` disables the sweep). On-demand cleanup is `clear_done_tasks` (all done
+  tasks regardless of age), exposed as the tasks panel's **`C`** key
+  (`App::clear_done_tasks`) and `thurbox-cli task cleanup`. Both are soft-deletes
+  audited per row, so cleared tasks stay restorable.
 
 ## Extensions
 

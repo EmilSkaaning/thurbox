@@ -658,7 +658,34 @@ impl App {
             // `task-<id>-<slug>` window, or a persisted Send target).
             KeyCode::Char('o') => self.open_task_related_session(),
             KeyCode::Char('d') => self.delete_selected_task(),
+            // Clear every completed task at once (guided cleanup), so the list
+            // doesn't accumulate done items between automatic retention sweeps.
+            KeyCode::Char('C') => self.clear_done_tasks(),
             _ => {}
+        }
+    }
+
+    /// Soft-delete every done task on demand (the `C` key), then clamp the
+    /// selection and report the count.
+    fn clear_done_tasks(&mut self) {
+        match self.db.clear_done_tasks() {
+            Ok(0) => self.set_status(super::StatusLevel::Info, "No done tasks to clear"),
+            Ok(n) => {
+                self.refresh_tasks();
+                let new_count = self.task_ui.filtered_task_indices.len();
+                if new_count > 0 && self.task_ui.task_panel_index >= new_count {
+                    self.task_ui.task_panel_index = new_count - 1;
+                }
+                self.refresh_task_view();
+                self.set_status(
+                    super::StatusLevel::Success,
+                    format!("Cleared {n} done task{}", if n == 1 { "" } else { "s" }),
+                );
+            }
+            Err(e) => {
+                error!("Failed to clear done tasks: {e}");
+                self.set_status(super::StatusLevel::Error, "Failed to clear done tasks");
+            }
         }
     }
 

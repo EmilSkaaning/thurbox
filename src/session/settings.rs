@@ -33,6 +33,13 @@ pub struct Settings {
     /// Days of audit-log history kept (pruned on startup).
     #[serde(default = "default_audit_retention_days")]
     pub audit_retention_days: u64,
+    /// Days a **done** task is kept before being auto-removed (soft-deleted on
+    /// startup, so the task list doesn't grow without bound). Counted from the
+    /// task's last update. `0` disables the automatic sweep — done tasks then
+    /// only go away via manual cleanup (`thurbox-cli task cleanup` / the tasks
+    /// panel's clear-done key).
+    #[serde(default = "default_task_retention_days")]
+    pub task_retention_days: u64,
 }
 
 fn default_scrollback_lines() -> usize {
@@ -47,6 +54,9 @@ fn default_three_panel_min_cols() -> u16 {
 fn default_audit_retention_days() -> u64 {
     90
 }
+fn default_task_retention_days() -> u64 {
+    30
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -56,6 +66,7 @@ impl Default for Settings {
             two_panel_min_cols: default_two_panel_min_cols(),
             three_panel_min_cols: default_three_panel_min_cols(),
             audit_retention_days: default_audit_retention_days(),
+            task_retention_days: default_task_retention_days(),
         }
     }
 }
@@ -86,6 +97,7 @@ mod tests {
         assert_eq!(s.two_panel_min_cols, 80);
         assert_eq!(s.three_panel_min_cols, 120);
         assert_eq!(s.audit_retention_days, 90);
+        assert_eq!(s.task_retention_days, 30);
     }
 
     #[test]
@@ -93,6 +105,7 @@ mod tests {
         let s: Settings = toml::from_str("scrollback_lines = 5000").unwrap();
         assert_eq!(s.scrollback_lines, 5000);
         assert_eq!(s.audit_retention_days, 90);
+        assert_eq!(s.task_retention_days, 30);
     }
 
     #[test]

@@ -33,6 +33,12 @@ config_version = 1
 
 # Days of audit-log history kept (pruned on startup).
 # audit_retention_days = 90
+
+# Days a done task is kept before auto-removal (soft-deleted on startup).
+# Counted from the task's last update. Set to 0 to disable the automatic
+# sweep (done tasks then only clear via `thurbox-cli task cleanup` or the
+# tasks panel's clear-done key).
+# task_retention_days = 30
 "#;
 
 /// Path to the settings file: `~/.config/thurbox/settings.toml`.
@@ -122,6 +128,7 @@ mod tests {
             "two_panel_min_cols",
             "three_panel_min_cols",
             "audit_retention_days",
+            "task_retention_days",
         ] {
             assert!(
                 SEED_SETTINGS_TOML.contains(field),

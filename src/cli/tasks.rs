@@ -75,6 +75,16 @@ pub enum Action {
         /// Task id.
         id: i64,
     },
+    /// Clean up completed tasks so the list doesn't grow without bound.
+    ///
+    /// By default removes **all** done tasks (soft delete). Pass
+    /// `--older-than-days N` to only remove done tasks last updated more than N
+    /// days ago — the same retention sweep that runs automatically on startup.
+    Cleanup {
+        /// Only remove done tasks last updated more than N days ago.
+        #[arg(long)]
+        older_than_days: Option<u64>,
+    },
 }
 
 pub fn run(action: Action, db: &Database) -> Result<Value, String> {
@@ -142,6 +152,17 @@ pub fn run(action: Action, db: &Database) -> Result<Value, String> {
         Action::Run { id } => {
             let task = load(db, id)?;
             run_task(db, &task)
+        }
+        Action::Cleanup { older_than_days } => {
+            let cleared = match older_than_days {
+                Some(days) => db
+                    .prune_done_tasks(days)
+                    .map_err(|e| format!("prune_done_tasks: {e}"))?,
+                None => db
+                    .clear_done_tasks()
+                    .map_err(|e| format!("clear_done_tasks: {e}"))?,
+            };
+            Ok(json!({ "cleared": cleared }))
         }
     }
 }
@@ -316,4 +337,64 @@ fn task_to_json(t: &Task) -> Value {
         "created_at": t.created_at,
         "updated_at": t.updated_at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a task at a given status via the CLI handler.
+    fn make(db: &Database, title: &str, status: &str) -> i64 {
+        let out = run(
+            Action::Create {
+                title: title.into(),
+                description: None,
+                status: Some(status.into()),
+                session: None,
+                repo: None,
+                worktree: None,
+                base: None,
+                agent: None,
+            },
+            db,
+        )
+        .unwrap();
+        out["id"].as_i64().unwrap()
+    }
+
+    #[test]
+    fn cleanup_clears_all_done_tasks() {
+        let db = Database::open_in_memory().unwrap();
+        make(&db, "open", "todo");
+        let done = make(&db, "finished", "done");
+
+        let out = run(
+            Action::Cleanup {
+                older_than_days: None,
+            },
+            &db,
+        )
+        .unwrap();
+        assert_eq!(out["cleared"], 1);
+        // The done task is gone; the todo survives.
+        assert!(db.get_task(done).unwrap().is_none());
+        assert_eq!(db.list_tasks().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cleanup_with_age_keeps_recent_done_tasks() {
+        let db = Database::open_in_memory().unwrap();
+        // A freshly-created done task is within any positive retention window,
+        // so an age-bounded cleanup removes nothing.
+        make(&db, "just finished", "done");
+        let out = run(
+            Action::Cleanup {
+                older_than_days: Some(7),
+            },
+            &db,
+        )
+        .unwrap();
+        assert_eq!(out["cleared"], 0);
+        assert_eq!(db.list_tasks().unwrap().len(), 1);
+    }
 }

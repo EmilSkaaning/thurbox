@@ -164,6 +164,64 @@ impl Database {
         Ok(updated > 0)
     }
 
+    /// Soft-delete every **done** task, regardless of age. Drives the on-demand
+    /// "clear done" cleanup (the tasks panel's clear-done key and `thurbox-cli
+    /// task cleanup`). Returns the number of tasks removed. Audited per row so
+    /// the deletions stay traceable, matching [`soft_delete_task`].
+    ///
+    /// [`soft_delete_task`]: Self::soft_delete_task
+    pub fn clear_done_tasks(&self) -> rusqlite::Result<usize> {
+        self.soft_delete_done_tasks(None)
+    }
+
+    /// Soft-delete **done** tasks older than `retention_days` (counted from the
+    /// task's last update). `0` disables the sweep (returns `Ok(0)`). Run on
+    /// startup so completed tasks don't accumulate without bound. Returns the
+    /// number of tasks removed.
+    pub fn prune_done_tasks(&self, retention_days: u64) -> rusqlite::Result<usize> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = current_time_millis().saturating_sub(retention_days * MS_PER_DAY);
+        self.soft_delete_done_tasks(Some(cutoff as i64))
+    }
+
+    /// Shared body of [`clear_done_tasks`]/[`prune_done_tasks`]: soft-delete the
+    /// active `done` tasks (optionally only those last updated before `cutoff`),
+    /// auditing each removed row. Returns how many were removed.
+    ///
+    /// [`clear_done_tasks`]: Self::clear_done_tasks
+    /// [`prune_done_tasks`]: Self::prune_done_tasks
+    fn soft_delete_done_tasks(&self, cutoff: Option<i64>) -> rusqlite::Result<usize> {
+        let done = TaskStatus::Done.as_str();
+        // Collect the ids first so each deletion can be audited individually.
+        let ids: Vec<i64> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id FROM tasks
+                 WHERE status = ?1 AND deleted_at IS NULL
+                   AND (?2 IS NULL OR updated_at < ?2)",
+            )?;
+            let rows = stmt.query_map(params![done, cutoff], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let now = current_time_millis() as i64;
+        for id in &ids {
+            self.conn.execute(
+                "UPDATE tasks SET deleted_at = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+                params![id, now],
+            )?;
+            self.log_audit(
+                EntityType::Task,
+                &id.to_string(),
+                AuditAction::Deleted,
+                None,
+                None,
+                None,
+            )?;
+        }
+        Ok(ids.len())
+    }
+
     /// Soft-delete a task (mark `deleted_at`). Returns whether a row changed.
     pub fn soft_delete_task(&self, id: i64) -> rusqlite::Result<bool> {
         let now = current_time_millis() as i64;
@@ -184,6 +242,9 @@ impl Database {
         Ok(updated > 0)
     }
 }
+
+/// Milliseconds in a day, for [`Database::prune_done_tasks`] retention math.
+const MS_PER_DAY: u64 = 24 * 60 * 60 * 1000;
 
 /// Column list for task SELECTs (keep in sync with [`map_task`]).
 const COLS: &str = "id, title, status, action_kind, target_session, repo_path, \
@@ -419,6 +480,84 @@ mod tests {
         got.description = None;
         db.update_task(&got).unwrap();
         assert_eq!(db.get_task(id).unwrap().unwrap().description, None);
+    }
+
+    /// Force a task's `updated_at` to an arbitrary timestamp, bypassing the
+    /// auto-stamping in `set_task_status`/`update_task` (so retention math can be
+    /// tested without sleeping).
+    fn backdate(db: &Database, id: i64, updated_at: i64) {
+        db.conn
+            .execute(
+                "UPDATE tasks SET updated_at = ?2 WHERE id = ?1",
+                params![id, updated_at],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn clear_done_removes_only_done_tasks() {
+        let db = Database::open_in_memory().unwrap();
+        let todo = db.create_task(&NewTask::local("todo")).unwrap();
+        let in_prog = db.create_task(&NewTask::local("in progress")).unwrap();
+        let done_a = db.create_task(&NewTask::local("done a")).unwrap();
+        let done_b = db.create_task(&NewTask::local("done b")).unwrap();
+        db.set_task_status(in_prog, TaskStatus::InProgress).unwrap();
+        db.set_task_status(done_a, TaskStatus::Done).unwrap();
+        db.set_task_status(done_b, TaskStatus::Done).unwrap();
+
+        assert_eq!(db.clear_done_tasks().unwrap(), 2);
+        // The done tasks are gone; the others survive.
+        let remaining: Vec<i64> = db.list_tasks().unwrap().into_iter().map(|t| t.id).collect();
+        assert_eq!(remaining, vec![in_prog, todo]); // newest-first
+        assert!(db.get_task(done_a).unwrap().is_none());
+        assert!(db.get_task(done_b).unwrap().is_none());
+        // Idempotent: a second sweep removes nothing.
+        assert_eq!(db.clear_done_tasks().unwrap(), 0);
+    }
+
+    #[test]
+    fn prune_done_respects_retention_window() {
+        let db = Database::open_in_memory().unwrap();
+        let now = current_time_millis() as i64;
+        let day = MS_PER_DAY as i64;
+
+        let fresh = db.create_task(&NewTask::local("fresh done")).unwrap();
+        let stale = db.create_task(&NewTask::local("stale done")).unwrap();
+        let stale_todo = db.create_task(&NewTask::local("stale todo")).unwrap();
+        db.set_task_status(fresh, TaskStatus::Done).unwrap();
+        db.set_task_status(stale, TaskStatus::Done).unwrap();
+        // Backdate the "stale" tasks well past a 7-day window.
+        backdate(&db, fresh, now - day); // 1 day old, within window
+        backdate(&db, stale, now - 10 * day);
+        backdate(&db, stale_todo, now - 10 * day);
+
+        // Only the old *done* task is pruned; old todos and recent done stay.
+        assert_eq!(db.prune_done_tasks(7).unwrap(), 1);
+        assert!(db.get_task(stale).unwrap().is_none());
+        assert!(db.get_task(fresh).unwrap().is_some());
+        assert!(db.get_task(stale_todo).unwrap().is_some());
+    }
+
+    #[test]
+    fn prune_done_zero_retention_disables_sweep() {
+        let db = Database::open_in_memory().unwrap();
+        let id = db.create_task(&NewTask::local("ancient")).unwrap();
+        db.set_task_status(id, TaskStatus::Done).unwrap();
+        backdate(&db, id, 0); // epoch — as stale as possible
+        assert_eq!(db.prune_done_tasks(0).unwrap(), 0);
+        assert!(db.get_task(id).unwrap().is_some());
+    }
+
+    #[test]
+    fn clear_done_logs_audit_per_task() {
+        let db = Database::open_in_memory().unwrap();
+        let id = db.create_task(&NewTask::local("done")).unwrap();
+        db.set_task_status(id, TaskStatus::Done).unwrap();
+        assert_eq!(db.clear_done_tasks().unwrap(), 1);
+        let entries = db
+            .get_audit_log(Some(EntityType::Task), Some(&id.to_string()), 10)
+            .unwrap();
+        assert!(entries.iter().any(|e| e.action == "deleted"));
     }
 
     #[test]

@@ -56,6 +56,14 @@ impl Database {
         if let Err(e) = db.prune_audit_log() {
             tracing::warn!("Failed to prune audit log: {e}");
         }
+        // Auto-remove long-completed tasks so the todo list doesn't grow without
+        // bound (settings.toml `task_retention_days`, default 30; 0 disables).
+        let task_retention = crate::session::settings::global().task_retention_days;
+        match db.prune_done_tasks(task_retention) {
+            Ok(n) if n > 0 => tracing::info!("Pruned {n} done task(s) past retention"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Failed to prune done tasks: {e}"),
+        }
         Ok(db)
     }
 

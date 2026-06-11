@@ -61,11 +61,13 @@ pub fn render_tasks_panel(frame: &mut Frame, area: Rect, state: &TaskPaneState<'
     if matches!(state.focus, FocusLevel::Focused) && inner.height > 2 {
         let hint_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
         frame.render_widget(
-            // Same relative order as the central preview footer (e · r · n).
+            // Same relative order as the central preview footer (e · r · n),
+            // plus `C` to clear completed tasks (guided lifecycle cleanup).
             Paragraph::new(super::key_hint_line(&[
                 ("e", " edit "),
                 ("r", " run "),
                 ("n", " new "),
+                ("C", " clear done "),
             ])),
             hint_area,
         );
