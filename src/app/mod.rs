@@ -4181,6 +4181,38 @@ impl App {
         out
     }
 
+    /// The live [`SessionStatus`](crate::session::SessionStatus) to surface for a
+    /// task in the dashboard view — the status of its related open session(s),
+    /// or `None` when no related session is open.
+    ///
+    /// When a task drives more than one open session the most *urgent* status
+    /// wins (a worker that needs you outranks one quietly working), so a
+    /// "needs attention" signal is never hidden behind a busy sibling. The status
+    /// is read live from in-memory session state (refreshed each tick from the
+    /// PTY) — there is no separate fetch, cache, or schema; the dashboard is a
+    /// pure view over existing model state.
+    pub(crate) fn task_linked_status(
+        &self,
+        task: &crate::session::Task,
+    ) -> Option<crate::session::SessionStatus> {
+        use crate::session::SessionStatus;
+        // Rank a status by how much it wants the user's eyes; the highest-ranked
+        // among a task's sessions is the one shown.
+        fn urgency(s: SessionStatus) -> u8 {
+            match s {
+                SessionStatus::Attention => 4,
+                SessionStatus::Error => 3,
+                SessionStatus::Busy => 2,
+                SessionStatus::Waiting => 1,
+                SessionStatus::Idle => 0,
+            }
+        }
+        self.task_related_session_indices(task)
+            .iter()
+            .filter_map(|&i| self.sessions.get(i).map(|s| s.info.status))
+            .max_by_key(|s| urgency(*s))
+    }
+
     /// Jump to the task's related session terminal (the first open one). Bound
     /// to `o` in the focused tasks panel; mirrors `open_run_related_session`.
     pub(crate) fn open_task_related_session(&mut self) {
@@ -6546,6 +6578,35 @@ mod tests {
         let sid = app.sessions[0].info.id;
         app.task_ui.task_session_links.insert(id, sid);
         assert_eq!(app.task_related_session_indices(&task), vec![0]);
+    }
+
+    #[test]
+    fn task_linked_status_reflects_related_session_and_picks_most_urgent() {
+        use crate::session::SessionStatus;
+        let mut app = app_with_sessions(2);
+        let id = app
+            .db
+            .create_task(&crate::storage::tasks::NewTask::local("t"))
+            .unwrap();
+        app.refresh_tasks();
+        let task = app.db.get_task(id).unwrap().unwrap();
+
+        // No related session → no dashboard status.
+        assert_eq!(app.task_linked_status(&task), None);
+
+        // One related busy session → its status surfaces.
+        app.sessions[1].info.name = task.spawn_session_name();
+        app.sessions[1].info.status = SessionStatus::Busy;
+        assert_eq!(app.task_linked_status(&task), Some(SessionStatus::Busy));
+
+        // A second related session that needs attention outranks the busy one.
+        let sid0 = app.sessions[0].info.id;
+        app.task_ui.task_session_links.insert(id, sid0);
+        app.sessions[0].info.status = SessionStatus::Attention;
+        assert_eq!(
+            app.task_linked_status(&task),
+            Some(SessionStatus::Attention)
+        );
     }
 
     #[test]

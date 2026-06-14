@@ -12,7 +12,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::session::TaskStatus;
+use crate::session::{SessionStatus, TaskStatus};
 
 use super::theme::Theme;
 use super::{focus_block, truncate_ellipsis, FocusLevel};
@@ -26,14 +26,14 @@ pub struct TaskPaneEntry {
     pub match_positions: Vec<usize>,
     /// When a global search is active, rows that don't match are dimmed.
     pub dimmed: bool,
-    /// The task has at least one currently-open related session (a spawned
-    /// `<title> · #<id>` window or a Send target). Drawn as a trailing `⇄`
-    /// marker so a live task is glanceable in the list; press `o` to jump to it.
-    pub linked: bool,
+    /// Live status of the task's related open session(s) — a spawned
+    /// `<title> · #<id>` window or a Send target — or `None` when none is open.
+    /// `Some(_)` is drawn as a trailing status icon (the same glyph + colour the
+    /// session list uses) so the live state of the dispatched work is glanceable;
+    /// press `o` to jump to it. The most urgent status wins when a task drives
+    /// several sessions (see `App::task_linked_status`).
+    pub session_status: Option<SessionStatus>,
 }
-
-/// Trailing marker shown on rows whose task has an open related session.
-const LINKED_MARKER: &str = " ⇄";
 
 pub struct TaskPaneState<'a> {
     pub entries: &'a [TaskPaneEntry],
@@ -117,17 +117,13 @@ fn render_task_list(frame: &mut Frame, area: Rect, state: &TaskPaneState<'_>) {
 }
 
 /// Build one task row: `<glyph> <title>` with global-search highlighting, plus a
-/// trailing `⇄` marker when the task has a live related session.
+/// trailing live-status icon when the task has a related open session.
 fn task_row_line(e: &TaskPaneEntry, selected: bool, width: usize) -> Line<'_> {
     let glyph = status_glyph(e.status);
     // The glyph is its own span; the title follows so highlight byte offsets
-    // (which index `title`) line up. Reserve room for the trailing link marker
-    // so it never pushes the title off-row.
-    let reserved = if e.linked {
-        2 + LINKED_MARKER.chars().count()
-    } else {
-        2
-    };
+    // (which index `title`) line up. Reserve room for the trailing status marker
+    // (a leading space + one-cell icon) so it never pushes the title off-row.
+    let reserved = if e.session_status.is_some() { 4 } else { 2 };
     let title = truncate_ellipsis(&e.title, width.saturating_sub(reserved));
 
     // Matched characters are layered *on top* of this base (see `row_base_style`),
@@ -145,15 +141,18 @@ fn task_row_line(e: &TaskPaneEntry, selected: bool, width: usize) -> Line<'_> {
     spans.extend(super::highlight::highlighted_spans_owned(
         &title, positions, base,
     ));
-    // Trailing accent marker for tasks with a live session. Dimmed rows
-    // (non-matches during a search) keep the dim tone for consistency.
-    if e.linked {
+    // Trailing live-status icon for tasks with a related open session, using the
+    // same glyph + colour the session list shows so the two never drift. Dimmed
+    // rows (non-matches during a search) keep the dim tone for consistency.
+    if let Some(status) = e.session_status {
         let marker_style = if e.dimmed {
             base
         } else {
-            Style::default().fg(Theme::accent())
+            // `super::status_color` (session status) — distinct from the local
+            // `status_color(TaskStatus)` used for the row glyph above.
+            Style::default().fg(super::status_color(status))
         };
-        spans.push(Span::styled(LINKED_MARKER, marker_style));
+        spans.push(Span::styled(format!(" {}", status.icon()), marker_style));
     }
     Line::from(spans)
 }
@@ -185,7 +184,65 @@ mod tests {
             status: TaskStatus::Todo,
             match_positions: vec![],
             dimmed: false,
-            linked: false,
+            session_status: None,
+        }
+    }
+
+    /// Render a single entry into a fresh buffer and return its first row text.
+    fn render_row(entry: TaskPaneEntry) -> String {
+        let backend = TestBackend::new(20, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_tasks_panel(
+                    f,
+                    Rect::new(0, 0, 20, 3),
+                    &TaskPaneState {
+                        entries: &[entry],
+                        selected: 0,
+                        focus: FocusLevel::Inactive,
+                        preview_selected: false,
+                    },
+                );
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.width)
+            .map(|x| buf[(x, 1)].symbol())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn row_shows_linked_session_status_icon() {
+        // A task with a busy related session shows the session-list busy glyph;
+        // attention shows the triangle; no session shows no trailing icon.
+        let busy = render_row(TaskPaneEntry {
+            session_status: Some(SessionStatus::Busy),
+            ..entry("build")
+        });
+        assert!(busy.contains(SessionStatus::Busy.icon()), "got {busy:?}");
+
+        let attn = render_row(TaskPaneEntry {
+            session_status: Some(SessionStatus::Attention),
+            ..entry("build")
+        });
+        assert!(
+            attn.contains(SessionStatus::Attention.icon()),
+            "got {attn:?}"
+        );
+
+        let unlinked = render_row(entry("build"));
+        for s in [
+            SessionStatus::Busy,
+            SessionStatus::Waiting,
+            SessionStatus::Idle,
+            SessionStatus::Error,
+            SessionStatus::Attention,
+        ] {
+            assert!(
+                !unlinked.contains(s.icon()),
+                "unexpected icon in {unlinked:?}"
+            );
         }
     }
 

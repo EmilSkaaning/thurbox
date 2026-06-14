@@ -548,8 +548,14 @@ sync, but the TUI editor never sets it.)
   `ui/tasks_panel.rs` (checkbox glyphs ☐/◐/☑) with the shared
   `ui::focus_block` for the highlighted title + accent border, matching the
   session list / file viewer. `InputFocus::TaskList` is the panel focus. Rows
-  whose task has an **open related session** get a trailing accent `⇄` marker
-  (`TaskPaneEntry::linked`).
+  whose task has an **open related session** get a trailing **live-status icon**
+  — the same shape+colour glyph the session list uses (`SessionStatus::icon()` /
+  `ui::status_color`: ●busy ◆waiting ○idle ✗error ▲attention) — so the dispatched
+  worker's live state is glanceable (`TaskPaneEntry::session_status`, fed by
+  `App::task_linked_status`, which picks the **most urgent** status when a task
+  drives several sessions). The status is read live from in-memory session state
+  each frame — no new fetch, cache, or schema. The task detail pane mirrors it,
+  showing `<icon> <name> — <Status>` per related session.
 - **Full-screen preview / edit toggle** — the central pane is a clean toggle
   (`view::render_task_workspace`): while the tasks panel is focused
   (`InputFocus::TaskList`) it shows the selected task's **full-screen,

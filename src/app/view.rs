@@ -322,7 +322,7 @@ impl App {
                     status: t.status,
                     match_positions: m.as_ref().map(|m| m.positions.clone()).unwrap_or_default(),
                     dimmed: search.is_some() && m.is_none(),
-                    linked: !self.task_related_session_indices(t).is_empty(),
+                    session_status: self.task_linked_status(t),
                 }
             })
             .collect();
@@ -885,10 +885,20 @@ impl App {
         let sessions = if related.is_empty() {
             "none open".to_string()
         } else {
+            // Enrich each related session with its live status icon + label so the
+            // detail pane mirrors the dashboard row (e.g. `● Wire up SSH · #7 —
+            // Busy`). Agent-neutral: status is read live from session state.
             related
                 .iter()
                 .filter_map(|&i| self.sessions.get(i))
-                .map(|s| s.info.name.clone())
+                .map(|s| {
+                    format!(
+                        "{} {} — {}",
+                        s.info.status.icon(),
+                        s.info.name,
+                        s.info.status
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         };
