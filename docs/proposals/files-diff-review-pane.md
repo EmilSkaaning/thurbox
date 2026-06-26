@@ -4,7 +4,9 @@
 **Author:** (proposal)
 **Scope:** Turn the read-only file tree (`Ctrl+E` / `F3`) into a
 glance-able **diff/review pane** that answers *"what did this agent
-change?"* without leaving thurbox.
+change?"* — and lets you leave **review comments/notes** on the diff that
+are handed back to the session's agent so it can proceed with the required
+changes, all without leaving thurbox.
 
 ---
 
@@ -26,6 +28,15 @@ editor. The data is already computed for an unrelated feature: the info
 panel shows `GitStats { files_changed, insertions, deletions, dirty,
 ahead, behind }` via `git::worktree_stats` (`src/git/mod.rs:874`). We
 surface the *counts* but not the *content*.
+
+And once you can *see* the diff, the natural next move is to *act* on it:
+jot a note on a line ("handle the None case here"), then have the agent
+that wrote the code pick it up and fix it. thurbox already has the rail
+for that — the inter-session **message queue** (`thurbox-cli message
+send`) durably delivers a payload into a running agent and wakes it
+(`src/cli/messages.rs`, `agent::tmux::send_prompt_now`). The review pane
+is where those comments get authored and anchored to a file/line; the
+mailbox is how they reach the agent. See §3.6.
 
 **Goal:** make the file viewer default to a diff-first view of the
 session's worktree, mark changed files with status glyphs so they float
@@ -312,6 +323,144 @@ consequences:
   differ, so gate on a small editor-flavor map or honor a
   `THURBOX_EDITOR_LINE_FMT`). Modest, isolated change in `app`.
 
+### 3.6 Review comments / notes → agent action loop
+
+This is the part that turns the pane from *read* into *review*: leave a
+note on the diff, hand it to the agent that wrote the code, let it proceed
+with the change. Modeled on the GitHub flow — **draft many comments, then
+submit the review as one batch** — rather than firing a separate agent
+wake per keystroke.
+
+#### 3.6.1 UX
+
+- **Anchored comment.** With a file's diff open in the central pane
+  (§3.1), move the cursor to a line and press `c`
+  (`Action::AddReviewComment`, scoped to `KeyContext::FileViewer`). A small
+  multi-line input (reuse `modals::TextArea`, the same widget the task
+  editor uses) opens; type the note, `Ctrl+S`/`Enter` saves it anchored to
+  that `(file, line)`. The commented line gets a gutter marker (`▌` +
+  accent) and a count badge on the file row in the list.
+- **File-level / general note.** `C` (shift) on a file row, or on the
+  Changes-mode header, creates a comment with **no line anchor** — a
+  file-wide or session-wide "note" (covers the user's "add notes" ask
+  distinct from line comments; both are the same record with `line:
+  Option<u32>`).
+- **Manage drafts.** A comment marker is selectable; `c` re-opens it to
+  edit, `d` deletes it. Drafts **persist across restarts** (table, §3.6.3)
+  so a review survives a TUI restart or being picked up from a headless
+  `thurbox-cli` session — they are *pending* until submitted.
+- **Submit review.** A pane action `s` (`Action::SubmitReview`, or a
+  footer "Submit review (N)" pill button) composes **all pending comments
+  for the session** into one structured prompt, delivers it to the
+  session's agent, wakes it, and marks the comments `submitted`. A toast
+  reports `sent 4 comments → <agent>`. Submitted comments drop their
+  "pending" styling and move to a collapsed "Submitted" group (history),
+  so you can see what you already asked for.
+- **Round-trip.** Because delivery rides the mailbox (§3.6.4), the agent's
+  reply (`message reply …`, kind `result`) lands back in thurbox exactly
+  like flow/shepherd worker replies do today — no new return channel.
+
+#### 3.6.2 The composed prompt
+
+`ReviewComment`s are rendered into one agent-readable block by a pure
+`Task::agent_prompt`-style builder (`ReviewBundle::agent_prompt`), e.g.:
+
+```text
+Code review on <base>..<branch>. Please address these comments, make the
+changes in this worktree, and reply when done:
+
+  src/foo.rs:42   handle the None case here instead of unwrapping
+  src/bar.rs:10   rename `x` — unclear what it holds
+  (general)       add a test covering the empty-input path
+
+Run `thurbox-cli message reply <id> --kind result --body "…"` when finished.
+```
+
+The line anchors come straight from the diff the user was reading (the
+new-file line of each `DiffLine`), so the agent gets exact coordinates,
+not prose. The trailing self-service hint mirrors `Task::agent_prompt`'s
+existing "how to close this out" footer.
+
+#### 3.6.3 Persistence (drafts need their own store)
+
+The mailbox is **delivery-only** (exactly-once, drained-and-gone) — it
+can't hold an editable draft set. So comments get a dedicated table,
+mirroring `tasks`/`session_messages`:
+
+- `session/` (pure data): `struct ReviewComment { id: i64, session_id:
+  SessionId, path: PathBuf, line: Option<u32>, side: DiffSide, body:
+  String, base_ref: String, created_at: u64, submitted_at: Option<u64> }`
+  where `enum DiffSide { Old, New }` (anchor on the deletion or addition
+  side; v1 defaults to `New`). `line: None` = file/general note.
+- `storage/` (new schema version, next after the current head): a
+  `review_comments` table + an index on `(session_id) WHERE submitted_at
+  IS NULL` (the "pending" query), soft-delete optional. CRUD
+  `create_review_comment` / `list_review_comments(session, pending_only)` /
+  `update_review_comment` / `delete_review_comment` /
+  `mark_review_comments_submitted(ids)` — a direct analogue of
+  `storage/messages.rs` + `storage/tasks.rs`. Audited like tasks.
+
+Note this *also* fixes the diff base needing to be exact: each comment
+snapshots `base_ref` at authoring time, so a comment stays meaningful even
+if the derived base later moves.
+
+#### 3.6.4 Delivery (reuse the mailbox, no new transport)
+
+Submit composes the bundle and reuses the **existing** path end-to-end —
+nothing new in `agent`/`tmux`:
+
+```text
+SubmitReview
+  ├─ app: bundle = ReviewBundle::agent_prompt(pending comments)
+  ├─ db.enqueue_message(NewMessage { to_session_id: session, kind:"review",
+  │                                  body: bundle, from_task_id: None })   (durable)
+  ├─ app.send_prompt_to_session(session, bundle, 0)   (TUI: bracketed-paste + Enter)
+  │     └─ headless equiv: agent::tmux::send_prompt_now(name, bundle)
+  ├─ db.mark_review_comments_submitted(ids)
+  └─ toast "sent N comments → <agent>"
+```
+
+- `enqueue_message` (`storage/messages.rs:93`) gives durable, capped,
+  exactly-once delivery; the agent drains with `thurbox-cli message inbox
+  --claim` (kind `review`) — **no agent-side change needed**, it already
+  reads its mailbox in the flow/shepherd loops.
+- `send_prompt_to_session` (`src/app/mod.rs:4841`) is the TUI nudge that
+  pastes the bundle into the live pane (bracketed-paste safe, so the
+  multi-line body never submits early — same property `task_agent_prompt`
+  relies on). Headless callers use `send_prompt_now`
+  (`agent::tmux.rs:1139`).
+- `kind = "review"` is just a convention string (validation only bounds
+  length, `session/message.rs:54`), consistent with the agent-neutral
+  mailbox — no enum change.
+
+#### 3.6.5 CLI symmetry (optional, Phase 6)
+
+For headless/agent parity, add `thurbox-cli review add --session <id>
+--path <p> [--line N] --body <text>` / `review list` / `review submit
+--session <id>`, wrapping the same `storage` CRUD + the
+`enqueue_message`/wake used by `message send`. This lets a *worker* agent
+itself drop a review note on a peer (e.g. a lead reviewing a worker's
+branch) — the same way flow/shepherd already script the mailbox. Not
+required for the TUI feature; listed so the design stays
+CLI-complete (ADR-style: the binary learns a generic verb, extensions
+compose it).
+
+#### 3.6.6 Module impact (incremental over §3.2)
+
+```text
+session  + ReviewComment, DiffSide, ReviewBundle::agent_prompt (pure data)
+storage  + review_comments table + CRUD (new schema version)
+app      + draft state, add/edit/delete-at-line handlers, SubmitReview
+           (compose → enqueue_message → send_prompt_to_session → mark)
+ui       + comment gutter markers + count badges + the TextArea input,
+           all from PRE-COMPUTED ReviewComment data (never touches git/db)
+cli      + `review` subcommand (Phase 6, optional)
+```
+
+Still inside the architecture rules: `ui` renders `session`-owned
+`ReviewComment`s handed to it by `app`; all DB/mailbox work is in
+`app`/`storage`/`cli`.
+
 ---
 
 ## 4. Phased implementation plan
@@ -342,13 +491,25 @@ insta snapshot of a small fixed diff (the acceptance harness renders to a
 **Phase 4 — open-at-line.**
 Extend `open_file_in_editor` with the first-changed-line jump.
 
-**Phase 5 (follow-up, separate PR) — persisted base + syntax highlight.**
-Persist `base_branch` on the worktree (schema migration) for an exact
-base; optional `syntect` behind `[features] syntax_highlight`; remote
-`*_on(host)` diff variants.
+**Phase 5 — review comments / notes → agent (§3.6).**
+`ReviewComment`/`DiffSide`/`ReviewBundle` in `session/`; the
+`review_comments` table + CRUD in `storage/` (new schema version); draft
+add/edit/delete-at-line handlers, the `TextArea` input + gutter markers in
+`app`/`ui`; `SubmitReview` composing the bundle and delivering via the
+existing `enqueue_message` + `send_prompt_to_session` path. This is the
+"proceed with required changes" loop and depends only on Phase 3 (a
+readable diff to anchor against). Gated by `[features] tasks`-style flag if
+desired.
 
-Phases 0–4 are the proposal's v1. Each phase is independently shippable
-and leaves the pane working.
+**Phase 6 (follow-up, separate PR) — CLI parity + persisted base + syntax
+highlight.** `thurbox-cli review add/list/submit` (§3.6.5); persist
+`base_branch` on the worktree (schema migration) for an exact base;
+optional `syntect` behind `[features] syntax_highlight`; remote
+`*_on(host)` diff + delivery variants.
+
+Phases 0–5 are the proposal's v1 (3–4 are the diff pane; 5 adds the review
+loop). Each phase is independently shippable and leaves the pane working;
+Phases 0–4 ship value even if 5 slips.
 
 ---
 
@@ -363,8 +524,12 @@ and leaves the pane working.
   (`src/app/acceptance.rs`) — open the pane, assert mode/header state, and
   insta-snapshot the diff render for a fixed `FileDiff` fixture (avoid live
   git in the snapshot to keep it deterministic).
-- **Architecture:** `cargo test --test architecture_rules` must stay green
-  — proves `ui` never gained a `git` reference.
+- **Review comments (Phase 5):** pure tests on `ReviewBundle::agent_prompt`
+  (deterministic prompt from a fixed comment set) and the `review_comments`
+  CRUD (round-trip, pending filter, `mark_submitted`) — the `storage` test
+  pattern already used for `tasks`/`messages`. An acceptance test drives
+  add-comment → SubmitReview and asserts a `review` message was enqueued
+  for the session (`list_messages`) and the drafts flipped to submitted.
 
 ---
 
@@ -395,15 +560,39 @@ and leaves the pane working.
 - **R6 — binary / huge files.** `git diff` on a binary yields `Binary
   files differ`. *Mitigation:* detect and render a one-line placeholder;
   `parse_numstat` already treats binaries as `-\t-` (line 826).
-- **R7 — scope creep into a full review tool** (comments, staging,
-  approvals). *Mitigation:* v1 is strictly read-only "what changed";
-  anything write-side is explicitly out of scope.
+- **R7 — comment anchor drift.** A line-anchored comment can go stale if
+  the agent edits the file before reading it (line N no longer means the
+  same thing). *Mitigation:* the composed prompt carries the `base_ref` +
+  the surrounding diff context, not a bare line number, so the agent
+  resolves the anchor against content; the agent is told to *address the
+  intent*, not blindly edit line N. v1 doesn't attempt live anchor
+  re-mapping (a known hard problem) — comments are a one-shot review
+  payload, not a persistent annotation pinned through subsequent edits.
+- **R8 — wake races / dropped delivery.** A wake nudge is best-effort
+  (`enqueue_and_wake` doesn't fail the send if the pane is busy). *Mitigation:*
+  the message is durably enqueued *before* the wake (exactly-once
+  `claim_messages`), and submitting arms the automation heartbeat
+  (`arm_heartbeat`) so a missed wake is still drained headless — identical
+  to how flow/shepherd already guarantee delivery.
+- **R9 — review write-state in the diff cache.** Pending comments must not
+  be blown away by the periodic diff refresh. *Mitigation:* comments live in
+  their own `review_comments` table keyed by `(session, path, line)`, fully
+  decoupled from the ephemeral `WorktreeDiff` cache; a diff refresh
+  re-renders markers from the table, never the reverse.
+- **R10 — scope creep into a full forge review tool** (approvals, threaded
+  replies, resolve/unresolve, suggested-change patches). *Mitigation:* v1
+  is author-note → deliver-to-agent → agent-replies; richer review state is
+  explicitly deferred.
 
 ---
 
 ## 7. Out of scope (v1)
 
-Staging/committing from the pane, inline review comments, side-by-side
-(split) diff, word-level intra-line diff, syntax highlighting of code
-bodies, remote-session diff, and persisting an exact base branch — all
-deferred to follow-ups (§4 Phase 5).
+Staging/committing from the pane, side-by-side (split) diff, word-level
+intra-line diff, syntax highlighting of code bodies, remote-session diff,
+persisting an exact base branch, `thurbox-cli review` parity, and
+forge-grade review state (approve/request-changes, threaded/resolvable
+comments, suggested-change patches, live anchor re-mapping across edits) —
+all deferred to follow-ups (§4 Phases 5–6). Note **review comments/notes
+are now in scope** (§3.6, Phase 5) — they were deferred in the first draft
+of this proposal and pulled in on request.
