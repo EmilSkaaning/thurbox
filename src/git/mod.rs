@@ -1153,6 +1153,77 @@ mod tests {
     }
 
     #[test]
+    fn changed_files_and_file_diff_end_to_end() {
+        use crate::session::DiffStatus;
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        let run = |dir: &Path, args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .expect("run git");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        std::fs::create_dir_all(&work).unwrap();
+        run(&work, &["init", "-q"]);
+        run(&work, &["config", "user.email", "t@example.com"]);
+        run(&work, &["config", "user.name", "t"]);
+        // Base commit on `main` with two files.
+        run(&work, &["checkout", "-q", "-b", "main"]);
+        std::fs::write(work.join("keep.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(work.join("gone.txt"), "bye\n").unwrap();
+        run(&work, &["add", "."]);
+        run(&work, &["commit", "-qm", "base"]);
+
+        // Diverge on a feature branch: modify, delete, add (committed), + untracked.
+        run(&work, &["checkout", "-q", "-b", "feat"]);
+        std::fs::write(work.join("keep.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::remove_file(work.join("gone.txt")).unwrap();
+        std::fs::write(work.join("added.txt"), "new\n").unwrap();
+        run(&work, &["add", "keep.txt", "gone.txt", "added.txt"]);
+        run(&work, &["commit", "-qm", "work"]);
+        std::fs::write(work.join("scratch.txt"), "untracked\n").unwrap();
+
+        let diff = changed_files(&work, "main");
+        let by = |p: &str| {
+            diff.files
+                .iter()
+                .find(|f| f.path.as_path() == std::path::Path::new(p))
+                .map(|f| f.status)
+        };
+        assert_eq!(by("keep.txt"), Some(DiffStatus::Modified));
+        assert_eq!(by("gone.txt"), Some(DiffStatus::Deleted));
+        assert_eq!(by("added.txt"), Some(DiffStatus::Added));
+        assert_eq!(by("scratch.txt"), Some(DiffStatus::Untracked));
+
+        // The modified file's unified diff has the added line, colored as Added.
+        let fd = file_diff(&work, "main", std::path::Path::new("keep.txt"));
+        assert!(!fd.binary);
+        assert!(
+            fd.lines
+                .iter()
+                .any(|l| l.kind == crate::session::DiffLineKind::Added && l.text.contains("three")),
+            "expected an added 'three' line in {:?}",
+            fd.lines
+        );
+
+        // An untracked file synthesizes an all-added view from its contents.
+        let untracked = file_diff(&work, "main", std::path::Path::new("scratch.txt"));
+        assert!(
+            untracked
+                .lines
+                .iter()
+                .any(|l| l.kind == crate::session::DiffLineKind::Added
+                    && l.text.contains("untracked"))
+        );
+    }
+
+    #[test]
     fn parse_numstat_sums_changes() {
         let (files, ins, dels) = parse_numstat("1\t2\tfile.rs\n3\t4\tother.rs\n-\t-\tbin.png\n");
         assert_eq!(files, 3);
