@@ -498,6 +498,24 @@ impl App {
             self.record_scrollbar(geom, ScrollTarget::TaskPreview);
             return;
         }
+        // In the file-viewer context, when the selection is a changed file the
+        // central pane shows that file's color-coded diff vs the base ref.
+        if self.focus == InputFocus::FileViewer {
+            self.ensure_selected_file_diff();
+            if self.selected_file_diff().is_some() {
+                let scroll = self.diff_preview_scroll();
+                if let Some(fd) = self.selected_file_diff() {
+                    crate::ui::diff_view::render_diff(
+                        frame,
+                        terminal,
+                        fd,
+                        scroll,
+                        crate::ui::FocusLevel::Active,
+                    );
+                }
+                return;
+            }
+        }
         // While the global-search strip previews a task result, mirror that in
         // the central pane (focus stays in the strip, so the normal task-context
         // branch above doesn't fire).

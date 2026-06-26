@@ -554,9 +554,16 @@ impl App {
     fn handle_file_viewer_nav_key(&mut self, code: KeyCode) {
         // Navigation/search/expand keys are rebindable `FileViewer`-scoped
         // actions, resolved by the context lookup in `handle_key` before this
-        // runs. Only the fixed "Esc clears an active query" shortcut remains.
-        if matches!(code, KeyCode::Esc) && !self.file_viewer.search_query.is_empty() {
-            self.file_viewer.end_search();
+        // runs. PageUp/PageDown scroll the central-pane diff (when a changed
+        // file is selected); only the fixed "Esc clears an active query"
+        // shortcut otherwise remains.
+        match code {
+            KeyCode::PageDown => self.scroll_diff_preview(10),
+            KeyCode::PageUp => self.scroll_diff_preview(-10),
+            KeyCode::Esc if !self.file_viewer.search_query.is_empty() => {
+                self.file_viewer.end_search();
+            }
+            _ => {}
         }
     }
 

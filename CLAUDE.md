@@ -1184,6 +1184,44 @@ global_search` in settings.toml; scopes whose feature is disabled
   (session list, tasks panel) were removed in favour of it. The file
   viewer's `/` (in-file text search) is unrelated and stays.
 
+## File viewer diff/review pane (`Ctrl+E`)
+
+The file viewer (`Ctrl+E`/`F3`, rightmost 20% column at width ≥ 120) is a
+**git-aware diff/review pane**, not just a tree. It annotates the worktree
+tree with the session's changes vs its base ref and shows a color-coded
+unified diff in the central pane.
+
+- **Changed-file glyphs.** Each tracked change gets an `M`/`A`/`D`/`R`/`?`
+  glyph and a status-colored, bold name in the tree, so changed files stand
+  out from unchanged siblings (`ui::file_viewer::build_row_line` +
+  `diff_status_color`). The `Files` block title carries a rollup —
+  ` Files · Δ origin/main 4f +120 -18 ` — so the comparison base is explicit
+  (`diff_header_title`).
+- **Inline diff.** When the file viewer is focused and the selection is a
+  changed file, the **central pane** renders that file's unified diff vs
+  base, colored by line kind (added=green, removed=red, hunk=accent,
+  context/meta=muted) — `ui::diff_view::render_diff`, dispatched from
+  `App::render_central_pane` (mirrors how `InputFocus::TaskList` repurposes
+  the central pane). `PageUp`/`PageDown` scroll it
+  (`App::diff_preview_scroll`). `Enter`/`FileViewerExpand` still opens the
+  real file in `$EDITOR`.
+- **Base ref.** Derived (not persisted) by `git::resolve_base_ref`
+  (`@{upstream}` → `origin/HEAD` → `origin/main` → `origin/master`) — the
+  **same** chain `Ctrl+S` sync rebases onto and `ahead_behind` measures
+  against, so the diff, the "behind" count, and sync never drift. A worktree
+  with no resolvable base shows the plain tree (no glyphs).
+- **Data flow (respects `ui ✗ git`).** Diff types are pure data in
+  `session::diff` (`DiffStatus`/`FileChange`/`WorktreeDiff` +
+  `DiffLine`/`DiffLineKind`/`FileDiff`). `git::changed_files` /
+  `git::file_diff` *produce* them; `App` computes off the render path (a
+  `worktree_diff` `BackgroundTask` on the `GIT_REFRESH_TICKS` cadence, like
+  `git_stats`, cached in `App::cached_diff`; the per-file diff is lazily
+  computed on selection change into `App::cached_file_diff` via
+  `ensure_selected_file_diff`); `ui` only *renders* the `session`-owned
+  types and never references `git`. v1 is **local-only** (remote `ssh:<host>`
+  sessions skip the diff) and diffs the **primary** worktree; multi-repo +
+  remote diff are follow-ups. Full design: `docs/proposals/files-diff-review-pane.md`.
+
 ## Session status (hooks-driven)
 
 The session list shows, at a glance, which agents are blocked, working,

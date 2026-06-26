@@ -932,11 +932,7 @@ fn parse_name_status(out: &str) -> Vec<(crate::session::DiffStatus, String)> {
 /// Classify each line of a unified diff into a [`DiffLine`] so the UI only
 /// colors by kind. Metadata (`diff --git`, `index`, `---`/`+++`, …) is checked
 /// before the `+`/`-` body cases since `+++`/`---` start with those bytes.
-fn parse_unified_diff(
-    out: &str,
-    path: &Path,
-    base: &str,
-) -> crate::session::FileDiff {
+fn parse_unified_diff(out: &str, path: &Path, base: &str) -> crate::session::FileDiff {
     use crate::session::{DiffLine, DiffLineKind, FileDiff};
     let mut lines = Vec::new();
     let mut binary = false;
@@ -1041,8 +1037,11 @@ pub fn changed_files(cwd: &Path, base: &str) -> crate::session::WorktreeDiff {
         }
     }
 
-    diff.files
-        .sort_by(|a, b| status_rank(a.status).cmp(&status_rank(b.status)).then_with(|| a.path.cmp(&b.path)));
+    diff.files.sort_by(|a, b| {
+        status_rank(a.status)
+            .cmp(&status_rank(b.status))
+            .then_with(|| a.path.cmp(&b.path))
+    });
     diff
 }
 

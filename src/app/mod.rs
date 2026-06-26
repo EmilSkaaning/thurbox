@@ -535,6 +535,14 @@ pub struct App {
     /// root, changes)`. The root is the worktree path the diff's relative paths
     /// resolve against, so the file tree can map an absolute node path → status.
     cached_diff: Option<(SessionId, PathBuf, crate::session::WorktreeDiff)>,
+    /// Lazily-computed unified diff of the file currently selected in the file
+    /// viewer: `(session, absolute file path, diff)`. Recomputed only when the
+    /// selection moves to a different changed file (one `git diff -- <file>`),
+    /// then rendered in the central pane. `None` when the selection isn't a
+    /// changed file.
+    cached_file_diff: Option<(SessionId, PathBuf, crate::session::FileDiff)>,
+    /// Vertical scroll offset (in lines) of the central-pane diff view.
+    diff_preview_scroll: u16,
     /// Cached update-check result, rendered as the header "update available"
     /// badge. `Some` only when `[features] version_check` is on and a newer
     /// release is known (from the on-disk cache). Read off the network — see
@@ -832,6 +840,8 @@ impl App {
             git_stats: background::BackgroundTask::default(),
             worktree_diff: background::BackgroundTask::default(),
             cached_diff: None,
+            cached_file_diff: None,
+            diff_preview_scroll: 0,
             // Seed the badge from the cache (no network); refreshed on first
             // tick if the flag is on and the cache is stale.
             update_status: if crate::session::settings::global().features.version_check {
@@ -3870,6 +3880,83 @@ impl App {
             .as_ref()
             .filter(|(sid, _, _)| *sid == active_id)
             .map(|(_, _, diff)| diff)
+    }
+
+    /// Ensure `cached_file_diff` matches the file viewer's currently-selected
+    /// file. Computes one `git diff -- <file>` only when the selection moved to
+    /// a different *changed* file; a cheap no-op otherwise. Clears the cache
+    /// (and resets scroll) when the selection isn't a changed file. Called from
+    /// the render path — the git call fires on selection change, not per frame.
+    pub(crate) fn ensure_selected_file_diff(&mut self) {
+        let Some(active) = self.sessions.get(self.active_index) else {
+            self.clear_file_diff();
+            return;
+        };
+        let session_id = active.info.id;
+
+        let Some((file, _root)) = self.file_viewer.selected_file_with_root() else {
+            self.clear_file_diff();
+            return;
+        };
+        // The selection must be a changed file under the current diff's root.
+        let Some((sid, root, diff)) = self.cached_diff.as_ref() else {
+            self.clear_file_diff();
+            return;
+        };
+        if *sid != session_id {
+            self.clear_file_diff();
+            return;
+        }
+        let Ok(rel) = file.strip_prefix(root) else {
+            self.clear_file_diff();
+            return;
+        };
+        if diff.status_of(rel).is_none() {
+            self.clear_file_diff();
+            return;
+        }
+
+        // Already cached for this exact file? Then nothing to do.
+        if let Some((csid, cpath, _)) = &self.cached_file_diff {
+            if *csid == session_id && cpath == &file {
+                return;
+            }
+        }
+
+        let base = diff.base_ref.clone();
+        let root = root.clone();
+        let rel = rel.to_path_buf();
+        let fd = crate::git::file_diff(&root, &base, &rel);
+        self.cached_file_diff = Some((session_id, file, fd));
+        self.diff_preview_scroll = 0;
+    }
+
+    fn clear_file_diff(&mut self) {
+        if self.cached_file_diff.is_some() {
+            self.cached_file_diff = None;
+            self.diff_preview_scroll = 0;
+        }
+    }
+
+    /// The diff to render in the central pane for the active session's current
+    /// file-viewer selection, if it's a changed file.
+    pub(crate) fn selected_file_diff(&self) -> Option<&crate::session::FileDiff> {
+        let active_id = self.sessions.get(self.active_index)?.info.id;
+        self.cached_file_diff
+            .as_ref()
+            .filter(|(sid, _, _)| *sid == active_id)
+            .map(|(_, _, fd)| fd)
+    }
+
+    /// Current central-pane diff scroll offset (lines).
+    pub(crate) fn diff_preview_scroll(&self) -> u16 {
+        self.diff_preview_scroll
+    }
+
+    /// Scroll the central-pane diff by `delta` lines (clamped at the top).
+    pub(crate) fn scroll_diff_preview(&mut self, delta: i32) {
+        let next = self.diff_preview_scroll as i32 + delta;
+        self.diff_preview_scroll = next.max(0) as u16;
     }
 
     /// Kick off a background system-metrics refresh.
@@ -9724,6 +9811,35 @@ mod tests {
         app.poll_git_stats();
 
         assert!(!app.git_stats.in_progress());
+    }
+
+    #[test]
+    fn worktree_diff_caches_and_filters_by_active_session() {
+        use crate::session::{DiffStatus, FileChange, WorktreeDiff};
+        let mut app = app_with_sessions(2);
+        let sid0 = app.sessions[0].info.id;
+
+        let diff = WorktreeDiff {
+            base_ref: "origin/main".into(),
+            files: vec![FileChange {
+                path: "a.rs".into(),
+                status: DiffStatus::Modified,
+                insertions: 2,
+                deletions: 1,
+            }],
+        };
+        let tx = app.worktree_diff.start();
+        tx.send((sid0, Some((PathBuf::from("/wt"), diff.clone()))))
+            .unwrap();
+        app.poll_worktree_diff();
+        assert!(!app.worktree_diff.in_progress());
+
+        // Session 0 is active → the diff is surfaced.
+        app.active_index = 0;
+        assert_eq!(app.active_worktree_diff(), Some(&diff));
+        // Switching to a different session hides the (other session's) diff.
+        app.active_index = 1;
+        assert_eq!(app.active_worktree_diff(), None);
     }
 
     #[test]

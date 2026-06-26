@@ -1,6 +1,8 @@
 # Proposal: File viewer → diff/review pane
 
-**Status:** Draft (design only — not implemented)
+**Status:** Phases 0–3 implemented (diff data + producers, status glyphs,
+inline central-pane diff). Phases 4 (open-at-line) and 5 (review
+comments/notes → agent loop) are follow-ups.
 **Author:** (proposal)
 **Scope:** Turn the read-only file tree (`Ctrl+E` / `F3`) into a
 glance-able **diff/review pane** that answers *"what did this agent

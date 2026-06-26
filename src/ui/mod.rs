@@ -6,6 +6,7 @@ pub mod automations_panel;
 pub mod branch_selector_modal;
 pub mod confirm_delete_modal;
 pub mod confirm_restore_modal;
+pub mod diff_view;
 pub mod file_viewer;
 pub mod global_search;
 pub mod highlight;

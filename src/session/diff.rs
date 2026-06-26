@@ -82,10 +82,7 @@ impl WorktreeDiff {
 
     /// Status of a specific path, if it changed. Used to annotate tree rows.
     pub fn status_of(&self, path: &std::path::Path) -> Option<DiffStatus> {
-        self.files
-            .iter()
-            .find(|f| f.path == path)
-            .map(|f| f.status)
+        self.files.iter().find(|f| f.path == path).map(|f| f.status)
     }
 }
 
@@ -196,7 +193,10 @@ mod tests {
             ],
         };
         assert_eq!(d.totals(), (2, 13, 1));
-        assert_eq!(d.status_of(std::path::Path::new("a.rs")), Some(DiffStatus::Modified));
+        assert_eq!(
+            d.status_of(std::path::Path::new("a.rs")),
+            Some(DiffStatus::Modified)
+        );
         assert_eq!(d.status_of(std::path::Path::new("missing")), None);
     }
 
@@ -214,10 +214,22 @@ mod tests {
             base_ref: "origin/main".into(),
             binary: false,
             lines: vec![
-                DiffLine { kind: DiffLineKind::Meta, text: "diff --git".into() },
-                DiffLine { kind: DiffLineKind::Hunk, text: "@@ -10,3 +10,4 @@".into() },
-                DiffLine { kind: DiffLineKind::Context, text: " ctx".into() },
-                DiffLine { kind: DiffLineKind::Added, text: "+new".into() },
+                DiffLine {
+                    kind: DiffLineKind::Meta,
+                    text: "diff --git".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Hunk,
+                    text: "@@ -10,3 +10,4 @@".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Context,
+                    text: " ctx".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Added,
+                    text: "+new".into(),
+                },
             ],
         };
         // hunk new-start 10, one context line → added at 11.

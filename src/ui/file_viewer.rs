@@ -720,7 +720,12 @@ fn render_tree(
         .iter()
         .enumerate()
         .map(|(i, row)| {
-            build_row_line(row, start + i == state.selected, query_lc.as_deref(), changes)
+            build_row_line(
+                row,
+                start + i == state.selected,
+                query_lc.as_deref(),
+                changes,
+            )
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), rows_area);
@@ -1168,5 +1173,59 @@ mod tests {
         st.clear();
         assert_eq!(st.roots.len(), 0);
         assert_eq!(st.selected, 0);
+    }
+
+    #[test]
+    fn diff_header_title_summarizes_changes() {
+        use crate::session::{DiffStatus, FileChange, WorktreeDiff};
+        let d = WorktreeDiff {
+            base_ref: "refs/remotes/origin/main".into(),
+            files: vec![FileChange {
+                path: "a.rs".into(),
+                status: DiffStatus::Modified,
+                insertions: 4,
+                deletions: 1,
+            }],
+        };
+        assert_eq!(
+            diff_header_title(Some(&d)),
+            " Files · Δ origin/main 1f +4 -1 "
+        );
+        // No changes / no diff → plain title.
+        assert_eq!(diff_header_title(None), " Files ");
+        let empty = WorktreeDiff::default();
+        assert_eq!(diff_header_title(Some(&empty)), " Files ");
+    }
+
+    #[test]
+    fn build_row_line_prefixes_status_glyph_for_changed_file() {
+        use crate::session::{DiffStatus, FileChange, WorktreeDiff};
+        let row = FlatRow {
+            index_path: vec![0, 0],
+            depth: 1,
+            label: "a.rs".into(),
+            is_dir: false,
+            expanded: false,
+            path: PathBuf::from("/wt/a.rs"),
+        };
+        let changes = WorktreeDiff {
+            base_ref: "origin/main".into(),
+            files: vec![FileChange {
+                path: "/wt/a.rs".into(),
+                status: DiffStatus::Modified,
+                insertions: 1,
+                deletions: 0,
+            }],
+        };
+        let line = build_row_line(&row, false, None, Some(&changes));
+        // Spans: indent+marker, "M ", label.
+        let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(joined.contains("M "), "expected a status glyph: {joined:?}");
+        assert!(joined.contains("a.rs"));
+
+        // A directory or an unchanged file gets no glyph.
+        let plain = build_row_line(&row, false, None, None);
+        let joined2: String = plain.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!joined2.contains("M "));
     }
 }
