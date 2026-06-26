@@ -526,6 +526,15 @@ pub struct App {
     metrics_refresh: background::BackgroundTask<MetricsRefresh>,
     /// Background active-session git-stats refresh, polled each tick.
     git_stats: background::BackgroundTask<(SessionId, Option<crate::session::GitStats>)>,
+    /// Background active-session worktree-diff refresh (changed files vs the
+    /// resolved base ref), feeding the file-viewer diff pane. Polled each tick;
+    /// computed off the render path like `git_stats`.
+    worktree_diff:
+        background::BackgroundTask<(SessionId, Option<(PathBuf, crate::session::WorktreeDiff)>)>,
+    /// Applied result of the latest `worktree_diff` refresh: `(session, diff
+    /// root, changes)`. The root is the worktree path the diff's relative paths
+    /// resolve against, so the file tree can map an absolute node path → status.
+    cached_diff: Option<(SessionId, PathBuf, crate::session::WorktreeDiff)>,
     /// Cached update-check result, rendered as the header "update available"
     /// badge. `Some` only when `[features] version_check` is on and a newer
     /// release is known (from the on-disk cache). Read off the network — see
@@ -821,6 +830,8 @@ impl App {
             metrics: metrics_state::MetricsState::new(),
             metrics_refresh: background::BackgroundTask::default(),
             git_stats: background::BackgroundTask::default(),
+            worktree_diff: background::BackgroundTask::default(),
+            cached_diff: None,
             // Seed the badge from the cache (no network); refreshed on first
             // tick if the flag is on and the cache is stale.
             update_status: if crate::session::settings::global().features.version_check {
@@ -3470,12 +3481,14 @@ impl App {
     fn tick_background_refreshes(&mut self) {
         self.poll_metrics_refresh();
         self.poll_git_stats();
+        self.poll_worktree_diff();
 
         if self.metrics.tick_count % METRICS_REFRESH_TICKS == 0 {
             self.start_metrics_refresh();
         }
         if self.metrics.tick_count % GIT_REFRESH_TICKS == 0 {
             self.start_git_stats_refresh();
+            self.start_worktree_diff_refresh();
         }
         if self.metrics.tick_count % CONFIG_RELOAD_TICKS == 0 {
             self.poll_config_reload();
@@ -3803,6 +3816,60 @@ impl App {
                 session.info.git_stats = stats;
             }
         }
+    }
+
+    /// Kick off a background worktree-diff refresh for the active session — the
+    /// changed-files-vs-base list that drives the file-viewer diff pane. Runs
+    /// `git` on a blocking task; the result is applied in
+    /// [`Self::poll_worktree_diff`]. Only computed while the file viewer is open
+    /// (the only consumer), and one refresh at a time.
+    fn start_worktree_diff_refresh(&mut self) {
+        if !self.show_file_viewer || self.worktree_diff.in_progress() {
+            return;
+        }
+        let Some(session) = self.sessions.get(self.active_index) else {
+            return;
+        };
+        // v1 diffs the primary worktree (or cwd); multi-repo diff is a follow-up.
+        // Remote (`ssh:<host>`) sessions have no local worktree to diff — skip.
+        if session.info.remote_host.is_some() {
+            return;
+        }
+        let session_id = session.info.id;
+        let Some(root) = session
+            .info
+            .worktrees
+            .first()
+            .map(|wt| wt.worktree_path.clone())
+            .or_else(|| session.info.cwd.clone())
+        else {
+            return;
+        };
+
+        let tx = self.worktree_diff.start();
+        tokio::task::spawn_blocking(move || {
+            let payload = crate::git::resolve_base_ref(&root)
+                .map(|base| (root.clone(), crate::git::changed_files(&root, &base)));
+            let _ = tx.send((session_id, payload));
+        });
+    }
+
+    /// Apply a completed background worktree-diff refresh, if one has finished.
+    fn poll_worktree_diff(&mut self) {
+        if let background::TaskPoll::Done((session_id, payload)) = self.worktree_diff.poll() {
+            self.cached_diff = payload.map(|(root, diff)| (session_id, root, diff));
+        }
+    }
+
+    /// The active session's cached worktree diff, if it matches the current
+    /// selection. Handed to the file viewer so changed files get status glyphs;
+    /// `None` clears them (different session, no base, or not yet computed).
+    pub(crate) fn active_worktree_diff(&self) -> Option<&crate::session::WorktreeDiff> {
+        let active_id = self.sessions.get(self.active_index)?.info.id;
+        self.cached_diff
+            .as_ref()
+            .filter(|(sid, _, _)| *sid == active_id)
+            .map(|(_, _, diff)| diff)
     }
 
     /// Kick off a background system-metrics refresh.
@@ -4309,6 +4376,10 @@ impl App {
         } else {
             self.file_viewer.clear();
         }
+        // Drop any prior session's diff and recompute promptly so glyphs don't
+        // lag the cadence; `active_worktree_diff` filters stale results anyway.
+        self.cached_diff = None;
+        self.start_worktree_diff_refresh();
     }
 
     /// Set status bar message with the given severity level.

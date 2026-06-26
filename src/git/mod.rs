@@ -721,8 +721,10 @@ fn stash_with_retry(worktree_path: &Path) -> Result<bool> {
 /// caller can surface a clear error instead of blindly rebasing onto a
 /// possibly-missing `origin/main`. Shared by [`sync_worktree`] (the rebase
 /// target) and [`ahead_behind`] (the comparison base) so the "behind" count is
-/// always measured against the ref sync would rebase onto.
-fn resolve_base_ref(worktree_path: &Path) -> Option<String> {
+/// always measured against the ref sync would rebase onto. Also the base the
+/// file-viewer diff pane compares against, so the diff, the "behind" count, and
+/// what `Ctrl+S` would rebase onto can never drift apart.
+pub fn resolve_base_ref(worktree_path: &Path) -> Option<String> {
     // A branch with an explicit upstream rebases onto exactly that.
     if run_git_capture(
         &["rev-parse", "--verify", "--quiet", "@{upstream}"],
@@ -893,10 +895,263 @@ pub fn worktree_stats(cwd: &Path) -> Option<crate::session::GitStats> {
     })
 }
 
+/// Status rank for floating changed files: tracked edits first, untracked last.
+fn status_rank(s: crate::session::DiffStatus) -> u8 {
+    use crate::session::DiffStatus::*;
+    match s {
+        Modified => 0,
+        Added => 1,
+        Deleted => 2,
+        Renamed => 3,
+        Untracked => 4,
+    }
+}
+
+/// Parse `git diff --name-status` into `(status, path)` pairs. Rename/copy rows
+/// (`R100\told\tnew`) keep the new (destination) path.
+fn parse_name_status(out: &str) -> Vec<(crate::session::DiffStatus, String)> {
+    let mut v = Vec::new();
+    for line in out.lines() {
+        let mut cols = line.split('\t');
+        let Some(code) = cols.next() else { continue };
+        let letter = code.chars().next().unwrap_or(' ');
+        let Some(status) = crate::session::DiffStatus::from_code(letter) else {
+            continue;
+        };
+        // `.next()` already consumed the code column; the new path is the last
+        // remaining column (handles both `M\tfile` and `R100\told\tnew`).
+        let path = cols.next_back().unwrap_or("");
+        if path.is_empty() {
+            continue;
+        }
+        v.push((status, path.to_string()));
+    }
+    v
+}
+
+/// Classify each line of a unified diff into a [`DiffLine`] so the UI only
+/// colors by kind. Metadata (`diff --git`, `index`, `---`/`+++`, …) is checked
+/// before the `+`/`-` body cases since `+++`/`---` start with those bytes.
+fn parse_unified_diff(
+    out: &str,
+    path: &Path,
+    base: &str,
+) -> crate::session::FileDiff {
+    use crate::session::{DiffLine, DiffLineKind, FileDiff};
+    let mut lines = Vec::new();
+    let mut binary = false;
+    for line in out.lines() {
+        let kind = if line.starts_with("@@") {
+            DiffLineKind::Hunk
+        } else if line.starts_with("Binary files") {
+            binary = true;
+            DiffLineKind::Meta
+        } else if line.starts_with("+++")
+            || line.starts_with("---")
+            || line.starts_with("diff ")
+            || line.starts_with("index ")
+            || line.starts_with("new file")
+            || line.starts_with("deleted file")
+            || line.starts_with("old mode")
+            || line.starts_with("new mode")
+            || line.starts_with("rename ")
+            || line.starts_with("copy ")
+            || line.starts_with("similarity ")
+            || line.starts_with("dissimilarity ")
+            || line.starts_with("GIT binary patch")
+            || line.starts_with('\\')
+        {
+            DiffLineKind::Meta
+        } else if line.starts_with('+') {
+            DiffLineKind::Added
+        } else if line.starts_with('-') {
+            DiffLineKind::Removed
+        } else {
+            DiffLineKind::Context
+        };
+        lines.push(DiffLine {
+            kind,
+            text: line.to_string(),
+        });
+    }
+    FileDiff {
+        path: path.to_path_buf(),
+        base_ref: base.to_string(),
+        lines,
+        binary,
+    }
+}
+
+/// Changed files in `cwd`'s worktree vs `base`, for the diff/review pane.
+///
+/// Merges `git diff --numstat <base>` (line counts) with `--name-status
+/// <base>` (status letters), then appends untracked files (`?? …` from `status
+/// --porcelain`) since those aren't part of a `diff <base>`. Results are sorted
+/// most-significant-status-then-path so changed files float to the top. Returns
+/// an empty [`WorktreeDiff`] (with `base_ref` set) when `cwd` isn't a worktree.
+pub fn changed_files(cwd: &Path, base: &str) -> crate::session::WorktreeDiff {
+    use crate::session::{DiffStatus, FileChange, WorktreeDiff};
+    let mut diff = WorktreeDiff {
+        base_ref: base.to_string(),
+        files: Vec::new(),
+    };
+    if run_git_capture(&["rev-parse", "--is-inside-work-tree"], cwd).is_none() {
+        return diff;
+    }
+
+    // Per-path (insertions, deletions).
+    let numstat = run_git_capture(&["diff", "--numstat", base], cwd).unwrap_or_default();
+    let mut counts: HashMap<String, (usize, usize)> = HashMap::new();
+    for line in numstat.lines() {
+        let mut cols = line.split('\t');
+        let added = cols.next();
+        let deleted = cols.next();
+        if let Some(path) = cols.next() {
+            let ins = added.and_then(|s| s.parse().ok()).unwrap_or(0);
+            let del = deleted.and_then(|s| s.parse().ok()).unwrap_or(0);
+            counts.insert(path.to_string(), (ins, del));
+        }
+    }
+
+    // Status letter per path (authoritative for status).
+    let name_status = run_git_capture(&["diff", "--name-status", base], cwd).unwrap_or_default();
+    for (status, path) in parse_name_status(&name_status) {
+        let (insertions, deletions) = counts.get(&path).copied().unwrap_or((0, 0));
+        diff.files.push(FileChange {
+            path: PathBuf::from(&path),
+            status,
+            insertions,
+            deletions,
+        });
+    }
+
+    // Untracked files aren't in `diff <base>`; surface them as additions.
+    let status = run_git_capture(&["status", "--porcelain"], cwd).unwrap_or_default();
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("?? ") {
+            let p = rest.trim();
+            if !p.is_empty() {
+                diff.files.push(FileChange {
+                    path: PathBuf::from(p),
+                    status: DiffStatus::Untracked,
+                    insertions: 0,
+                    deletions: 0,
+                });
+            }
+        }
+    }
+
+    diff.files
+        .sort_by(|a, b| status_rank(a.status).cmp(&status_rank(b.status)).then_with(|| a.path.cmp(&b.path)));
+    diff
+}
+
+/// Unified diff of a single file vs `base`, parsed into classified lines.
+///
+/// For a tracked change this is `git diff <base> -- <path>`. An untracked file
+/// has no `<base>` side, so its current contents are synthesized as all-added
+/// lines (portable; avoids a `/dev/null` `--no-index` that differs on Windows).
+pub fn file_diff(cwd: &Path, base: &str, path: &Path) -> crate::session::FileDiff {
+    use crate::session::{DiffLine, DiffLineKind, FileDiff};
+    let path_str = path.to_string_lossy();
+    let out = run_git_capture(&["diff", base, "--", &path_str], cwd).unwrap_or_default();
+    if !out.trim().is_empty() {
+        return parse_unified_diff(&out, path, base);
+    }
+
+    // Empty diff: either no change, or an untracked file. Synthesize an
+    // all-added view from the file's current contents when it exists.
+    let abs = cwd.join(path);
+    if let Ok(contents) = std::fs::read_to_string(&abs) {
+        let mut lines = vec![DiffLine {
+            kind: DiffLineKind::Meta,
+            text: format!("untracked file ({} lines)", contents.lines().count()),
+        }];
+        if !contents.is_empty() {
+            lines.push(DiffLine {
+                kind: DiffLineKind::Hunk,
+                text: format!("@@ -0,0 +1,{} @@", contents.lines().count()),
+            });
+        }
+        for l in contents.lines() {
+            lines.push(DiffLine {
+                kind: DiffLineKind::Added,
+                text: format!("+{l}"),
+            });
+        }
+        return FileDiff {
+            path: path.to_path_buf(),
+            base_ref: base.to_string(),
+            lines,
+            binary: false,
+        };
+    }
+
+    FileDiff {
+        path: path.to_path_buf(),
+        base_ref: base.to_string(),
+        lines: Vec::new(),
+        binary: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::paths::TestPathGuard;
+
+    #[test]
+    fn parse_name_status_handles_renames() {
+        use crate::session::DiffStatus;
+        let v = parse_name_status("M\tsrc/a.rs\nA\tsrc/b.rs\nR100\tsrc/old.rs\tsrc/new.rs\n");
+        assert_eq!(
+            v,
+            vec![
+                (DiffStatus::Modified, "src/a.rs".to_string()),
+                (DiffStatus::Added, "src/b.rs".to_string()),
+                (DiffStatus::Renamed, "src/new.rs".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_unified_diff_classifies_lines() {
+        use crate::session::DiffLineKind;
+        let raw = "diff --git a/x.rs b/x.rs\n\
+                   index 111..222 100644\n\
+                   --- a/x.rs\n\
+                   +++ b/x.rs\n\
+                   @@ -1,2 +1,2 @@\n\
+                    ctx\n\
+                   -gone\n\
+                   +added\n";
+        let fd = parse_unified_diff(raw, Path::new("x.rs"), "origin/main");
+        let kinds: Vec<_> = fd.lines.iter().map(|l| l.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                DiffLineKind::Meta,    // diff --git
+                DiffLineKind::Meta,    // index
+                DiffLineKind::Meta,    // ---
+                DiffLineKind::Meta,    // +++
+                DiffLineKind::Hunk,    // @@
+                DiffLineKind::Context, //  ctx
+                DiffLineKind::Removed, // -gone
+                DiffLineKind::Added,   // +added
+            ]
+        );
+        assert!(!fd.binary);
+    }
+
+    #[test]
+    fn parse_unified_diff_detects_binary() {
+        let fd = parse_unified_diff(
+            "diff --git a/img.png b/img.png\nBinary files a/img.png and b/img.png differ\n",
+            Path::new("img.png"),
+            "origin/main",
+        );
+        assert!(fd.binary);
+    }
 
     #[test]
     fn parse_numstat_sums_changes() {

@@ -451,8 +451,9 @@ impl App {
             InputFocus::FileViewer => crate::ui::FocusLevel::Focused,
             _ => crate::ui::FocusLevel::Inactive,
         };
+        let changes = self.active_worktree_diff();
         let (geom, rows) =
-            file_viewer::render_file_viewer(frame, fv_area, &self.file_viewer, fv_focus);
+            file_viewer::render_file_viewer(frame, fv_area, &self.file_viewer, fv_focus, changes);
         self.record_scrollbar(geom, ScrollTarget::FileViewer);
         self.record_row_clicks(
             rows,

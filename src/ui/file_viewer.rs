@@ -18,7 +18,17 @@ use ratatui::{
 
 use super::scrollbar::{self, ScrollbarGeom};
 use super::{focus_block, theme::Theme, FocusLevel};
-use crate::session::SessionInfo;
+use crate::session::{DiffStatus, SessionInfo, WorktreeDiff};
+
+/// Theme color for a file's git-change status glyph/name in the tree.
+pub(crate) fn diff_status_color(status: DiffStatus) -> ratatui::style::Color {
+    match status {
+        DiffStatus::Modified => Theme::status_working(),
+        DiffStatus::Added | DiffStatus::Untracked => Theme::status_idle(),
+        DiffStatus::Deleted => Theme::status_blocked(),
+        DiffStatus::Renamed => Theme::accent(),
+    }
+}
 
 /// One node in the tree. `children = None` means "not yet expanded"; an
 /// empty `Some(vec![])` means "expanded but empty".
@@ -75,6 +85,8 @@ struct FlatRow {
     label: String,
     is_dir: bool,
     expanded: bool,
+    /// Absolute filesystem path of this node, for git-status lookup.
+    path: PathBuf,
 }
 
 pub struct FileViewerState {
@@ -425,6 +437,7 @@ fn push_flat(
         label,
         is_dir: node.is_dir,
         expanded: node.expanded,
+        path: node.path.clone(),
     });
     if node.is_dir && node.expanded {
         if let Some(children) = &node.children {
@@ -615,8 +628,9 @@ pub fn render_file_viewer(
     area: Rect,
     state: &FileViewerState,
     focus: FocusLevel,
+    changes: Option<&WorktreeDiff>,
 ) -> (Option<ScrollbarGeom>, Vec<super::RowHitbox>) {
-    let inner = render_chrome(frame, area, state, focus);
+    let inner = render_chrome(frame, area, state, focus, changes);
 
     if inner.height == 0 || inner.width == 0 {
         return (None, Vec::new());
@@ -631,7 +645,7 @@ pub fn render_file_viewer(
         return (None, Vec::new());
     }
 
-    render_tree(frame, inner, state)
+    render_tree(frame, inner, state, changes)
 }
 
 /// Lay out the viewer chrome — the bordered `Files` block plus the optional
@@ -641,6 +655,7 @@ fn render_chrome(
     area: Rect,
     state: &FileViewerState,
     focus: FocusLevel,
+    changes: Option<&WorktreeDiff>,
 ) -> Rect {
     use ratatui::layout::{Constraint, Direction, Layout};
 
@@ -656,7 +671,8 @@ fn render_chrome(
         .split(area);
     let list_outer = chunks[0];
 
-    let block = focus_block(" Files ", focus);
+    let title = diff_header_title(changes);
+    let block = focus_block(&title, focus);
     let inner = block.inner(list_outer);
     frame.render_widget(block, list_outer);
 
@@ -681,6 +697,7 @@ fn render_tree(
     frame: &mut Frame,
     list_area: Rect,
     state: &FileViewerState,
+    changes: Option<&WorktreeDiff>,
 ) -> (Option<ScrollbarGeom>, Vec<super::RowHitbox>) {
     let rows = state.flatten();
     let height = list_area.height as usize;
@@ -702,7 +719,9 @@ fn render_tree(
     let lines: Vec<Line> = rows[start..end]
         .iter()
         .enumerate()
-        .map(|(i, row)| build_row_line(row, start + i == state.selected, query_lc.as_deref()))
+        .map(|(i, row)| {
+            build_row_line(row, start + i == state.selected, query_lc.as_deref(), changes)
+        })
         .collect();
     frame.render_widget(Paragraph::new(lines), rows_area);
 
@@ -737,17 +756,35 @@ fn row_label_color(is_match: bool, is_dir: bool) -> ratatui::style::Color {
     }
 }
 
-fn build_row_line(row: &FlatRow, selected: bool, query_lc: Option<&str>) -> Line<'static> {
+fn build_row_line(
+    row: &FlatRow,
+    selected: bool,
+    query_lc: Option<&str>,
+    changes: Option<&WorktreeDiff>,
+) -> Line<'static> {
     let indent = "  ".repeat(row.depth);
     let marker = row_marker(row);
     let is_match = query_lc
         .map(|q| row.label.to_lowercase().contains(q))
         .unwrap_or(true);
 
+    // Git-change status for this exact file (directories aren't annotated).
+    let status = if row.is_dir {
+        None
+    } else {
+        changes.and_then(|c| c.status_of(&row.path))
+    };
+
     let label_style = if selected {
         Style::default()
             .bg(Theme::selection_bg())
             .fg(Theme::selection_fg())
+            .add_modifier(Modifier::BOLD)
+    } else if let Some(s) = status {
+        // A changed file's name takes its status color and bolds, so it
+        // stands out against unchanged siblings even before you read the glyph.
+        Style::default()
+            .fg(diff_status_color(s))
             .add_modifier(Modifier::BOLD)
     } else {
         let mut s = Style::default().fg(row_label_color(is_match, row.is_dir));
@@ -764,10 +801,45 @@ fn build_row_line(row: &FlatRow, selected: bool, query_lc: Option<&str>) -> Line
         Style::default().fg(Theme::text_muted())
     };
 
-    Line::from(vec![
-        Span::styled(format!("{indent}{marker}"), prefix_style),
-        Span::styled(row.label.clone(), label_style),
-    ])
+    let mut spans = vec![Span::styled(format!("{indent}{marker}"), prefix_style)];
+    // Status glyph between the tree marker and the name (e.g. `M `).
+    if let Some(s) = status {
+        let glyph_style = if selected {
+            Style::default()
+                .bg(Theme::selection_bg())
+                .fg(Theme::selection_fg())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(diff_status_color(s))
+                .add_modifier(Modifier::BOLD)
+        };
+        spans.push(Span::styled(format!("{} ", s.glyph()), glyph_style));
+    }
+    spans.push(Span::styled(row.label.clone(), label_style));
+    Line::from(spans)
+}
+
+/// Block title for the tree, showing the diff base + rollup when changes exist
+/// (e.g. ` Files · Δ origin/main 4 ±  +120 −18 `), else plain ` Files `.
+fn diff_header_title(changes: Option<&WorktreeDiff>) -> String {
+    match changes {
+        Some(d) if !d.files.is_empty() => {
+            let (files, ins, del) = d.totals();
+            let base = short_ref(&d.base_ref);
+            format!(" Files · Δ {base} {files}f +{ins} -{del} ")
+        }
+        _ => " Files ".to_string(),
+    }
+}
+
+/// Trim a long ref for the header (`refs/remotes/origin/main` → `origin/main`,
+/// `@{upstream}` stays as-is).
+fn short_ref(base: &str) -> String {
+    base.strip_prefix("refs/remotes/")
+        .or_else(|| base.strip_prefix("refs/heads/"))
+        .unwrap_or(base)
+        .to_string()
 }
 
 fn render_search_bar(
