@@ -1141,7 +1141,10 @@ impl App {
             rp.favorites = Self::repo_picker_favorites(&recents);
             let dir = Self::repo_picker_start_dir(&recents);
             let entries = Self::list_browse_entries(&dir, rp.show_hidden);
-            rp.set_browse_dir(dir, entries, None);
+            // Land the cursor on the most-recent repo (it's a child of the start
+            // dir) so a single `Enter` picks it — the keyboard fast path.
+            let select = recents.first().map(|b| b.repo_path.clone());
+            rp.set_browse_dir(dir, entries, select);
         }
         self.modal = modals::Modal::RepoPicker(rp);
     }

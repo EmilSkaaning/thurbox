@@ -1514,7 +1514,10 @@ impl App {
             KeyCode::BackTab => self.repo_picker_cycle_focus(false),
             KeyCode::Char('j') | KeyCode::Down => rp.move_browse(1),
             KeyCode::Char('k') | KeyCode::Up => rp.move_browse(-1),
-            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => self.repo_picker_browse_open(),
+            // `Enter` picks the highlighted row: a repo is added + confirmed (the
+            // keyboard fast path); a folder / `..` is opened. `l`/`→` always open.
+            KeyCode::Enter => self.repo_picker_browse_enter(),
+            KeyCode::Char('l') | KeyCode::Right => self.repo_picker_browse_open(),
             KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => {
                 self.repo_picker_browse_ascend()
             }
@@ -1599,6 +1602,23 @@ impl App {
         let is_repo = rp.browse_selected().map(|e| e.is_repo).unwrap_or(false);
         if is_repo {
             self.repo_picker_add_browsed(false);
+        } else {
+            self.repo_picker_browse_open();
+        }
+    }
+
+    /// `Enter` in the browser: pick the highlighted row. A repo (or favorite) is
+    /// added to the basket and the picker is confirmed in one keystroke — the
+    /// keyboard fast path; a plain folder / `..` is opened (navigated). `a`/`Space`
+    /// still add a repo *without* confirming, for building a multi-repo basket.
+    fn repo_picker_browse_enter(&mut self) {
+        let super::modals::Modal::RepoPicker(ref rp) = self.modal else {
+            return;
+        };
+        let is_repo = rp.browse_selected().map(|e| e.is_repo).unwrap_or(false);
+        if is_repo {
+            self.repo_picker_add_browsed(false);
+            self.submit_repo_picker();
         } else {
             self.repo_picker_browse_open();
         }

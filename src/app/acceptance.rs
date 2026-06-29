@@ -439,8 +439,8 @@ fn repo_picker_opens_in_browser() {
     assert_eq!(names, vec!["..", "plain_dir", "repo_a", "repo_b"]);
     assert_eq!(
         rp.browse_selected().map(|e| e.name.as_str()),
-        Some("plain_dir"),
-        "cursor defaults to the first child, not `..`"
+        Some("repo_a"),
+        "cursor starts on the most-recent repo (the seeded bookmark)"
     );
     let repo_b = rp
         .browse_entries
@@ -456,8 +456,8 @@ fn repo_picker_browse_descend_and_ascend() {
     let mut h = Harness::standard(0);
     open_picker_in_fixture(&mut h, &projects);
 
-    // Cursor starts on plain_dir; move onto repo_a and open it with `l`.
-    h.key(KeyCode::Char('j'), KeyModifiers::NONE);
+    // Cursor starts on the most-recent repo (repo_a); open it with `l`
+    // (navigate into it — `Enter` would pick+confirm instead).
     assert_eq!(
         repo_picker(&h).browse_selected().map(|e| e.name.as_str()),
         Some("repo_a")
@@ -482,8 +482,8 @@ fn repo_picker_add_to_basket_and_submit() {
     let mut h = Harness::standard(0);
     open_picker_in_fixture(&mut h, &projects);
 
-    // From plain_dir, move to repo_b and add it to the basket with `a`.
-    h.key(KeyCode::Char('j'), KeyModifiers::NONE); // repo_a
+    // Cursor starts on repo_a; move to repo_b and add it to the basket with `a`
+    // (which adds without confirming, so the basket can hold several).
     h.key(KeyCode::Char('j'), KeyModifiers::NONE); // repo_b
     assert_eq!(
         repo_picker(&h).browse_selected().map(|e| e.name.as_str()),
@@ -516,13 +516,43 @@ fn repo_picker_add_to_basket_and_submit() {
 }
 
 #[test]
+fn repo_picker_enter_on_repo_picks_and_confirms() {
+    let (_tmp, projects) = browse_fixture();
+    let mut h = Harness::standard(0);
+    open_picker_in_fixture(&mut h, &projects);
+
+    // Cursor starts on the most-recent repo (repo_a) — a single `Enter` adds it
+    // and confirms the picker (the keyboard fast path).
+    assert_eq!(
+        repo_picker(&h).browse_selected().map(|e| e.name.as_str()),
+        Some("repo_a")
+    );
+    h.key(KeyCode::Enter, KeyModifiers::NONE);
+
+    assert!(
+        !matches!(h.app.modal, modals::Modal::RepoPicker(_)),
+        "Enter on a repo confirms and advances the wizard"
+    );
+    let cwd = h
+        .app
+        .new_session
+        .spawn_config
+        .as_ref()
+        .and_then(|c| c.cwd.clone());
+    assert_eq!(
+        cwd,
+        Some(projects.join("repo_a")),
+        "the picked repo became the new session's cwd"
+    );
+}
+
+#[test]
 fn repo_picker_space_adds_and_advances() {
     let (_tmp, projects) = browse_fixture();
     let mut h = Harness::standard(0);
     open_picker_in_fixture(&mut h, &projects);
 
-    // On repo_a (index 1), Space adds it and advances to repo_b (index 2).
-    h.key(KeyCode::Char('j'), KeyModifiers::NONE);
+    // Cursor starts on repo_a; Space adds it and advances to repo_b.
     h.key(KeyCode::Char(' '), KeyModifiers::NONE);
     let rp = repo_picker(&h);
     assert_eq!(rp.basket.len(), 1);
@@ -540,8 +570,8 @@ fn repo_picker_basket_worktree_toggle_and_remove() {
     let mut h = Harness::standard(0);
     open_picker_in_fixture(&mut h, &projects);
 
-    // Add repo_a, switch to the basket, toggle worktree, then remove it.
-    h.key(KeyCode::Char('j'), KeyModifiers::NONE);
+    // Cursor starts on repo_a — add it, switch to the basket, toggle worktree,
+    // then remove it.
     h.key(KeyCode::Char('a'), KeyModifiers::NONE);
     h.key(KeyCode::Tab, KeyModifiers::NONE);
     assert_eq!(repo_picker(&h).focus, modals::RepoPickerFocus::Basket);
@@ -562,8 +592,9 @@ fn repo_picker_adds_non_repo_dir_as_attached() {
     let mut h = Harness::standard(0);
     open_picker_in_fixture(&mut h, &projects);
 
-    // Cursor starts on plain_dir (a non-git directory); `a` adds it as an
+    // Move up onto plain_dir (a non-git directory) and `a` adds it as an
     // attached (`--add-dir`) entry that can't be put in worktree mode.
+    h.key(KeyCode::Char('k'), KeyModifiers::NONE); // repo_a -> plain_dir
     assert_eq!(
         repo_picker(&h).browse_selected().map(|e| e.name.as_str()),
         Some("plain_dir")

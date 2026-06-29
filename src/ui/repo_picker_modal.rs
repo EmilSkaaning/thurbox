@@ -405,7 +405,9 @@ fn footer_line(state: &RepoPickerState<'_>) -> Line<'static> {
         RepoPickerFocus::Browse => Line::from(vec![
             kb("j/k"),
             de(" nav  "),
-            kb("Enter/l"),
+            kb("Enter"),
+            de(" pick  "),
+            kb("l"),
             de(" open  "),
             kb("Bksp"),
             de(" up  "),

@@ -1534,12 +1534,16 @@ backend dependency stays visible at each call site.
   filesystem **browser** left pane `RepoPickerFocus::Browse` feeds a
   **basket** of chosen repos `RepoPickerFocus::Basket`, with a
   `PathInput` overlay for go-to/remote paths. `Tab` cycles all three
-  panes. Conventional navigation: a `..` row + `Enter`/`l` open folders,
-  `Backspace` up, `a`/`Space` add; confirm via basket `Enter` or the Done
-  button — which replays `Ctrl+Enter` so it submits from any pane.
+  panes. Conventional navigation: a `..` row + `l`/`→` open folders,
+  `Backspace` up. The cursor opens on the most-recent repo; `Enter`
+  **picks** the highlighted row (`repo_picker_browse_enter`) — a repo is
+  added + confirmed in one keystroke (`Ctrl+N`→`Enter` fast path), a
+  folder is opened. `a`/`Space` add without confirming (multi-repo
+  basket); confirm also via basket `Enter` or the Done button
+  (`Ctrl+Enter` from any pane).
   **Both git repos and plain dirs are addable** (`BrowseEntry::addable`):
   a repo can use worktree mode, a plain dir attaches as-is (`--add-dir`,
-  `BasketRepo.is_repo` gates the per-row worktree toggle). Recency
+  `BasketEntry.is_repo` gates the per-row worktree toggle). Recency
   bookmarks surface as pinned `★` favorites (`BrowseKind::Favorite`).
   **Mouse**: clicking a repo adds it, a folder opens (its `[+]` adds it),
   a basket row toggles worktree (its `[✕]` removes) — via

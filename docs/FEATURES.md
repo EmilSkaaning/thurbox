@@ -178,13 +178,16 @@ not applicable.
    of chosen repos. The first basket repo becomes the session's `cwd`;
    the rest may be exposed to the agent depending on the agent's own
    flags.
-   - **Browser (left).** Conventional folder navigation: a `..` row
-     at the top, `Enter`/`l`/`→` open the highlighted folder,
-     `Backspace`/`h`/`←` go up. Git repos are marked `●`. `a` adds the
-     highlighted directory to the basket and `Space` adds it and
-     advances; `.` toggles hidden directories, `/` opens a fuzzy filter
-     for the current directory, `g` jumps to a typed path (with
-     filesystem autocomplete), and `~` jumps to `$HOME`.
+   - **Browser (left).** Conventional folder navigation: a `..` row at
+     the top, `l`/`→` open the highlighted folder, `Backspace`/`h`/`←` go
+     up. Git repos are marked `●`. The cursor opens on your **most-recent
+     repo**, and `Enter` **picks** the highlighted row — for a repo it
+     adds it *and confirms the picker in one keystroke* (so the common
+     case is `Ctrl+N` → `Enter`); for a folder/`..` it opens it. `a` adds
+     the highlighted directory to the basket *without* confirming, and
+     `Space` adds + advances, for building a multi-repo basket. `.`
+     toggles hidden directories, `/` opens a fuzzy filter, `g` jumps to a
+     typed path (with autocomplete), and `~` jumps to `$HOME`.
    - **Repos vs plain directories.** A git repo can run on its own
      worktree branch; a plain directory is added **as-is** (`--add-dir`,
      e.g. a shared docs or reference folder) and can't use worktree
@@ -201,8 +204,8 @@ not applicable.
      parent (else `$HOME`).
    - **Basket (right).** `Tab` switches panes. `w` toggles a repo's
      worktree flag, `x`/`d` removes it. Confirm the picker with `Enter`
-     from the basket or the `[ Done ]` footer button (a plain `Enter` in
-     the browser opens a folder, so it doesn't submit).
+     from the basket, `Enter` on a repo in the browser, or the
+     `[ Done ]` footer button (`Ctrl+Enter` from any pane).
    - Adding a repo also persists a recency bookmark (so it surfaces as a
      favorite next time).
    - **Remote targets.** The browser reads the *local* filesystem, so a

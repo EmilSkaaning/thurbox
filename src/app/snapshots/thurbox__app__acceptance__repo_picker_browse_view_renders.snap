@@ -21,7 +21,7 @@ expression: rendered
 │           │┌ Go to path ────────────────────────────────────────────────────────────┐│           │
 │           ││                                                                        ││           │
 │           │└────────────────────────────────────────────────────────────────────────┘│           │
-│           │j/k nav  Enter/l open  Bksp up  a/Spc add  / filter  Tab pa Done   Cancel │           │
+│           │j/k nav  Enter pick  l open  Bksp up  a/Spc add  / filter   Done n Cancel │           │
 │           ╰──────────────────────────────────────────────────────────────────────────╯           │
 │                       ││                                                                         │
 │                       ││                                                                         │
