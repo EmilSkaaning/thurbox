@@ -1530,8 +1530,23 @@ backend dependency stays visible at each call site.
   the two never drift; `move_in_order` is the pure reorder step
   behind `Shift+J`/`Shift+K`),
   `terminal_view`, `info_panel`,
-  `status_bar`, `repo_picker_modal` (repo selection with
-  worktree toggle). `selection.rs` handles mouse-drag text
+  `status_bar`, `repo_picker_modal` (**two-pane** repo selection: a
+  filesystem **browser** left pane `RepoPickerFocus::Browse` feeds a
+  **basket** of chosen repos `RepoPickerFocus::Basket`, with a
+  `PathInput` overlay for go-to/remote paths. `Tab` cycles all three
+  panes. Conventional navigation: a `..` row + `Enter`/`l` open folders,
+  `Backspace` up, `a`/`Space` add; confirm via basket `Enter` or the Done
+  button — which replays `Ctrl+Enter` so it submits from any pane.
+  **Both git repos and plain dirs are addable** (`BrowseEntry::addable`):
+  a repo can use worktree mode, a plain dir attaches as-is (`--add-dir`,
+  `BasketRepo.is_repo` gates the per-row worktree toggle). Recency
+  bookmarks surface as pinned `★` favorites (`BrowseKind::Favorite`).
+  **Mouse**: clicking a repo adds it, a folder opens (its `[+]` adds it),
+  a basket row toggles worktree (its `[✕]` removes) — via
+  `ClickAction::{RepoBasket,RepoBrowseAdd}`. Each row is a
+  `modals::BrowseEntry { kind: Up|Favorite|Dir }`; the filesystem listing
+  is computed in `app` as `App::list_browse_entries` so `ui` never
+  touches `crate::git`). `selection.rs` handles mouse-drag text
   selection, `links.rs` detects clickable URLs for Ctrl+Click.
   Mouse clicks are routed through a per-frame registry
   (`App::click_targets`, mirroring `scrollbar_hits`): list/modal
