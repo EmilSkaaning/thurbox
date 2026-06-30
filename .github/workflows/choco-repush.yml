@@ -1,0 +1,84 @@
+# TEMPORARY one-shot: repush the already-published-but-PENDING Chocolatey
+# version 0.138.0 with the corrected nuspec (title/iconUrl/projectSourceUrl
+# guideline fixes, already on main). Chocolatey allows repushing the *same*
+# version while it is still in moderation, so this overwrites the pending
+# submission's metadata without burning a new version number — and without the
+# default-branch requirement that blocks workflow_dispatch from a feature
+# branch.
+#
+# Why pull_request: a `pull_request` workflow runs from the PR branch's own copy
+# of this file (no need to live on main first), and for a SAME-REPO PR the
+# CHOCOLATEY_API_KEY secret is available. So: open a PR from this branch, let the
+# job push 0.138.0, then CLOSE the PR (do NOT merge) and delete the branch once
+# 0.138.0 is approved on the community repo.
+#
+# Scoped to this branch only (head_ref guard) so it never runs for other PRs.
+name: Chocolatey repush 0.138.0 (temporary)
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  repush:
+    name: Repush 0.138.0 with corrected nuspec
+    if: github.head_ref == 'choco-repush-0.138.0'
+    runs-on: windows-latest
+    env:
+      CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
+      VERSION: v0.138.0
+    steps:
+      - name: Guard — secret must be set
+        shell: pwsh
+        run: |
+          if (-not $env:CHOCOLATEY_API_KEY) {
+            Write-Error "CHOCOLATEY_API_KEY secret is not set; cannot push."
+            exit 1
+          }
+
+      # Check out the PR head branch (carries main's corrected nuspec + the
+      # bump script). Not the merge ref — we want exactly the branch contents.
+      - name: Checkout PR branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Download release checksums for ${{ env.VERSION }}
+        shell: pwsh
+        run: |
+          $repo = "${{ github.repository }}"
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri "https://github.com/$repo/releases/download/$env:VERSION/thurbox-$env:VERSION-checksums.txt" `
+            -OutFile checksums.txt
+          Get-Content checksums.txt
+
+      # Sets nuspec <version> + install-script $url64/$checksum64 to the existing
+      # 0.138.0 artifact. The static guideline fixes (title/iconUrl/
+      # projectSourceUrl) already live in the committed nuspec and carry through.
+      - name: Bump package metadata to ${{ env.VERSION }}
+        shell: pwsh
+        run: |
+          python packaging/chocolatey/bump-nuspec.py `
+            "$env:VERSION" `
+            packaging/chocolatey `
+            checksums.txt
+          Write-Host "----- thurbox.nuspec -----"
+          Get-Content packaging/chocolatey/thurbox.nuspec
+          Write-Host "----- chocolateyinstall.ps1 -----"
+          Get-Content packaging/chocolatey/tools/chocolateyinstall.ps1
+
+      - name: Pack the package
+        shell: pwsh
+        run: |
+          # Version is read from the bumped nuspec — do not pass --version.
+          choco pack packaging/chocolatey/thurbox.nuspec --outputdirectory packaging/chocolatey
+
+      - name: Repush to the Chocolatey community repo
+        shell: pwsh
+        run: |
+          $nupkg = Get-ChildItem packaging/chocolatey/thurbox.*.nupkg | Select-Object -First 1
+          Write-Host "Repushing $($nupkg.Name) (same version, corrected metadata)..."
+          choco push $nupkg.FullName --source https://push.chocolatey.org/ --api-key $env:CHOCOLATEY_API_KEY
