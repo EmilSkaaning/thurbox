@@ -211,6 +211,10 @@ mod tests {
             [
                 "-d",
                 "Ubuntu",
+                // `--cd /` pins a valid landing dir so wsl.exe doesn't inherit
+                // the caller's cwd (which may not exist on the target distro).
+                "--cd",
+                "/",
                 "tmux",
                 "-L",
                 "thurbox",

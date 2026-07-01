@@ -52,11 +52,14 @@ fn build_restart_plan(session: &SharedSession) -> Result<RestartPlan, String> {
     // workspace, gathering every member dir; a single-repo session keeps the
     // primary repo. Only resolve when there is a primary cwd to anchor on.
     if let Some(primary) = session.cwd.clone() {
+        // The headless restart path is local-only (`spawn_window`), so the
+        // workspace is built locally; remote restart isn't wired here.
         config.cwd = Some(super::spawn::resolve_launch_cwd(
             &agent_session_id,
             &primary,
             &session.worktrees,
             &session.additional_dirs,
+            None,
         ));
     }
 

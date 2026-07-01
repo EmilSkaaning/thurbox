@@ -1385,7 +1385,7 @@ impl App {
         let session_id = session.info.id;
         // Rebuild the process cwd: the primary repo for a single-repo session,
         // or the (idempotently rebuilt) symlink workspace for a multi-repo one.
-        let cwd = session_process_cwd(&session.info);
+        let cwd = self.session_process_cwd(&session.info);
 
         let mut config = SessionConfig {
             resume_session_id: None,
@@ -2074,11 +2074,20 @@ impl App {
         let session_id = session.info.id;
         if session.shell_pane.is_none() {
             let (rows, cols) = self.content_area_size();
+            // Resolve the launch cwd (host-aware for remote workspaces) before
+            // taking the mutable session borrow; the immutable borrow of
+            // `self.sessions` ends with this block.
+            let shell_cwd = {
+                let idx = self.active_index;
+                match self.sessions.get(idx) {
+                    Some(s) => self.session_process_cwd(&s.info),
+                    None => None,
+                }
+            };
             let Some(session) = self.active_session_mut() else {
                 // Active session removed concurrently — nothing to switch to.
                 return;
             };
-            let shell_cwd = session_process_cwd(&session.info);
             if let Err(e) = session.ensure_shell_pane(rows, cols, shell_cwd.as_deref()) {
                 error!("Failed to create shell pane: {e}");
                 self.set_error(format!("Failed to create shell: {e:#}"));
@@ -3128,6 +3137,23 @@ impl App {
         self.hosts.get_by_backend(backend?)
     }
 
+    /// The launch cwd for an *existing* session, derived from its persisted
+    /// `SessionInfo`: the multi-repo symlink workspace (built on the session's
+    /// host, remote or local), or the primary repo when single-repo. Used by the
+    /// restart and shell-pane paths, which must agree on the cwd so the shell
+    /// lands exactly where the agent runs.
+    fn session_process_cwd(&self, info: &SessionInfo) -> Option<PathBuf> {
+        // `remote_host` is the bare host name (`None` = local).
+        let host = info.remote_host.as_deref().and_then(|n| self.hosts.get(n));
+        resolve_process_cwd(
+            info.agent_session_id.as_deref(),
+            info.cwd.clone(),
+            &info.worktrees,
+            &info.additional_dirs,
+            host,
+        )
+    }
+
     /// Resolve the backend for a *persisted* session by its `backend_type`, or
     /// `None` when this instance cannot manage it.
     ///
@@ -3213,11 +3239,13 @@ impl App {
         // gathers every member dir; `info.cwd` keeps the primary repo (restored
         // after spawn). Single-repo sessions are unchanged.
         let primary_cwd = config.cwd.clone();
+        let spawn_host = self.host_for_backend(config.backend.as_deref()).cloned();
         config.cwd = resolve_process_cwd(
             config.agent_session_id.as_deref(),
             primary_cwd.clone(),
             worktrees,
             additional_dirs,
+            spawn_host.as_ref(),
         );
 
         let backend = match self.backend_for(&config) {
@@ -3230,6 +3258,17 @@ impl App {
         };
 
         let provider = self.provider_for(&config);
+
+        // On a remote host, materialize any thurbox-managed config file the
+        // agent args reference by its *local* path (e.g. claude's hooks
+        // `--settings <config>/hooks/claude.json`) at the same path on the
+        // remote, so the agent doesn't fail to launch ("Settings file not
+        // found"). Best-effort; shares the headless spawn's implementation.
+        if let Some(h) = spawn_host.as_ref() {
+            let args = crate::agent::AgentProvider::build_args(provider.as_ref(), &config);
+            crate::session_ops::spawn::materialize_agent_config_on_remote(h, &args);
+        }
+
         Some(SpawnInputs {
             config,
             primary_cwd,
@@ -5260,6 +5299,7 @@ fn resolve_process_cwd(
     primary_cwd: Option<PathBuf>,
     worktrees: &[WorktreeInfo],
     additional_dirs: &[PathBuf],
+    host: Option<&crate::session::HostDef>,
 ) -> Option<PathBuf> {
     let members = session_member_dirs(primary_cwd.as_deref(), worktrees, additional_dirs);
     if members.len() < 2 {
@@ -5279,26 +5319,20 @@ fn resolve_process_cwd(
         })
         .collect();
 
-    match crate::workspace::ensure_workspace(id, &pairs) {
+    // A remote session's symlink workspace is built on the *remote* host — a
+    // local workspace dir wouldn't exist there. Local sessions use the local
+    // builder as before.
+    let built = match host {
+        Some(h) => crate::git::ensure_remote_workspace(h, id, &pairs),
+        None => crate::workspace::ensure_workspace(id, &pairs).map_err(anyhow::Error::from),
+    };
+    match built {
         Ok(ws) => Some(ws),
         Err(e) => {
             error!("Failed to build multi-repo workspace: {e}");
             primary_cwd
         }
     }
-}
-
-/// The launch cwd for an *existing* session, derived from its persisted
-/// `SessionInfo`: the multi-repo symlink workspace, or the primary repo when
-/// single-repo. Used by the restart and shell-pane paths, which must agree on
-/// the cwd so the companion shell lands exactly where the agent runs.
-fn session_process_cwd(info: &SessionInfo) -> Option<PathBuf> {
-    resolve_process_cwd(
-        info.agent_session_id.as_deref(),
-        info.cwd.clone(),
-        &info.worktrees,
-        &info.additional_dirs,
-    )
 }
 
 #[cfg(test)]
@@ -9542,7 +9576,7 @@ mod tests {
     #[test]
     fn process_cwd_single_member_is_primary() {
         let cwd = PathBuf::from("/src/only");
-        let out = resolve_process_cwd(Some("id-1"), Some(cwd.clone()), &[], &[]);
+        let out = resolve_process_cwd(Some("id-1"), Some(cwd.clone()), &[], &[], None);
         assert_eq!(out, Some(cwd));
     }
 
@@ -9562,6 +9596,7 @@ mod tests {
             Some(primary.clone()),
             &[],
             std::slice::from_ref(&other),
+            None,
         )
         .unwrap();
 
@@ -9583,6 +9618,7 @@ mod tests {
             Some(primary.clone()),
             &[],
             std::slice::from_ref(&other),
+            None,
         );
         assert_eq!(out, Some(primary));
     }

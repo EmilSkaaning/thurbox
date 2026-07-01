@@ -48,9 +48,20 @@ pub fn ssh_command(destination: &str, ssh_opts: &[String]) -> Command {
 /// identically. No `--` separator is used (none of thurbox's commands start
 /// with a `-`, matching the SSH path which also omits it), so distros are
 /// reached uniformly on every supported `wsl.exe`.
+///
+/// `--cd /` pins the launched process's working directory to a path that exists
+/// on *every* distro. Without it, `wsl.exe` inherits the **caller's** current
+/// directory and tries to `chdir` to the same path inside the target distro —
+/// which fails when thurbox itself runs inside another WSL distro (the caller's
+/// cwd, e.g. `/home/me/repo`, doesn't exist on the target). That failure prints
+/// a `WSL Relay ERROR: CreateProcessCommon chdir(...) failed` on stderr and
+/// corrupts the tmux control-mode handshake, so the agent window never launches.
+/// `/` is a neutral landing dir: every caller overrides the real working dir
+/// anyway (`git -C <path>`, tmux `new-window -c <path>`).
 pub fn wsl_command(distro: &str) -> Command {
     let mut cmd = Command::new("wsl.exe");
     cmd.arg("-d").arg(distro);
+    cmd.arg("--cd").arg("/");
     cmd
 }
 
@@ -84,13 +95,15 @@ mod tests {
     }
 
     #[test]
-    fn wsl_command_sets_program_and_distro() {
+    fn wsl_command_sets_program_distro_and_neutral_cwd() {
         let cmd = wsl_command("Ubuntu");
         assert_eq!(cmd.get_program().to_string_lossy(), "wsl.exe");
         let args: Vec<String> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert_eq!(args, ["-d", "Ubuntu"]);
+        // `--cd /` pins a valid landing dir so wsl.exe doesn't inherit (and fail
+        // to chdir to) the caller's cwd when thurbox runs inside another distro.
+        assert_eq!(args, ["-d", "Ubuntu", "--cd", "/"]);
     }
 }

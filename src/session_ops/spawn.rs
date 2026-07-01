@@ -92,6 +92,7 @@ pub fn spawn_session_headless(db: &Database, req: SpawnRequest) -> Result<SpawnR
         &primary_cwd,
         &worktrees,
         &additional_dirs,
+        host.as_ref(),
     );
 
     // Mint the thurbox SessionId up front so it can be injected into the
@@ -109,6 +110,15 @@ pub fn spawn_session_headless(db: &Database, req: SpawnRequest) -> Result<SpawnR
     super::inject_thurbox_env(&mut config, &agent_session_id, req.task_id);
 
     let (command, args) = super::build_agent_invocation(&agent_def, &config);
+
+    // The agent's args may reference thurbox-managed config files by their
+    // *local* absolute path (e.g. claude's hooks `--settings <config>/hooks/
+    // claude.json`). On a remote host that path doesn't exist, so the agent
+    // errors on launch ("Settings file not found"). Materialize each such file
+    // at the same path on the remote before launching.
+    if let Some(h) = host.as_ref() {
+        materialize_agent_config_on_remote(h, &args);
+    }
 
     // Remote spawns drive the SSH backend's control mode to learn the real pane
     // id; local spawns leave `backend_id` empty for the TUI to resolve by name.
@@ -301,6 +311,7 @@ pub(crate) fn resolve_launch_cwd(
     primary_cwd: &std::path::Path,
     worktrees: &[SharedWorktree],
     additional_dirs: &[PathBuf],
+    host: Option<&HostDef>,
 ) -> PathBuf {
     let mut members: Vec<(String, PathBuf)> = Vec::new();
     if worktrees.is_empty() {
@@ -317,11 +328,55 @@ pub(crate) fn resolve_launch_cwd(
     if members.len() < 2 {
         return primary_cwd.to_path_buf();
     }
-    match crate::workspace::ensure_workspace(agent_session_id, &members) {
+    // A remote session's workspace must be built on the *remote* host — a local
+    // symlink dir wouldn't exist there. Local sessions use the local builder.
+    let built = match host {
+        Some(h) => crate::git::ensure_remote_workspace(h, agent_session_id, &members),
+        None => crate::workspace::ensure_workspace(agent_session_id, &members)
+            .map_err(anyhow::Error::from),
+    };
+    match built {
         Ok(ws) => ws,
         Err(e) => {
             tracing::error!("Failed to build multi-repo workspace: {e}");
             primary_cwd.to_path_buf()
+        }
+    }
+}
+
+/// Copy any thurbox-managed config files referenced in the agent `args` (by
+/// their *local* absolute path) to the same path on the remote `host`, so an
+/// agent launched with e.g. `--settings <config>/hooks/claude.json` finds the
+/// file there. Best-effort: a copy failure is logged, not fatal — the agent
+/// still launches (the hooks just won't fire), and we never block a spawn on it.
+///
+/// Scope is deliberately narrow: only existing local **files under the thurbox
+/// config dir** are copied, so we never ship an arbitrary path an agent's own
+/// args happen to contain (a repo path, a user file, …).
+///
+/// Shared by the headless spawn and the TUI (`App::build_spawn_inputs`) so both
+/// paths give a remote session the same agent config.
+pub(crate) fn materialize_agent_config_on_remote(host: &HostDef, args: &[String]) {
+    let Some(config_root) = crate::paths::config_file()
+        .and_then(|p| p.parent().map(|d| d.to_string_lossy().into_owned()))
+    else {
+        return;
+    };
+    for arg in args {
+        // Only absolute paths under the thurbox config dir that exist as local
+        // files are candidates.
+        if !arg.starts_with(&config_root) {
+            continue;
+        }
+        let local = std::path::Path::new(arg);
+        if !local.is_file() {
+            continue;
+        }
+        if let Err(e) = crate::git::copy_file_to_remote(host, local, arg) {
+            tracing::warn!(
+                "failed to materialize agent config {arg} on host '{}': {e:#}",
+                host.name
+            );
         }
     }
 }
@@ -546,7 +601,7 @@ mod tests {
     fn resolve_launch_cwd_single_member_is_primary() {
         let primary = PathBuf::from("/tmp/primary");
         // No worktrees, no extra dirs → 1 member → primary cwd, no workspace.
-        let got = resolve_launch_cwd("sid-1", &primary, &[], &[]);
+        let got = resolve_launch_cwd("sid-1", &primary, &[], &[], None);
         assert_eq!(got, primary);
     }
 
@@ -558,7 +613,7 @@ mod tests {
         std::fs::create_dir_all(&primary).unwrap();
         let extra = temp.path().join("extra");
         std::fs::create_dir_all(&extra).unwrap();
-        let got = resolve_launch_cwd("sid-multi", &primary, &[], &[extra]);
+        let got = resolve_launch_cwd("sid-multi", &primary, &[], &[extra], None);
         // Two members → a symlink workspace, not the primary itself.
         assert_ne!(got, primary);
         assert!(got.join("primary").exists() || got.exists());

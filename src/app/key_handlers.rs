@@ -39,6 +39,44 @@ fn is_ctrl_letter_chord(code: KeyCode, mods: KeyModifiers) -> bool {
     mods == KeyModifiers::CONTROL && matches!(code, KeyCode::Char(c) if c.is_ascii_alphabetic())
 }
 
+/// The directory-completion suffix to append after `prefix`, given the candidate
+/// directory `names` in the parent (as returned by `git::list_dir_on`). Mirrors
+/// `paths::complete_directory_path` for the remote case:
+/// - no match, or an ambiguous prefix with nothing more shared → `None`;
+/// - a single match → the remaining chars **plus a trailing `/`** (so the next
+///   `Tab` descends into it);
+/// - several matches → their longest common prefix beyond `prefix`.
+///
+/// Pure (no I/O) so the completion logic is unit-tested without a remote host.
+fn dir_completion_suffix(names: &[String], prefix: &str) -> Option<String> {
+    let matches: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|n| n.starts_with(prefix))
+        .collect();
+    let first = matches.first()?;
+    // Longest common prefix of the matches. It always extends `prefix` (a valid
+    // char boundary), so slicing the byte count back into `first` is safe.
+    let common_len = matches[1..].iter().fold(first.len(), |end, m| {
+        first
+            .bytes()
+            .zip(m.bytes())
+            .take(end)
+            .take_while(|(a, b)| a == b)
+            .count()
+    });
+    let beyond = first.get(prefix.len()..common_len)?;
+    if beyond.is_empty() && matches.len() > 1 {
+        return None; // ambiguous with nothing new to add
+    }
+    let suffix = if matches.len() == 1 {
+        format!("{beyond}/")
+    } else {
+        beyond.to_string()
+    };
+    (!suffix.is_empty()).then_some(suffix)
+}
+
 impl App {
     /// Main key handler dispatcher.
     ///
@@ -1609,6 +1647,20 @@ impl App {
                 return;
             }
             KeyCode::Tab => {
+                // Remote targets have no per-keystroke suggestion (that would
+                // fire an ssh/wsl round-trip on every character); compute one on
+                // demand here by listing the remote directory.
+                if self.new_session.backend.is_some() {
+                    let value = rp.path_input.value().to_string();
+                    if let Some(sug) = self.remote_path_completion(&value) {
+                        if let super::modals::Modal::RepoPicker(ref mut rp) = self.modal {
+                            for c in sug.chars() {
+                                rp.path_input.insert(c);
+                            }
+                        }
+                    }
+                    return;
+                }
                 if let Some(suggestion) = rp.path_suggestion.take() {
                     for c in suggestion.chars() {
                         rp.path_input.insert(c);
@@ -1720,10 +1772,32 @@ impl App {
         self.refresh_repo_picker_rows();
     }
 
+    /// Compute a remote directory completion for the repo-picker path input by
+    /// listing the parent directory on the selected host over ssh/wsl. Returns
+    /// the suffix to append (mirroring `paths::complete_directory_path`), or
+    /// `None`. Only called on an explicit `Tab` so it doesn't run per keystroke.
+    fn remote_path_completion(&self, input: &str) -> Option<String> {
+        let host = self.host_for_backend(self.new_session.backend.as_deref())?;
+        // Need at least one `/` to know which remote dir to list.
+        let (parent, prefix) = input.rsplit_once('/')?;
+        let parent = if parent.is_empty() { "/" } else { parent };
+        let entries = crate::git::list_dir_on(host, parent).ok()?;
+        dir_completion_suffix(&entries, prefix)
+    }
+
     pub(super) fn update_repo_picker_path_suggestion(&mut self) {
+        // For a remote target (SSH host or WSL distro) the path lives on the
+        // *remote* filesystem, so completing against the local one would suggest
+        // the wrong directories entirely. Suppress the local-filesystem
+        // suggestion in that case — the path is typed as a plain remote path.
+        let remote = self.new_session.backend.is_some();
         let super::modals::Modal::RepoPicker(ref mut rp) = self.modal else {
             return;
         };
+        if remote {
+            rp.path_suggestion = None;
+            return;
+        }
         let value = rp.path_input.value().to_string();
         let at_end = rp.path_input.cursor_pos() == value.chars().count();
         if at_end && !value.is_empty() {
@@ -1852,8 +1926,57 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_ctrl_letter_chord, session_name_to_branch};
+    use super::{dir_completion_suffix, is_ctrl_letter_chord, session_name_to_branch};
     use crossterm::event::{KeyCode, KeyModifiers};
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn dir_completion_single_match_appends_trailing_slash() {
+        // One match → complete the rest and descend on the next Tab.
+        let dirs = names(&["repositories", "downloads"]);
+        assert_eq!(
+            dir_completion_suffix(&dirs, "rep"),
+            Some("ositories/".to_string())
+        );
+    }
+
+    #[test]
+    fn dir_completion_multi_match_uses_common_prefix() {
+        // Several matches → their longest common prefix beyond the typed prefix,
+        // no trailing slash (still ambiguous).
+        let dirs = names(&["adaptfy-landing", "adaptfy-landing-infra", "ai-ml"]);
+        assert_eq!(
+            dir_completion_suffix(&dirs, "adaptfy"),
+            Some("-landing".to_string())
+        );
+    }
+
+    #[test]
+    fn dir_completion_ambiguous_with_no_shared_extension_is_none() {
+        // Two matches that share nothing past the prefix → nothing to add.
+        let dirs = names(&["ai-ml", "ai-infra"]);
+        assert_eq!(dir_completion_suffix(&dirs, "ai-"), None);
+    }
+
+    #[test]
+    fn dir_completion_no_match_is_none() {
+        let dirs = names(&["repositories", "downloads"]);
+        assert_eq!(dir_completion_suffix(&dirs, "zzz"), None);
+        assert_eq!(dir_completion_suffix(&[], "any"), None);
+    }
+
+    #[test]
+    fn dir_completion_exact_match_alone_still_descends() {
+        // Prefix already equals the only entry → append just the slash.
+        let dirs = names(&["repositories"]);
+        assert_eq!(
+            dir_completion_suffix(&dirs, "repositories"),
+            Some("/".to_string())
+        );
+    }
 
     #[test]
     fn ctrl_letter_chord_detects_readline_namespace() {
