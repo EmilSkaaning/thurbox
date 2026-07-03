@@ -18,6 +18,9 @@ pub struct RepoPickerState<'a> {
     pub bookmarks: &'a [PathBuf],
     pub selected: &'a [bool],
     pub worktree: &'a [bool],
+    /// Which machine each repo lives on (parallel to `bookmarks`). A `Local`
+    /// row gets a `[local]` marker; only meaningful for a remote session.
+    pub source: &'a [crate::session::RepoSource],
     /// Whether each row is a parent header (non-selectable group title).
     pub is_header: &'a [bool],
     /// Whether each row is a child repo nested under a parent (drives indentation).
@@ -274,6 +277,10 @@ fn child_item<'a>(state: &RepoPickerState<'a>, real_idx: usize, style: Style) ->
     let path = &state.bookmarks[real_idx];
     let checked = state.selected[real_idx];
     let is_wt = state.worktree[real_idx];
+    let is_local = matches!(
+        state.source.get(real_idx),
+        Some(crate::session::RepoSource::Local)
+    );
     let is_child = state.is_child.get(real_idx).copied().unwrap_or(false);
 
     let indent = if is_child { "  " } else { "" };
@@ -294,6 +301,15 @@ fn child_item<'a>(state: &RepoPickerState<'a>, real_idx: usize, style: Style) ->
 
     if checked && is_wt {
         spans.push(Span::styled(" [wt]", Style::default().fg(Theme::accent())));
+    }
+    // A local-source repo on a remote session must be brought to the host
+    // (not yet implemented); flag it in the danger color so it reads as
+    // "attention needed", distinct from the accent `[wt]`.
+    if is_local {
+        spans.push(Span::styled(
+            " [local]",
+            Style::default().fg(Theme::danger()),
+        ));
     }
     ListItem::new(Line::from(spans))
 }
@@ -329,22 +345,32 @@ fn highlighted_spans(query: &str, check: &str, display: &str, style: Style) -> V
 /// Build the footer hint line for the current focus.
 fn footer_line(state: &RepoPickerState<'_>) -> Line<'static> {
     match state.focus {
-        RepoPickerFocus::List => Line::from(vec![
-            Span::styled("j/k", Theme::keybind()),
-            Span::styled(" nav  ", Theme::keybind_desc()),
-            Span::styled("Space", Theme::keybind()),
-            Span::styled(" toggle/fold  ", Theme::keybind_desc()),
-            Span::styled("w", Theme::keybind()),
-            Span::styled(" worktree  ", Theme::keybind_desc()),
-            Span::styled("/", Theme::keybind()),
-            Span::styled(" search  ", Theme::keybind_desc()),
-            Span::styled("d", Theme::keybind()),
-            Span::styled(" delete  ", Theme::keybind_desc()),
-            Span::styled("Tab", Theme::keybind()),
-            Span::styled(" input  ", Theme::keybind_desc()),
-            Span::styled("Enter", Theme::keybind()),
-            Span::styled(" ok", Theme::keybind_desc()),
-        ]),
+        RepoPickerFocus::List => {
+            let mut spans = vec![
+                Span::styled("j/k", Theme::keybind()),
+                Span::styled(" nav  ", Theme::keybind_desc()),
+                Span::styled("Space", Theme::keybind()),
+                Span::styled(" toggle/fold  ", Theme::keybind_desc()),
+                Span::styled("w", Theme::keybind()),
+                Span::styled(" worktree  ", Theme::keybind_desc()),
+            ];
+            // The source (host↔local) toggle only matters for a remote session.
+            if state.host.is_some() {
+                spans.push(Span::styled("l", Theme::keybind()));
+                spans.push(Span::styled(" host/local  ", Theme::keybind_desc()));
+            }
+            spans.extend([
+                Span::styled("/", Theme::keybind()),
+                Span::styled(" search  ", Theme::keybind_desc()),
+                Span::styled("d", Theme::keybind()),
+                Span::styled(" delete  ", Theme::keybind_desc()),
+                Span::styled("Tab", Theme::keybind()),
+                Span::styled(" input  ", Theme::keybind_desc()),
+                Span::styled("Enter", Theme::keybind()),
+                Span::styled(" ok", Theme::keybind_desc()),
+            ]);
+            Line::from(spans)
+        }
         RepoPickerFocus::Input => {
             let tab_hint = if state.path_suggestion.is_some() {
                 " complete  "
@@ -431,6 +457,7 @@ mod tests {
     ) -> RepoPickerState<'static> {
         static EMPTY_PATHS: &[PathBuf] = &[];
         static EMPTY_BOOLS: &[bool] = &[];
+        static EMPTY_SOURCE: &[crate::session::RepoSource] = &[];
         static EMPTY_IDX: &[usize] = &[];
         // Leaked once so the borrow is 'static — fine for a test fixture.
         let collapsed: &'static HashSet<PathBuf> = Box::leak(Box::new(HashSet::new()));
@@ -438,6 +465,7 @@ mod tests {
             bookmarks: EMPTY_PATHS,
             selected: EMPTY_BOOLS,
             worktree: EMPTY_BOOLS,
+            source: EMPTY_SOURCE,
             is_header: EMPTY_BOOLS,
             is_child: EMPTY_BOOLS,
             collapsed,

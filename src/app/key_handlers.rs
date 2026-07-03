@@ -1566,6 +1566,7 @@ impl App {
             }
             KeyCode::Char(' ') => self.repo_picker_toggle_selected(),
             KeyCode::Char('w') => self.repo_picker_toggle_worktree(),
+            KeyCode::Char('l') => self.repo_picker_toggle_source(),
             KeyCode::Char('d') => self.repo_picker_delete_bookmark(),
             KeyCode::Enter => {
                 self.submit_repo_picker();
@@ -1615,6 +1616,42 @@ impl App {
         }
     }
 
+    /// Toggle the source (Host ↔ Local) of the repo under the cursor,
+    /// auto-selecting it when switched to Local. A no-op with a hint on a local
+    /// session (source only matters when the session runs on a remote host — a
+    /// Local path there must be brought over first).
+    fn repo_picker_toggle_source(&mut self) {
+        if self.new_session.backend.is_none() {
+            self.set_status(
+                super::StatusLevel::Info,
+                "Repo source (host vs local) only applies to a remote session",
+            );
+            return;
+        }
+        let super::modals::Modal::RepoPicker(ref mut rp) = self.modal else {
+            return;
+        };
+        let Some(&real_idx) = rp.filtered_indices.get(rp.list_index) else {
+            return;
+        };
+        if rp.is_header_row(real_idx) {
+            return;
+        }
+        let Some(src) = rp.source.get_mut(real_idx) else {
+            return;
+        };
+        use crate::session::RepoSource;
+        *src = match *src {
+            RepoSource::Host => RepoSource::Local,
+            RepoSource::Local => RepoSource::Host,
+        };
+        if *src == RepoSource::Local {
+            if let Some(sel) = rp.selected.get_mut(real_idx) {
+                *sel = true;
+            }
+        }
+    }
+
     /// Delete the bookmark under the cursor. A standalone repo is removed in
     /// place; a parent header drops the parent bookmark and its (ephemeral)
     /// child rows via a full re-scan; a child row has no persistent identity, so
@@ -1657,6 +1694,7 @@ impl App {
         rp.bookmarks.remove(real_idx);
         rp.selected.remove(real_idx);
         rp.worktree.remove(real_idx);
+        rp.source.remove(real_idx);
         rp.is_header.remove(real_idx);
         rp.is_child.remove(real_idx);
         self.recompute_repo_filter();
@@ -1727,25 +1765,38 @@ impl App {
     /// Commit the typed path in the repo-picker input: add or re-select the
     /// bookmark, persist it (scoped to the target host), clear the input, and
     /// refresh the filter.
+    ///
+    /// The path may carry a `host:` / `local:` source prefix (mirroring the CLI
+    /// `--add-repo` grammar). On a remote session a `host:` path (the default)
+    /// is validated + tilde-expanded against the **host** and persisted as a
+    /// bookmark; a `local:` path is validated against the **local** filesystem,
+    /// tagged `Local`, and added **ephemerally** (not persisted — host-scoped
+    /// bookmark history mustn't collect cross-machine paths). On a local session
+    /// both resolve to the same local filesystem.
     fn repo_picker_commit_path_input(&mut self) {
-        // A remote path expands `~` against the *remote* home (never the local
-        // one) and is verified to exist on the host before it's accepted —
-        // catching a typo here beats failing minutes later at branch listing
-        // or worktree creation. One ssh/wsl round-trip, on explicit Enter only.
+        use crate::session::RepoSource;
         let remote_host = self
             .host_for_backend(self.new_session.backend.as_deref())
             .cloned();
         let super::modals::Modal::RepoPicker(ref mut rp) = self.modal else {
             return;
         };
-        let path = rp.path_input.value().trim().to_string();
-        if path.is_empty() {
+        let raw = rp.path_input.value().trim().to_string();
+        if raw.is_empty() {
             self.recompute_repo_filter();
             return;
         }
-        let expanded = match &remote_host {
+        let (source, path) = Self::strip_repo_source_prefix(&raw);
+
+        // A `Local` path (or any path on a local session) resolves against the
+        // local filesystem. A `Host` path on a remote session expands `~`
+        // against the *remote* home and is verified to exist on the host before
+        // it's accepted — catching a typo here beats failing minutes later at
+        // branch listing or worktree creation (one ssh/wsl round-trip, on Enter).
+        let on_host = remote_host.as_ref().filter(|_| source == RepoSource::Host);
+        let (expanded, persist) = match on_host {
             Some(host) => {
-                let expanded = match crate::git::expand_remote_tilde(host, &path) {
+                let expanded = match crate::git::expand_remote_tilde(host, path) {
                     Ok(p) => p,
                     Err(e) => {
                         self.set_error(format!("Cannot resolve ~ on '{}': {e:#}", host.name));
@@ -1756,15 +1807,24 @@ impl App {
                     self.set_error(format!("Path not found on '{}': {expanded}", host.name));
                     return;
                 }
-                std::path::PathBuf::from(expanded)
+                (std::path::PathBuf::from(expanded), true)
             }
-            None => paths::expand_tilde(&path),
+            None => {
+                let expanded = paths::expand_tilde(path);
+                if source == RepoSource::Local && !expanded.exists() {
+                    self.set_error(format!("Path not found locally: {}", expanded.display()));
+                    return;
+                }
+                // A Local repo on a remote session is transient (not a host
+                // bookmark); a plain local-session path persists as before.
+                (expanded, remote_host.is_none())
+            }
         };
         let super::modals::Modal::RepoPicker(ref mut rp) = self.modal else {
             return;
         };
-        let persist = Self::repo_picker_select_or_add_row(rp, &expanded);
-        if persist {
+        let standalone = Self::repo_picker_select_or_add_row(rp, &expanded, source);
+        if persist && standalone {
             if let Err(e) = self
                 .db
                 .upsert_repo_bookmark(self.bookmark_host_key(), &expanded)
@@ -1781,23 +1841,46 @@ impl App {
         self.recompute_repo_filter();
     }
 
-    /// Select an already-represented bookmark row for `expanded`, or push a new
-    /// auto-selected row. Returns whether the path should be persisted as a
-    /// standalone bookmark: a path already shown as a parent's child (or the
-    /// parent header itself) is already covered, so it is not re-persisted.
+    /// Strip an optional `host:` / `local:` source prefix off a typed repo path.
+    /// Only those two exact prefixes are recognized so a Windows drive path
+    /// (`C:\repo`) or any other `scheme:`-looking path is never misread. Mirrors
+    /// the CLI's `--add-repo` grammar (`cli::strip_source_prefix`).
+    fn strip_repo_source_prefix(raw: &str) -> (crate::session::RepoSource, &str) {
+        use crate::session::RepoSource;
+        if let Some(rest) = raw.strip_prefix("local:") {
+            (RepoSource::Local, rest)
+        } else if let Some(rest) = raw.strip_prefix("host:") {
+            (RepoSource::Host, rest)
+        } else {
+            (RepoSource::Host, raw)
+        }
+    }
+
+    /// Select an already-represented bookmark row for `expanded` (tagging its
+    /// `source`), or push a new auto-selected row. Returns whether the path is
+    /// eligible to persist as a standalone bookmark: a path already shown as a
+    /// parent's child (or the parent header itself) is already covered, so it is
+    /// not re-persisted.
     fn repo_picker_select_or_add_row(
         rp: &mut super::modals::RepoPickerModal,
         expanded: &std::path::Path,
+        source: crate::session::RepoSource,
     ) -> bool {
         // If already represented, just select it (no duplicate row or DB entry).
         let Some(idx) = rp.bookmarks.iter().position(|p| p == expanded) else {
             rp.push_row(expanded.to_path_buf(), true, false, false);
+            if let Some(src) = rp.source.last_mut() {
+                *src = source;
+            }
             return true;
         };
         let is_child = rp.is_child_row(idx);
         let is_header = rp.is_header_row(idx);
         if !is_header {
             rp.selected[idx] = true;
+            if let Some(src) = rp.source.get_mut(idx) {
+                *src = source;
+            }
         }
         !is_child && !is_header
     }
@@ -1910,10 +1993,31 @@ impl App {
     }
 
     fn submit_repo_picker(&mut self) {
+        let remote = self.new_session.backend.is_some();
         let super::modals::Modal::RepoPicker(ref rp) = self.modal else {
             return;
         };
 
+        // Guardrail: a `Local`-source repo on a remote session must be brought to
+        // the host first, which isn't implemented yet. Block at this single
+        // choke point (keeping the modal open) rather than letting it fail later
+        // against the host's filesystem. Mirrors the headless guard in
+        // `session_ops::spawn::resolve_dirs`.
+        if remote {
+            let local: Vec<String> = Self::selected_local_repos(rp);
+            if !local.is_empty() {
+                self.set_error(format!(
+                    "Local repos can't run on a remote host yet (transfer not \
+                     implemented) — unselect or switch to host source: {}",
+                    local.join(", ")
+                ));
+                return;
+            }
+        }
+
+        let super::modals::Modal::RepoPicker(ref rp) = self.modal else {
+            return;
+        };
         let (worktree_repos, normal_repos) = Self::partition_selected_repos(rp);
 
         // Touch all selected bookmarks so they stay sorted by recency.
@@ -1975,6 +2079,21 @@ impl App {
         self.spawn_session_with_config(&config);
     }
 
+    /// Display strings of the currently-selected rows tagged as `Local` source.
+    /// Drives the remote-session submit guardrail (a Local repo can't yet run on
+    /// a remote host). Header rows carry no source and are skipped.
+    fn selected_local_repos(rp: &super::modals::RepoPickerModal) -> Vec<String> {
+        rp.bookmarks
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                rp.selected.get(*i).copied().unwrap_or(false)
+                    && rp.source.get(*i).copied() == Some(crate::session::RepoSource::Local)
+            })
+            .map(|(_, p)| p.display().to_string())
+            .collect()
+    }
+
     /// Split the selected bookmarks into (worktree repos, normal repos).
     fn partition_selected_repos(
         rp: &super::modals::RepoPickerModal,
@@ -2002,6 +2121,44 @@ mod tests {
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn strip_repo_source_prefix_recognizes_only_exact_prefixes() {
+        use super::super::App;
+        use crate::session::RepoSource;
+        assert_eq!(
+            App::strip_repo_source_prefix("local:/home/me/x"),
+            (RepoSource::Local, "/home/me/x")
+        );
+        assert_eq!(
+            App::strip_repo_source_prefix("host:/srv/x"),
+            (RepoSource::Host, "/srv/x")
+        );
+        // Bare path → Host, untouched.
+        assert_eq!(
+            App::strip_repo_source_prefix("/srv/x"),
+            (RepoSource::Host, "/srv/x")
+        );
+        // A Windows drive path must not be misread as a source prefix.
+        assert_eq!(
+            App::strip_repo_source_prefix(r"C:\repo"),
+            (RepoSource::Host, r"C:\repo")
+        );
+    }
+
+    #[test]
+    fn selected_local_repos_lists_only_selected_local_rows() {
+        use super::super::modals::RepoPickerModal;
+        use super::super::App;
+        use crate::session::RepoSource;
+        let mut rp = RepoPickerModal::default();
+        rp.push_row("/a".into(), true, false, false); // selected, host
+        rp.push_row("/b".into(), true, false, false); // selected, local
+        rp.push_row("/c".into(), false, false, false); // local but unselected
+        rp.source[1] = RepoSource::Local;
+        rp.source[2] = RepoSource::Local;
+        assert_eq!(App::selected_local_repos(&rp), vec!["/b".to_string()]);
     }
 
     #[test]

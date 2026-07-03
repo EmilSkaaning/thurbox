@@ -1104,6 +1104,7 @@ impl App {
                 bookmarks: &rp.bookmarks,
                 selected: &rp.selected,
                 worktree: &rp.worktree,
+                source: &rp.source,
                 is_header: &rp.is_header,
                 is_child: &rp.is_child,
                 collapsed: &rp.collapsed,

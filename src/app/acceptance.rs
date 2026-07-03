@@ -406,6 +406,40 @@ fn ctrl_n_opens_repo_picker() {
 }
 
 #[test]
+fn remote_repo_picker_blocks_local_source_at_submit() {
+    // A remote session carrying a local-source repo can't spawn yet (no repo
+    // transfer). Submitting must keep the modal open, surface an error, and NOT
+    // spawn a session.
+    let mut h = Harness::standard(0);
+    h.render();
+    h.ctrl('n'); // open the repo picker
+                 // Simulate a remote target chosen at the host-picker step.
+    h.app.new_session.backend = Some("ssh:box".into());
+    let modals::Modal::RepoPicker(ref mut rp) = h.app.modal else {
+        panic!("expected repo picker");
+    };
+    rp.focus = modals::RepoPickerFocus::List;
+    rp.push_row("/home/me/proj".into(), true, false, false);
+    rp.source[0] = crate::session::RepoSource::Local;
+    rp.recompute_filter();
+
+    h.key(KeyCode::Enter, KeyModifiers::NONE);
+
+    assert!(
+        matches!(h.app.modal, modals::Modal::RepoPicker(_)),
+        "a blocked submit keeps the picker open"
+    );
+    let msg = h.app.status_message.as_ref().expect("an error is shown");
+    assert!(matches!(msg.level, StatusLevel::Error), "level is Error");
+    assert!(
+        msg.text.contains("Local"),
+        "error names the local restriction: {}",
+        msg.text
+    );
+    assert!(h.app.sessions.is_empty(), "no session was spawned");
+}
+
+#[test]
 fn ctrl_j_and_k_cycle_session_selection() {
     let mut h = Harness::standard(3);
     assert_eq!(h.app.active_index, 0);

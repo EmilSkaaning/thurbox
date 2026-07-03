@@ -16,6 +16,36 @@ use serde::{Deserialize, Serialize};
 
 use super::SessionId;
 
+/// Where a repo's files live relative to the machine the session runs on.
+///
+/// A session runs on exactly one backend (its host). `Host` means the path
+/// already exists on that machine — the local filesystem for a local session,
+/// or the remote filesystem for a remote (SSH/WSL) session; this is the only
+/// behavior thurbox implements today. `Local` marks a path on the machine
+/// running the TUI that must be **brought to the remote host** before the
+/// remote agent can use it. Bringing a local repo to a host (clone/rsync) is
+/// not implemented yet, so a `Local` source on a remote session is blocked at
+/// spawn time (see `session_ops::spawn::resolve_dirs` — the future transfer
+/// seam). On a local session `Local` is degenerate (same machine as `Host`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RepoSource {
+    /// Path exists on the machine the session runs on (today's only behavior).
+    #[default]
+    Host,
+    /// Path is on the local (TUI) machine; must be transferred to a remote host.
+    Local,
+}
+
+impl RepoSource {
+    /// Whether this is the default `Host` source. Used by `skip_serializing_if`
+    /// so all-`Host` `ExtraRepo` lists serialize byte-identically to pre-source
+    /// rows.
+    pub fn is_host(&self) -> bool {
+        matches!(self, RepoSource::Host)
+    }
+}
+
 /// An additional repository attached to a multi-repo `Spawn`, beyond the
 /// primary `repo_path`.
 ///
@@ -37,6 +67,12 @@ pub struct ExtraRepo {
     /// to the primary repo's base (`base_branch` on the `Spawn`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_branch: Option<String>,
+    /// Which machine `repo_path` lives on. Defaults to `Host` (the path exists
+    /// on the session's own machine) and is skipped on serialize when `Host`, so
+    /// old persisted rows decode unchanged and all-`Host` lists round-trip
+    /// byte-identically.
+    #[serde(default, skip_serializing_if = "RepoSource::is_host")]
+    pub source: RepoSource,
 }
 
 /// A persisted automation definition.
@@ -408,6 +444,40 @@ mod tests {
 
     // 2024-01-01 00:00:00 UTC (a Monday) in millis.
     const MON_2024: u64 = 1_704_067_200_000;
+
+    #[test]
+    fn extra_repo_source_defaults_to_host_and_skips_on_serialize() {
+        // An old row without a `source` key decodes to Host.
+        let old = r#"{"repo_path":"/srv/repo","worktree":true}"#;
+        let decoded: ExtraRepo = serde_json::from_str(old).unwrap();
+        assert_eq!(decoded.source, RepoSource::Host);
+
+        // A Host source is omitted, so the list round-trips byte-identically to
+        // the pre-source format (schema v33 rows stay stable).
+        let host = ExtraRepo {
+            repo_path: "/srv/repo".into(),
+            worktree: true,
+            base_branch: None,
+            source: RepoSource::Host,
+        };
+        assert_eq!(
+            serde_json::to_string(&host).unwrap(),
+            r#"{"repo_path":"/srv/repo","worktree":true}"#
+        );
+    }
+
+    #[test]
+    fn extra_repo_local_source_round_trips() {
+        let local = ExtraRepo {
+            repo_path: "/home/me/proj".into(),
+            worktree: false,
+            base_branch: None,
+            source: RepoSource::Local,
+        };
+        let json = serde_json::to_string(&local).unwrap();
+        assert!(json.contains(r#""source":"local""#), "got {json}");
+        assert_eq!(serde_json::from_str::<ExtraRepo>(&json).unwrap(), local);
+    }
 
     #[test]
     fn once_in_future_returns_at() {

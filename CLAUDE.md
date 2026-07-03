@@ -588,6 +588,20 @@ via `App::backend_for`).
   (`git::host_launcher` → `ssh …` or `wsl.exe …`). Worktrees live under the
   host's `worktrees_dir` (or `$HOME/.local/share/thurbox/worktrees` resolved +
   cached per backend name — a WSL distro has no `destination`).
+- **Repo source (host vs local)**: a session runs on one backend, and every repo
+  path (primary + extras) is a path **on that machine** — the host's filesystem
+  for a remote session. `session::RepoSource {Host, Local}` (on `ExtraRepo`,
+  serde-defaulted to `Host` so v33 rows are unchanged) marks whether a repo lives
+  on the host (`Host`, today's only working mode) or on the local TUI machine
+  (`Local`, must be brought over). Bringing a local repo to a host (clone/rsync)
+  is **not implemented yet**, so a `Local` source on a remote spawn is **blocked**
+  at the transfer seam (`session_ops::spawn::resolve_dirs`) and, in the TUI,
+  earlier at repo-picker submit (`App::selected_local_repos`). The repo picker is
+  source-aware: `l` toggles a row Host↔Local (no-op on a local session), a typed
+  path can carry a `host:`/`local:` prefix (mirroring the CLI `--add-repo
+  local:PATH`; `cli::strip_source_prefix`), and a `Local` row shows a `[local]`
+  marker. When transfer lands it fills that one `resolve_dirs` branch and both the
+  TUI and headless paths unblock.
 - **Persistence/restore**: `backend_type` round-trips in SQLite; restore
   discovers windows **per backend** so off-local sessions re-adopt against their
   own host. Remote backends are readied + discovered **in the background** (one

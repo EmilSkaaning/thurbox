@@ -157,6 +157,15 @@ paths (a WSL distro's worktrees live in its own Linux filesystem, not on
 require a restart (the registry is read once and each host's `$HOME` is
 cached for the process lifetime).
 
+A remote session's repos therefore must already exist **on the host** —
+the picker validates a typed `host:` path against the host's filesystem.
+`thurbox-cli session create`/`task create` accept an optional repo-source
+prefix on `--add-repo [SOURCE:]PATH[@BASE]` / `--add-dir [SOURCE:]PATH`:
+`host:` (the default — path on the session's machine) or the **reserved**
+`local:` (path on the local machine, to be brought to a remote host).
+`local:` parses and persists but is **not yet functional** — a local
+repo on a remote spawn is blocked until repo transfer is implemented.
+
 ## settings.toml
 
 Scalar tuning knobs plus the `[features]` switches, seeded fully

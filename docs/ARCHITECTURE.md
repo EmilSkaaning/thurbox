@@ -467,6 +467,17 @@ WSL needs no credentials at all.
   under the host's `worktrees_dir` (or `$HOME/.local/share/thurbox/…`
   resolved + cached, keyed by backend name since a WSL host has no
   `destination`).
+- **Repo source + transfer seam**: a session has **one backend**, so
+  every repo path is a path on that machine. `session::RepoSource
+  {Host, Local}` (on `ExtraRepo`, serde-defaulted `Host`) records whether
+  a repo lives on the session's host (`Host`) or on the local TUI machine
+  (`Local`, to be brought over). Copying a local repo to a host isn't
+  implemented; the single choke point where a `Local` path would become a
+  host path is `session_ops::spawn::resolve_dirs` (right before
+  `create_worktree`/`additional_dirs.push`) — today it **blocks** a remote
+  `Local` spawn, and the TUI blocks earlier at repo-picker submit. A
+  future `transfer_local_repo(host, path)` fills that one branch and both
+  entry points unblock, since they funnel the same source-tagged list.
 
 **Module placement**: `HostDef`/`HostRegistry`/`HostKind` live in
 `session/` (the dependency sink) so both `agent` (builds the backend)

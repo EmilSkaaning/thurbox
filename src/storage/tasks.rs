@@ -344,11 +344,13 @@ mod tests {
                         repo_path: PathBuf::from("/tmp/extra-wt"),
                         worktree: true,
                         base_branch: Some("master".into()),
+                        source: crate::session::RepoSource::Host,
                     },
                     ExtraRepo {
                         repo_path: PathBuf::from("/tmp/extra-dir"),
                         worktree: false,
                         base_branch: None,
+                        source: crate::session::RepoSource::Host,
                     },
                 ],
             }),

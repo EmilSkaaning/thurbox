@@ -1222,6 +1222,11 @@ pub struct RepoPickerModal {
     pub selected: Vec<bool>,
     /// Whether each selected repo should use worktree mode (parallel to `bookmarks`).
     pub worktree: Vec<bool>,
+    /// Which machine each repo's files live on (parallel to `bookmarks`).
+    /// `Host` (the default) = the session's own machine; `Local` = the TUI
+    /// machine, to be brought to a remote host. Only meaningful for a remote
+    /// session; toggled with `l`.
+    pub source: Vec<crate::session::RepoSource>,
     /// Whether each row is a parent header (non-selectable group title).
     pub is_header: Vec<bool>,
     /// Whether each row is a child repo nested under a parent header (drives the
@@ -1251,6 +1256,7 @@ impl RepoPickerModal {
         self.bookmarks.push(path);
         self.selected.push(selected);
         self.worktree.push(false);
+        self.source.push(crate::session::RepoSource::Host);
         self.is_header.push(is_header);
         self.is_child.push(is_child);
     }
@@ -2550,6 +2556,7 @@ mod tests {
         assert_eq!(n, 3);
         assert_eq!(rp.selected.len(), n);
         assert_eq!(rp.worktree.len(), n);
+        assert_eq!(rp.source.len(), n);
         assert_eq!(rp.is_header.len(), n);
         assert_eq!(rp.is_child.len(), n);
         assert_eq!(rp.is_header, vec![false, true, false]);

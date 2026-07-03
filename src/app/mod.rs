@@ -1329,6 +1329,7 @@ impl App {
         rp.bookmarks.clear();
         rp.selected.clear();
         rp.worktree.clear();
+        rp.source.clear();
         rp.is_header.clear();
         rp.is_child.clear();
 
@@ -8156,6 +8157,7 @@ mod tests {
         rp.bookmarks = vec!["/tmp/a".into(), "/tmp/b".into()];
         rp.selected = vec![false, false];
         rp.worktree = vec![false, false];
+        rp.source = vec![crate::session::RepoSource::Host; 2];
         rp.is_header = vec![false, false];
         rp.is_child = vec![false, false];
         rp.filtered_indices = vec![0, 1];

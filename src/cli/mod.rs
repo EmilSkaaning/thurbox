@@ -104,14 +104,36 @@ pub enum Command {
     Notify(notify::NotifyArgs),
 }
 
+/// Strip an optional `host:` / `local:` source prefix off an `--add-repo` /
+/// `--add-dir` token, returning `(RepoSource, rest)`.
+///
+/// Only those two exact prefixes are recognized so a Windows drive path like
+/// `C:\repo` (or any other `scheme:`-looking path) is never misread as a
+/// source qualifier — anything else falls through as `Host` with the token
+/// intact. `local:` is currently **reserved / not yet functional**: it parses
+/// and persists, but a `Local` source on a remote spawn is blocked downstream
+/// (`session_ops::spawn::resolve_dirs`) until repo transfer is implemented.
+fn strip_source_prefix(tok: &str) -> (crate::session::RepoSource, &str) {
+    use crate::session::RepoSource;
+    if let Some(rest) = tok.strip_prefix("local:") {
+        (RepoSource::Local, rest)
+    } else if let Some(rest) = tok.strip_prefix("host:") {
+        (RepoSource::Host, rest)
+    } else {
+        (RepoSource::Host, tok)
+    }
+}
+
 /// Build the additional-repo list for a multi-repo `Spawn` from the repeatable
 /// `--add-repo`/`--add-dir` flags shared by `session create` and `task create`.
 ///
-/// Each `--add-repo` token is `PATH` or `PATH@BASE` — the repo gets its own
+/// Each `--add-repo` token is `[SOURCE:]PATH[@BASE]` — the repo gets its own
 /// isolated worktree on the spawn's shared `--worktree`/`--worktree-branch`,
 /// off `BASE` (falling back to the primary's base when omitted). Each
-/// `--add-dir` token is attached as-is (no worktree). The base is split on the
-/// last `@`, so paths without `@` (the norm) are taken verbatim.
+/// `--add-dir` token is `[SOURCE:]PATH`, attached as-is (no worktree). The
+/// optional `SOURCE` prefix (`host:` default, or the reserved `local:`) is
+/// stripped first; the base is then split on the last `@`, so paths without
+/// `@` (the norm) are taken verbatim.
 pub(crate) fn parse_extra_repos(
     add_repo: &[String],
     add_dir: &[String],
@@ -119,21 +141,25 @@ pub(crate) fn parse_extra_repos(
     use crate::session::ExtraRepo;
     let mut extra: Vec<ExtraRepo> = Vec::new();
     for tok in add_repo {
+        let (source, tok) = strip_source_prefix(tok);
         let (path, base) = match tok.rsplit_once('@') {
             Some((p, b)) if !p.is_empty() && !b.is_empty() => (p.to_string(), Some(b.to_string())),
-            _ => (tok.clone(), None),
+            _ => (tok.to_string(), None),
         };
         extra.push(ExtraRepo {
             repo_path: std::path::PathBuf::from(path),
             worktree: true,
             base_branch: base,
+            source,
         });
     }
     for dir in add_dir {
+        let (source, dir) = strip_source_prefix(dir);
         extra.push(ExtraRepo {
             repo_path: std::path::PathBuf::from(dir),
             worktree: false,
             base_branch: None,
+            source,
         });
     }
     extra
@@ -207,6 +233,44 @@ mod tests {
         assert_eq!(extra[4].repo_path, std::path::PathBuf::from("/reference"));
         assert_eq!(extra[4].base_branch, None);
         assert!(!extra[4].worktree);
+    }
+
+    #[test]
+    fn parse_extra_repos_reads_source_prefix() {
+        use crate::session::RepoSource;
+        let extra = parse_extra_repos(
+            &[
+                "local:/home/me/proj@main".to_string(),
+                "host:/srv/repo".to_string(),
+                "/srv/plain".to_string(),
+            ],
+            &["local:/home/me/ref".to_string()],
+        );
+        // `local:` prefix stripped before the `@BASE` split.
+        assert_eq!(
+            extra[0].repo_path,
+            std::path::PathBuf::from("/home/me/proj")
+        );
+        assert_eq!(extra[0].base_branch.as_deref(), Some("main"));
+        assert_eq!(extra[0].source, RepoSource::Local);
+        // Explicit `host:` prefix stripped, source Host.
+        assert_eq!(extra[1].repo_path, std::path::PathBuf::from("/srv/repo"));
+        assert_eq!(extra[1].source, RepoSource::Host);
+        // No prefix defaults to Host.
+        assert_eq!(extra[2].source, RepoSource::Host);
+        // `--add-dir` honors the prefix too.
+        assert_eq!(extra[3].repo_path, std::path::PathBuf::from("/home/me/ref"));
+        assert_eq!(extra[3].source, RepoSource::Local);
+        assert!(!extra[3].worktree);
+    }
+
+    #[test]
+    fn parse_extra_repos_does_not_misread_windows_drive() {
+        use crate::session::RepoSource;
+        // A `C:\...` path is not a source prefix — only `host:`/`local:` are.
+        let extra = parse_extra_repos(&[r"C:\repo".to_string()], &[]);
+        assert_eq!(extra[0].repo_path, std::path::PathBuf::from(r"C:\repo"));
+        assert_eq!(extra[0].source, RepoSource::Host);
     }
 
     #[test]

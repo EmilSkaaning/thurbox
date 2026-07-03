@@ -213,13 +213,16 @@ the repo as before.
 
 **Headless multi-repo.** The same shape is reachable without the TUI.
 `thurbox-cli session create` (and `task create`) take repeatable
-`--add-repo PATH[@BASE]` — each gets its **own isolated worktree** on
-the spawn's shared `--worktree-branch`, off its own base — and `--add-dir
-PATH`, which attaches a repo **as-is** (no branch). A spawn with two or
-more members lands in the same symlink workspace the TUI builds, so every
-agent sees each repo as a subdirectory. The extra-repo list is persisted
-as JSON (schema v33) so a restored session rebuilds the identical
-workspace.
+`--add-repo [SOURCE:]PATH[@BASE]` — each gets its **own isolated worktree**
+on the spawn's shared `--worktree-branch`, off its own base — and
+`--add-dir [SOURCE:]PATH`, which attaches a repo **as-is** (no branch). A
+spawn with two or more members lands in the same symlink workspace the TUI
+builds, so every agent sees each repo as a subdirectory. The optional
+`SOURCE` prefix is `host:` (default) or the **reserved** `local:` (a repo
+on the local machine, to be brought to a remote host — parsed and
+persisted but blocked on a remote spawn until transfer is implemented; see
+the repo-source note above). The extra-repo list is persisted as JSON
+(schema v33) so a restored session rebuilds the identical workspace.
 
 **Why per-session agent?** Different tasks suit different agents.
 Choosing the agent at creation time keeps each session
@@ -342,6 +345,22 @@ on the remote host / inside the distro (a WSL distro's worktrees stay
 in its own Linux filesystem, not on `/mnt/c`). In the session list an
 off-local session is marked with a `☁` glyph (and the info panel shows
 its `Host:`), mirroring the worktree `⑂` mark.
+
+**Repo source (host vs local).** A remote session's repos must live **on
+the host** — that is the only working mode today. The new-session repo
+picker is *source-aware* so this is explicit rather than silently
+assumed: each row carries a source, and `l` toggles it **host↔local**
+(a no-op on a local session, where source is meaningless). A typed path
+may also carry a `host:` / `local:` prefix (e.g. `local:~/proj`), matching
+the CLI grammar. A `local:` repo — one that lives on the machine running
+thurbox and would need to be **brought to the host** — is shown with a
+`[local]` marker and, because copying a local repo to a host
+(clone/rsync) is **not implemented yet**, is **blocked at submit** with a
+clear message (mirrored by a headless guard in
+`session_ops::spawn::resolve_dirs`) instead of failing minutes later
+against the host's filesystem. Mixing on-host and (future) local repos in
+one multi-repo session is modeled — the block is the only thing standing
+between the picker and a working local→remote spawn once transfer lands.
 
 **Why a config file rather than ad-hoc destinations?** Named hosts
 give the picker stable, readable entries and let `backend_type`

@@ -247,6 +247,30 @@ fn resolve_dirs(
     let mut worktrees: Vec<SharedWorktree> = Vec::new();
     let mut additional_dirs: Vec<PathBuf> = Vec::new();
 
+    // Transfer seam / guardrail: a `Local`-source repo lives on the machine
+    // running thurbox and must be brought to the host before a remote agent can
+    // use it. That transfer (clone/rsync) isn't implemented yet, so block a
+    // remote spawn carrying any `Local` extra here — before any worktree side
+    // effect — instead of letting `create_worktree_on`/`list_branches_on` run it
+    // against the host and fail with a confusing "no such path" minutes later.
+    // When transfer lands, this branch becomes the call that maps each `Local`
+    // path to its on-host destination and the logic below runs unchanged.
+    if host.is_some() {
+        let local: Vec<String> = req
+            .extra_repos
+            .iter()
+            .filter(|e| e.source == crate::session::RepoSource::Local)
+            .map(|e| e.repo_path.display().to_string())
+            .collect();
+        if !local.is_empty() {
+            return Err(format!(
+                "local-source repos on a remote host are not supported yet \
+                 (bringing a local repo to a host is not implemented): {}",
+                local.join(", ")
+            ));
+        }
+    }
+
     // Primary repo: worktree when a branch is set, otherwise the repo root.
     let primary_cwd = match req.worktree_branch.as_deref() {
         None => req.repo_path.clone(),
@@ -801,11 +825,13 @@ mod tests {
                 repo_path: PathBuf::from("/tmp/extra-a"),
                 worktree: false,
                 base_branch: None,
+                source: crate::session::RepoSource::Host,
             },
             ExtraRepo {
                 repo_path: PathBuf::from("/tmp/extra-b"),
                 worktree: false,
                 base_branch: None,
+                source: crate::session::RepoSource::Host,
             },
         ];
         let (cwd, worktrees, additional) = resolve_dirs(&r, None).unwrap();
@@ -826,6 +852,7 @@ mod tests {
             repo_path: PathBuf::from("/tmp/extra"),
             worktree: true,
             base_branch: None,
+            source: crate::session::RepoSource::Host,
         }];
         let err = resolve_dirs(&r, None).unwrap_err();
         assert!(err.contains("worktree-branch"), "got: {err}");
