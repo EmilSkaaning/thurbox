@@ -258,16 +258,31 @@ jobs:
 
   conventional-commits:
     name: Conventional Commits
+    # Runs on BOTH pull_request and merge_group. Every other job reports on the
+    # merge queue's temporary branch; this one must too. A job that *skips* on
+    # merge_group leaves the "Conventional Commits" status unreported there, and
+    # if branch protection requires this check individually the merge queue
+    # never sees it satisfied on the queued commit — it waits out the check
+    # timeout and ejects the PR *without merging* (a skipped required check is
+    # not treated as met on a merge group the way it is on a plain PR). So we
+    # keep the check reporting on both events: the real `cog check` runs on the
+    # PR (where the commit history is the PR's own commits), and on the merge
+    # group — whose commits were already validated on the PR, and which may
+    # carry a non-conventional queue merge commit — the job no-ops to success.
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        if: github.event_name == 'pull_request'
         with:
           fetch-depth: 0
       - name: Check conventional commits
+        if: github.event_name == 'pull_request'
         uses: cocogitto/cocogitto-action@52d0023b4396897f1815648e553db2ab8d782f3a # v4.2.0
         with:
           command: check
+      - name: Already validated on the pull request
+        if: github.event_name == 'merge_group'
+        run: echo "Conventional commits were validated on the PR; nothing to re-check on the merge group."
 
   markdown-lint:
     name: Markdown Lint
