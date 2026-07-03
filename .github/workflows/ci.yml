@@ -18,7 +18,7 @@ env:
 # queue entry gets a distinct `github.ref`, so queued runs never cancel each
 # other.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -167,7 +167,7 @@ jobs:
   windows-test:
     name: Windows (tests)
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.rust == 'true' && github.event_name != 'merge_group'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -229,7 +229,7 @@ jobs:
   deny:
     name: Cargo Deny
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.rust == 'true' && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -246,7 +246,7 @@ jobs:
   docs:
     name: Documentation
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.rust == 'true' && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -352,7 +352,7 @@ jobs:
   sonarqube:
     name: SonarQube
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.rust == 'true' && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -374,7 +374,7 @@ jobs:
   binary-size:
     name: Binary Size
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.rust == 'true' && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -398,6 +398,7 @@ jobs:
             done
           } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Upload binaries as artifact
+        if: github.event_name != 'merge_group'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-binaries
@@ -414,21 +415,21 @@ jobs:
       - check
       - fmt
       - clippy
-      - nextest
-      - acceptance
       - architecture
-      - windows-clippy
-      - windows-test
+      - nextest
       - tui-smoke
-      - deny
-      - docs
+      - acceptance
+      - windows-clippy
       - conventional-commits
       - markdown-lint
       - install-script
       - install-script-ps
       - shellcheck
       - website-lint
+      - deny
+      - docs
       - sonarqube
+      - binary-size
     runs-on: ubuntu-latest
     steps:
       - name: Verify all checks passed
