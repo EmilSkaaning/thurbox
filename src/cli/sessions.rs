@@ -178,6 +178,8 @@ pub fn run(action: Action, db: &Database) -> Result<CommandOutput, String> {
                 parent_session_id,
                 task_id: None,
                 extra_repos,
+                // Scriptable create: fail loudly if the agent binary is missing.
+                preflight: true,
             };
             let res = crate::session_ops::spawn_session_headless(db, req)?;
             let human = format!(

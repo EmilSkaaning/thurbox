@@ -618,6 +618,19 @@ pub struct ConfirmRestoreModal {
     pub deleted: DeletedSessionInfo,
 }
 
+/// Confirmation prompt shown when the spawn pre-flight can't find the agent's
+/// `command` on PATH. The check is advisory (a shell-function/alias command, or
+/// one resolved via an rc file the walk can't see, is a valid spawn), so this
+/// offers a proceed-anyway escape hatch rather than hard-blocking. The pending
+/// spawn is stashed in [`crate::app::App`] and launched on confirm.
+#[derive(Debug, Clone)]
+pub struct ConfirmSpawnMissingBinaryModal {
+    /// The resolved agent command the pre-flight couldn't find.
+    pub command: String,
+    /// Whether the miss was on a remote host (tunes the modal's hint text).
+    pub remote: bool,
+}
+
 // ── RestoreSessionsModal ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default)]
@@ -1865,6 +1878,7 @@ pub enum Modal {
     TaskActionPicker(TaskActionPickerModal),
     ConfirmDelete(ConfirmDeleteModal),
     ConfirmRestore(ConfirmRestoreModal),
+    ConfirmSpawnMissingBinary(ConfirmSpawnMissingBinaryModal),
     Settings(SettingsModal),
 }
 

@@ -895,6 +895,9 @@ pub fn ensure_extension(db: &Database, def: &ExtensionDef) -> Result<EnsureRepor
                         parent_session_id: None,
                         task_id: None,
                         extra_repos: Vec::new(),
+                        // Self-heal runs every heartbeat tick; a not-yet-installed
+                        // agent CLI must not abort the whole extension activation.
+                        preflight: false,
                     },
                 )?;
                 report.sessions_created.push(sess.name.clone());

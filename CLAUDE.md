@@ -447,6 +447,25 @@ workspace, so `--last`/`--continue` finds no parent session (multi-repo
   implements the `AgentProvider` trait (`command()` +
   `build_args(&SessionConfig)`). `App::provider_for(&config)`
   picks the provider for the session's agent.
+- **Spawn-time binary pre-flight**: before a tmux window is created, both
+  spawn paths probe that the resolved agent `command` is runnable (the agent
+  analogue of the startup `LocalTmuxBackend::check_available` guard). A missing
+  binary otherwise makes the window's shell exit instantly ("command not
+  found") and the pane die with no upfront error. `agent::preflight::
+  command_on_path` walks `$PATH` locally (with `PATHEXT` on Windows);
+  `git::command_available_on_host` runs `command -v` under a **login** shell on
+  a remote host (matching `login_wrap_for_remote`'s PATH), short-circuiting to
+  "present" on psmux hosts. The check is **advisory** — any uncertainty
+  (unreadable `$PATH`, a shell-function `command`, an unreachable host) assumes
+  present. `session_ops::spawn::agent_command_present` is the single source of
+  truth for that local-vs-remote dispatch and the assume-present policy. The
+  scriptable headless spawns (`session create` / `task run` / automation
+  `Spawn`, gated by `SpawnRequest.preflight`) hard-error (no leaked window); the
+  resilient self-heal path (`ensure_extension`, run every heartbeat tick) sets
+  `preflight = false` so a not-yet-installed agent CLI never aborts activation.
+  The TUI (`App::do_spawn_session_async` → `preflight_missing_command`) shows a
+  "spawn anyway?" confirm (`Modal::ConfirmSpawnMissingBinary`) since a
+  shell-function/rc-only `command` is a valid spawn the walk can't see.
 
 A session stores only its **agent name**; there are no
 per-session model/permission/prompt/tool knobs.

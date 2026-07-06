@@ -374,6 +374,7 @@ impl App {
             Modal::TaskActionPicker(_) => self.handle_task_action_picker_key(code),
             Modal::ConfirmDelete(_) => self.handle_confirm_delete_key(code),
             Modal::ConfirmRestore(_) => self.handle_confirm_restore_key(code),
+            Modal::ConfirmSpawnMissingBinary(_) => self.handle_confirm_spawn_missing_key(code),
             Modal::Settings(_) => self.handle_settings_key(code, mods),
             _ => return false,
         }
@@ -442,6 +443,23 @@ impl App {
             }
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                 self.modal.close();
+            }
+            _ => {}
+        }
+    }
+
+    /// Drive the "agent not found" confirm: `Enter`/`y` spawns anyway (the
+    /// binary may be a shell function / rc-only PATH entry the probe can't see),
+    /// `Esc`/`n` cancels and drops the deferred spawn.
+    fn handle_confirm_spawn_missing_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.modal.close();
+                self.confirm_preflight_spawn();
+            }
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.modal.close();
+                self.pending_preflight_spawn = None;
             }
             _ => {}
         }

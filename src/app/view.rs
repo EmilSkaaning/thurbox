@@ -927,6 +927,17 @@ impl App {
             );
         }
 
+        // "Agent not found" spawn confirmation (pre-flight PATH miss)
+        if let super::modals::Modal::ConfirmSpawnMissingBinary(ref cs) = self.modal {
+            return crate::ui::confirm_spawn_modal::render_confirm_spawn_modal(
+                frame,
+                &crate::ui::confirm_spawn_modal::ConfirmSpawnState {
+                    command: &cs.command,
+                    remote: cs.remote,
+                },
+            );
+        }
+
         Vec::new()
     }
 

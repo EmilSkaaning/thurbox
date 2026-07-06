@@ -47,6 +47,14 @@ pub struct SpawnRequest {
     /// as-is as an additional directory. When any extra is non-empty the agent
     /// launches in a per-session symlink workspace gathering every member.
     pub extra_repos: Vec<ExtraRepo>,
+    /// Hard-fail the spawn when the resolved agent `command` isn't on PATH
+    /// (via `preflight_agent_command`). `true` for the scriptable CLI spawns
+    /// (`session create`, `task run`, automation `Spawn`) so a missing binary
+    /// surfaces loudly instead of leaving a dead window. `false` for the
+    /// resilient self-heal path (`ensure_extension`, run every heartbeat tick),
+    /// which must not abort activation just because an agent CLI isn't installed
+    /// — that would resurrect the pre-check behaviour where the pane simply dies.
+    pub preflight: bool,
 }
 
 /// Result returned on successful headless spawn.
@@ -121,6 +129,16 @@ pub fn spawn_session_headless(db: &Database, req: SpawnRequest) -> Result<SpawnR
     super::inject_thurbox_env(&mut config, &agent_session_id, req.task_id);
 
     let (command, args) = super::build_agent_invocation(&agent_def, &config);
+
+    // Pre-flight the agent binary before creating the window. A missing command
+    // would make the window's shell exit instantly ("command not found") and the
+    // pane die — leaving an orphaned dead session with no upfront error. Fail
+    // loudly here instead (scriptable), mirroring the backend `check_available`
+    // guard at startup. Advisory-degrading: any uncertainty assumes present.
+    // Skipped for the resilient self-heal path (`req.preflight == false`).
+    if req.preflight {
+        preflight_agent_command(&command, host.as_ref())?;
+    }
 
     // Remote spawns drive the SSH backend's control mode to learn the real pane
     // id; local spawns leave `backend_id` empty for the TUI to resolve by name.
@@ -541,6 +559,39 @@ fn resolve_host(host_name: Option<&str>) -> Result<(String, Option<HostDef>), St
     }
 }
 
+/// Core of the spawn pre-flight: is `command` runnable for this spawn target?
+///
+/// Local spawns walk `$PATH`; remote spawns probe the host over its launcher,
+/// treating a probe error (unreachable/slow host) as "assume present". The
+/// single source of truth for the check's local-vs-remote dispatch and its
+/// uncertainty-degrades-to-present policy — shared by the headless guard
+/// ([`preflight_agent_command`]) and the TUI confirm
+/// (`App::preflight_missing_command`) so the two can't drift.
+pub(crate) fn agent_command_present(command: &str, host: Option<&HostDef>) -> bool {
+    match host {
+        None => crate::agent::preflight::command_on_path(command),
+        Some(h) => crate::git::command_available_on_host(h, command).unwrap_or(true),
+    }
+}
+
+/// Best-effort pre-flight that the resolved agent `command` is runnable, run
+/// before the tmux window is created. Wraps [`agent_command_present`] with a
+/// helpful error for the scriptable headless path; the guard only trips on a
+/// *confident* miss, so it never blocks a valid spawn.
+fn preflight_agent_command(command: &str, host: Option<&HostDef>) -> Result<(), String> {
+    if agent_command_present(command, host) {
+        return Ok(());
+    }
+    let where_ = match host {
+        Some(h) => format!(" on host '{}'", h.name),
+        None => String::new(),
+    };
+    Err(format!(
+        "Agent command '{command}' was not found on PATH{where_}. Install it, or \
+         fix the agent's `command` in agents.toml."
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,6 +614,7 @@ mod tests {
             parent_session_id: None,
             task_id: None,
             extra_repos: Vec::new(),
+            preflight: true,
         }
     }
 
@@ -616,6 +668,34 @@ mod tests {
         };
         db.upsert_session(&parent).unwrap();
         assert!(validate_parent_session(&db, Some(parent.id)).is_ok());
+    }
+
+    #[test]
+    fn agent_command_present_local_reflects_path() {
+        assert!(!agent_command_present(
+            "thurbox-definitely-not-a-real-binary-xyz",
+            None
+        ));
+        // `sh` is on PATH on every unix CI host; skip the assertion elsewhere.
+        if cfg!(unix) {
+            assert!(agent_command_present("sh", None));
+        }
+    }
+
+    #[test]
+    fn preflight_local_errors_on_missing_command() {
+        let bogus = "thurbox-definitely-not-a-real-binary-xyz";
+        let err = preflight_agent_command(bogus, None).unwrap_err();
+        assert!(err.contains(bogus), "got {err}");
+        assert!(err.to_lowercase().contains("path"), "got {err}");
+    }
+
+    #[test]
+    fn preflight_local_accepts_present_command() {
+        // `sh` is on PATH on every unix CI host; skip the assertion elsewhere.
+        if cfg!(unix) {
+            assert!(preflight_agent_command("sh", None).is_ok());
+        }
     }
 
     #[test]

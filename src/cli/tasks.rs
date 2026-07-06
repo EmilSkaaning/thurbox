@@ -346,6 +346,8 @@ fn run_task(db: &Database, task: &Task) -> Result<Value, String> {
                 parent_session_id: None,
                 task_id: Some(task.id),
                 extra_repos: extra_repos.clone(),
+                // Scriptable task run: fail loudly if the agent binary is missing.
+                preflight: true,
             };
             action::spawn_and_deliver(db, &name, req, &prompt).map_err(|e| match e {
                 SpawnDeliverError::Spawn(msg) | SpawnDeliverError::Deliver { message: msg, .. } => {

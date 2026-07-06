@@ -584,6 +584,8 @@ fn fire_spawn(
         parent_session_id: None,
         task_id: None,
         extra_repos: extra_repos.to_vec(),
+        // Scheduled Spawn: surface a missing agent binary in the run history.
+        preflight: true,
     };
     match action::spawn_and_deliver(db, &name, req, &auto.prompt) {
         Ok(session_id) => (

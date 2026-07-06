@@ -123,6 +123,16 @@ struct PendingSessionSpawn {
     base_branch: Option<String>,
 }
 
+/// A spawn deferred behind the "agent not found" confirm modal
+/// ([`modals::Modal::ConfirmSpawnMissingBinary`]). Captured *before* any
+/// wizard state is consumed so confirming re-enters the normal async spawn with
+/// everything intact; cancelling just drops it.
+struct PendingPreflightSpawn {
+    name: String,
+    config: SessionConfig,
+    worktrees: Vec<WorktreeInfo>,
+}
+
 /// One remote backend's discovery result: its `backend_type` plus the windows
 /// its host reported. Sent once per backend by the restore threads.
 type RemoteDiscovery = (String, Vec<crate::agent::backend::DiscoveredSession>);
@@ -642,6 +652,9 @@ pub struct App {
     /// Continuation for a completed background spawn: the metadata + follow-up
     /// (task prompt) to apply once the session is live.
     pending_session_spawn: Option<PendingSessionSpawn>,
+    /// A spawn deferred behind the "agent not found" confirm modal, launched on
+    /// confirm and dropped on cancel.
+    pending_preflight_spawn: Option<PendingPreflightSpawn>,
     /// Remote-backed sessions still being restored in the background (one
     /// discovery thread per host), drained each tick by
     /// [`Self::poll_remote_restore`]. `None` once every remote backend has
@@ -939,6 +952,7 @@ impl App {
             pending_worktree_create: None,
             session_spawn: background::BackgroundTask::default(),
             pending_session_spawn: None,
+            pending_preflight_spawn: None,
             remote_restore: None,
             deferred_inputs: Vec::new(),
             session_terminal_views: HashMap::new(),
@@ -1217,6 +1231,33 @@ impl App {
             def.args = crate::session_ops::spawn::adapt_agent_args_for_remote(h, def.args);
         }
         Arc::new(GenericProvider::new(def))
+    }
+
+    /// Best-effort pre-flight: is the agent `command` for this spawn config
+    /// *confidently* not runnable? Returns `Some((command, remote))` only on a
+    /// confident miss (so the caller can confirm before spawning); any
+    /// uncertainty — unreadable `$PATH`, a shell-function command, an unreachable
+    /// host — returns `None` and the spawn proceeds. `remote` reports whether the
+    /// probe ran against a host (tunes the confirm modal's hint).
+    fn preflight_missing_command(&self, config: &SessionConfig) -> Option<(String, bool)> {
+        let command = self.agent_def_for(&config.agent).command;
+        if command.is_empty() {
+            return None;
+        }
+        let host = self.host_for_backend(config.backend.as_deref());
+        if crate::session_ops::spawn::agent_command_present(&command, host) {
+            return None;
+        }
+        // `remote` tunes the confirm modal's hint (host PATH vs. local PATH).
+        Some((command, host.is_some()))
+    }
+
+    /// Launch a spawn deferred behind the "agent not found" confirm modal (the
+    /// user chose "spawn anyway"). A no-op if the pending spawn is missing.
+    fn confirm_preflight_spawn(&mut self) {
+        if let Some(p) = self.pending_preflight_spawn.take() {
+            self.spawn_session_async_unchecked(p.name, &p.config, p.worktrees);
+        }
     }
 
     /// Resolve the [`AgentDef`] for an agent name via the same fallback chain as
@@ -3558,6 +3599,40 @@ impl App {
     /// Falls back to the synchronous path if a spawn is already in flight (so a
     /// double-trigger is never silently dropped).
     pub(crate) fn do_spawn_session_async(
+        &mut self,
+        name: String,
+        config: &SessionConfig,
+        worktrees: Vec<WorktreeInfo>,
+    ) {
+        // An overlapping spawn falls back to the synchronous path (unchanged);
+        // the interactive pre-flight/confirm only guards a fresh async spawn.
+        if self.session_spawn.in_progress() {
+            self.do_spawn_session(name, config, worktrees);
+            return;
+        }
+        // Pre-flight the agent binary before touching any wizard state. A miss is
+        // advisory (a shell-function/alias `command`, or one on an rc-only PATH,
+        // is a valid spawn), so stash the spawn and confirm rather than block.
+        if let Some((command, remote)) = self.preflight_missing_command(config) {
+            self.pending_preflight_spawn = Some(PendingPreflightSpawn {
+                name,
+                config: config.clone(),
+                worktrees,
+            });
+            self.modal =
+                modals::Modal::ConfirmSpawnMissingBinary(modals::ConfirmSpawnMissingBinaryModal {
+                    command,
+                    remote,
+                });
+            return;
+        }
+        self.spawn_session_async_unchecked(name, config, worktrees);
+    }
+
+    /// The spawn body proper, bypassing the pre-flight — reached either when the
+    /// binary probe passed or when the user chose "spawn anyway" at the
+    /// [`modals::Modal::ConfirmSpawnMissingBinary`] prompt.
+    fn spawn_session_async_unchecked(
         &mut self,
         name: String,
         config: &SessionConfig,
@@ -10716,10 +10791,13 @@ mod tests {
     async fn do_spawn_session_async_roundtrips_to_error_for_stub_backend() {
         // End-to-end: kick off the background spawn, let the blocking task run,
         // and confirm the failure (the stub backend refuses to spawn) is
-        // surfaced via the poll path with no session added.
+        // surfaced via the poll path with no session added. Uses the
+        // pre-flight-bypassing entry point so the test exercises the spawn
+        // machinery, not the agent-binary probe (the default agent's binary
+        // isn't installed in CI).
         let mut app = app_with_sessions(0);
         let config = SessionConfig::default();
-        app.do_spawn_session_async("x".into(), &config, vec![]);
+        app.spawn_session_async_unchecked("x".into(), &config, vec![]);
         assert!(app.session_spawn.in_progress());
 
         for _ in 0..200 {
@@ -10754,6 +10832,90 @@ mod tests {
         // The synchronous fallback ran and surfaced the stub spawn failure.
         let msg = app.status_message.as_ref().unwrap();
         assert_eq!(msg.level, StatusLevel::Error);
+    }
+
+    #[test]
+    fn missing_agent_binary_opens_confirm_then_esc_cancels() {
+        let mut app = app_with_sessions(0);
+        // Register an agent whose command is certainly not installed.
+        let bogus = "thurbox-definitely-not-a-real-binary-xyz";
+        app.agents.agents.push(AgentDef {
+            name: "broken".into(),
+            command: bogus.into(),
+            args: Vec::new(),
+            resume_args: Vec::new(),
+            fork_args: Vec::new(),
+            new_session_args: Vec::new(),
+            resume_latest: false,
+        });
+        let config = SessionConfig {
+            agent: "broken".into(),
+            ..SessionConfig::default()
+        };
+
+        app.do_spawn_session_async("x".into(), &config, vec![]);
+
+        // The pre-flight tripped: a confirm modal opens and the spawn is stashed,
+        // with no background spawn kicked off.
+        match &app.modal {
+            modals::Modal::ConfirmSpawnMissingBinary(m) => {
+                assert_eq!(m.command, bogus);
+                assert!(!m.remote, "a local backend is not a remote miss");
+            }
+            other => panic!("expected the agent-not-found modal, got {other:?}"),
+        }
+        assert!(app.pending_preflight_spawn.is_some());
+        assert!(!app.session_spawn.in_progress(), "no spawn was started");
+
+        // Esc cancels: the modal closes and the deferred spawn is dropped.
+        app.update(AppMessage::KeyPress(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.modal.is_open());
+        assert!(app.pending_preflight_spawn.is_none());
+        assert!(app.sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_agent_binary_confirm_spawns_anyway() {
+        let mut app = app_with_sessions(0);
+        let bogus = "thurbox-definitely-not-a-real-binary-xyz";
+        app.agents.agents.push(AgentDef {
+            name: "broken".into(),
+            command: bogus.into(),
+            args: Vec::new(),
+            resume_args: Vec::new(),
+            fork_args: Vec::new(),
+            new_session_args: Vec::new(),
+            resume_latest: false,
+        });
+        let config = SessionConfig {
+            agent: "broken".into(),
+            ..SessionConfig::default()
+        };
+
+        app.do_spawn_session_async("x".into(), &config, vec![]);
+        assert!(matches!(
+            app.modal,
+            modals::Modal::ConfirmSpawnMissingBinary(_)
+        ));
+
+        // "Spawn anyway": Enter confirms, drops the stash, and kicks off the
+        // spawn despite the missing binary (the probe is only advisory).
+        app.update(AppMessage::KeyPress(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.modal.is_open());
+        assert!(app.pending_preflight_spawn.is_none());
+        assert!(
+            app.session_spawn.in_progress(),
+            "spawn-anyway kicks off the background spawn"
+        );
+
+        // Drain the background task so the runtime isn't left with an orphan.
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            app.poll_session_spawn();
+            if !app.session_spawn.in_progress() {
+                break;
+            }
+        }
     }
 
     #[test]

@@ -243,6 +243,37 @@ fn run_host_script(host: &HostDef, script: &str, action: &str) -> Result<()> {
     remote_output_or_stderr(output, action).map(|_| ())
 }
 
+/// Best-effort pre-flight: is `command` runnable on `host`?
+///
+/// The remote analogue of [`crate::agent::preflight::command_on_path`]. A
+/// missing agent binary makes the remote window command exit 1 and the pane die
+/// instantly — the same symptom [`crate::agent::tmux`]'s `login_wrap_for_remote`
+/// exists to avoid — so we probe before spawning the window. The probe runs
+/// `command -v` under a **login** shell (`/bin/sh -lc …`), matching how the
+/// agent itself launches on a remote (`login_wrap_for_remote`), so the profile
+/// `PATH` — where agents like `~/.local/bin/claude` live — is on the path exactly
+/// as it will be at launch. `command -v` also resolves shell functions/aliases a
+/// bare file check would miss.
+///
+/// psmux (Windows SSH) hosts short-circuit to `Ok(true)`: the POSIX `sh -c`
+/// probe doesn't apply there and the whole psmux remote path already degrades
+/// gracefully (hooks stripped, no subscriptions). Callers treat any `Err`
+/// (unreachable/slow host) as "assume present" — the check must never block a
+/// spawn on its own failure.
+pub fn command_available_on_host(host: &HostDef, command: &str) -> Result<bool> {
+    if host.mux() == "psmux" {
+        return Ok(true);
+    }
+    let probe = format!("command -v {} >/dev/null 2>&1", posix_quote(command));
+    let script = format!("/bin/sh -lc {}", posix_quote(&probe));
+    let output = host_shell_c(host, &script)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .context("failed to run remote agent-command probe")?;
+    Ok(output.status.success())
+}
+
 /// Build a `<launcher> sh -c <script>` [`Command`] for a host, correct for each
 /// transport's argument handling.
 ///
@@ -1265,6 +1296,23 @@ mod tests {
         for var in GIT_LOCATION_ENV {
             assert!(removed.contains(var), "git_program must scrub {var}");
         }
+    }
+
+    #[test]
+    fn command_available_short_circuits_on_psmux_host() {
+        // A psmux (Windows SSH) host can't be POSIX-probed; the check degrades to
+        // "assume present" without any network round-trip (the destination here
+        // is unreachable, so a real probe would hang/fail).
+        let host = HostDef {
+            name: "winbox".into(),
+            destination: "user@unreachable-winbox".into(),
+            multiplexer: Some("psmux".into()),
+            ..Default::default()
+        };
+        assert!(
+            command_available_on_host(&host, "claude").unwrap(),
+            "psmux host must skip the probe"
+        );
     }
 
     #[test]
