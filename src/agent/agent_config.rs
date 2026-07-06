@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use crate::session::{AgentDef, AgentRegistry};
+use crate::session::{AgentDef, AgentRegistry, DEFAULT_AGENT_NAME};
 
 /// Built-in agent definitions, also used to seed `agents.toml` on first run.
 ///
@@ -183,8 +183,67 @@ pub fn load_or_seed_with_warnings() -> (AgentRegistry, Vec<String>) {
     }
 }
 
+/// Comment stamped on the line above a built-in whose `command` wasn't runnable
+/// at seed time. It's a point-in-time hint only — the picker carries live truth
+/// — and is only ever written on first run (see [`render_seed`]).
+const NOT_FOUND_NOTE: &str = "# not found on PATH at seed time";
+
+/// Build the first-run `agents.toml` contents, tailored to the machine: pick a
+/// `default` agent that's actually installed and annotate the built-ins that
+/// aren't. All seven entries are kept (the file stays a complete, editable
+/// reference); `is_available` is the point-in-time PATH probe.
+///
+/// - **`default`** becomes the first built-in, in canonical order, whose
+///   `command` is available — falling back to `"claude"` when none are (today's
+///   behavior on a bare machine), so the file always names a real entry.
+/// - Each un-installed built-in gets a [`NOT_FOUND_NOTE`] comment above its
+///   `name = "…"` line. Comments are ignored by the parser, so the document
+///   still yields exactly the seven built-ins.
+///
+/// Pure over `is_available` so it can be unit-tested without touching the OS.
+fn render_seed(is_available: impl Fn(&str) -> bool) -> String {
+    // Canonical (name, command) order comes straight from the parsed seed, so
+    // this never hard-codes any agent identity in Rust.
+    let builtins = builtin_registry();
+
+    let default = builtins
+        .agents
+        .iter()
+        .find(|a| is_available(&a.command))
+        .map(|a| a.name.as_str())
+        .unwrap_or(DEFAULT_AGENT_NAME);
+
+    let mut out = BUILTIN_AGENTS_TOML.to_string();
+
+    // The const already names DEFAULT_AGENT_NAME, so only a different pick needs
+    // a rewrite (keeps the all-installed seed byte-identical to the const).
+    if default != DEFAULT_AGENT_NAME {
+        out = out.replacen(
+            &format!("default = \"{DEFAULT_AGENT_NAME}\"\n"),
+            &format!("default = \"{default}\"\n"),
+            1,
+        );
+    }
+
+    for agent in &builtins.agents {
+        if is_available(&agent.command) {
+            continue;
+        }
+        // Names are unique across the whole seed (the commented examples use
+        // distinct names like `claude-opus`), so this targets the real entry.
+        let name_line = format!("name = \"{}\"\n", agent.name);
+        let annotated = format!("{NOT_FOUND_NOTE}\n{name_line}");
+        out = out.replacen(&name_line, &annotated, 1);
+    }
+
+    out
+}
+
 /// Write the bundled agents.toml on first run, degrading to the built-in
-/// registry (with a warning) if the dir or file can't be created.
+/// registry (with a warning) if the dir or file can't be created. The seeded
+/// contents are tailored to the machine (see [`render_seed`]): the `default` is
+/// the first installed built-in and un-installed built-ins are annotated. The
+/// returned registry mirrors the file so callers see the chosen default.
 fn seed_agents_toml(path: &std::path::Path) -> (AgentRegistry, Vec<String>) {
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -194,14 +253,17 @@ fn seed_agents_toml(path: &std::path::Path) -> (AgentRegistry, Vec<String>) {
             );
         }
     }
-    if let Err(e) = std::fs::write(path, BUILTIN_AGENTS_TOML) {
+    let contents = render_seed(super::preflight::command_on_path);
+    if let Err(e) = std::fs::write(path, &contents) {
         return (
             builtin_registry(),
             vec![format!("Failed to seed agents.toml: {e}")],
         );
     }
     tracing::info!(path = %path.display(), "Seeded agents.toml with built-in agents");
-    (builtin_registry(), Vec::new())
+    // Parse what we just wrote so the in-memory default matches the file (the
+    // dynamic default lives in the annotated document, not the const).
+    parse_agents_toml(&contents)
 }
 
 /// Top-level keys read directly by the resilient parser; anything else at the
@@ -437,13 +499,116 @@ mod tests {
         let path = agents_config_path().unwrap();
         assert!(!path.exists());
 
+        // The seeded `default` is machine-dependent now (first installed
+        // built-in, else claude), so assert it's a real registered built-in
+        // rather than pinning "claude" — render_seed's own tests cover the
+        // selection logic deterministically.
         let reg = load_or_seed();
-        assert_eq!(reg.default, "claude");
         assert!(path.exists(), "agents.toml should have been seeded");
+        assert!(
+            reg.get(&reg.default).is_some(),
+            "seeded default must name a registered agent: {}",
+            reg.default
+        );
+        assert_eq!(reg.agents.len(), 7, "all seven built-ins stay seeded");
 
         // Second call reads the seeded file and yields the same registry.
         let reg2 = load_or_seed();
         assert_eq!(reg, reg2);
+    }
+
+    #[test]
+    fn render_seed_bare_machine_keeps_claude_default_and_annotates_all() {
+        // Nothing installed: default falls back to claude (today's behavior),
+        // and every built-in is flagged, but the document still parses to 7.
+        let seed = render_seed(|_| false);
+        let (reg, warnings) = parse_agents_toml(&seed);
+        assert!(
+            warnings.is_empty(),
+            "annotated seed parses clean: {warnings:?}"
+        );
+        assert_eq!(reg.default, "claude");
+        assert_eq!(reg.agents.len(), 7);
+        // Every real entry carries the not-found note above its name line.
+        for name in [
+            "claude",
+            "codex",
+            "antigravity",
+            "opencode",
+            "aider",
+            "copilot",
+            "vibe",
+        ] {
+            assert!(
+                seed.contains(&format!("{NOT_FOUND_NOTE}\nname = \"{name}\"\n")),
+                "{name} should be annotated as not-found"
+            );
+        }
+    }
+
+    #[test]
+    fn render_seed_picks_first_installed_and_only_annotates_missing() {
+        // Only `codex` present: it becomes the default and is NOT annotated;
+        // the rest are annotated. Canonical order puts claude first, but claude
+        // isn't installed, so codex wins.
+        let seed = render_seed(|command| command == "codex");
+        let (reg, _) = parse_agents_toml(&seed);
+        assert_eq!(reg.default, "codex");
+        assert_eq!(reg.agents.len(), 7);
+        assert!(
+            seed.contains("default = \"codex\"\n"),
+            "default line must be rewritten to codex"
+        );
+        assert!(
+            !seed.contains(&format!("{NOT_FOUND_NOTE}\nname = \"codex\"\n")),
+            "an installed agent must not be annotated"
+        );
+        assert!(
+            seed.contains(&format!("{NOT_FOUND_NOTE}\nname = \"claude\"\n")),
+            "an un-installed agent must be annotated"
+        );
+    }
+
+    #[test]
+    fn render_seed_keeps_claude_default_line_when_claude_installed() {
+        // claude installed (canonical first) ⇒ default stays claude, and the
+        // default line is left byte-identical to the const (no rewrite needed).
+        let seed = render_seed(|command| command == "claude");
+        assert!(seed.contains("default = \"claude\"\n"));
+        let (reg, _) = parse_agents_toml(&seed);
+        assert_eq!(reg.default, "claude");
+        assert!(
+            !seed.contains(&format!("{NOT_FOUND_NOTE}\nname = \"claude\"\n")),
+            "claude is installed, must not be annotated"
+        );
+        assert!(
+            seed.contains(&format!("{NOT_FOUND_NOTE}\nname = \"codex\"\n")),
+            "codex is not installed, must be annotated"
+        );
+    }
+
+    #[test]
+    fn render_seed_all_installed_is_byte_identical_to_const() {
+        // When everything is present there's nothing to annotate or rewrite, so
+        // the seed matches the pristine const exactly.
+        let seed = render_seed(|_| true);
+        assert_eq!(seed, BUILTIN_AGENTS_TOML);
+    }
+
+    #[test]
+    fn render_seed_probes_command_not_name() {
+        // antigravity's command (`agy`) differs from its display name — the
+        // probe must key on the command, and the default/annotation resolve
+        // back to the *name*. This guards the command-vs-name mapping.
+        let seed = render_seed(|command| command == "agy");
+        let (reg, _) = parse_agents_toml(&seed);
+        assert_eq!(reg.default, "antigravity");
+        assert!(
+            !seed.contains(&format!("{NOT_FOUND_NOTE}\nname = \"antigravity\"\n")),
+            "antigravity's command is installed, so it must not be annotated"
+        );
+        // A sibling whose command is absent is still annotated.
+        assert!(seed.contains(&format!("{NOT_FOUND_NOTE}\nname = \"claude\"\n")));
     }
 
     #[test]

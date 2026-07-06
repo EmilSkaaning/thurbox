@@ -1437,16 +1437,28 @@ impl App {
         }
 
         let default = self.agents.default_name();
-        let selected_index = names.iter().position(|n| *n == default).unwrap_or(0);
-        let choices = self
+        let default_index = names.iter().position(|n| *n == default).unwrap_or(0);
+        // A local PATH probe is meaningless for a remote host (the binary lives
+        // on the host), so mark every agent available there — no false dimming.
+        let remote = config
+            .backend
+            .as_deref()
+            .map(crate::session::is_remote_backend)
+            .unwrap_or(false);
+        let choices: Vec<_> = self
             .agents
             .agents
             .iter()
             .map(|a| crate::ui::agent_picker_modal::AgentChoice {
                 name: a.name.clone(),
                 command: a.command.clone(),
+                available: remote || crate::agent::preflight::command_on_path(&a.command),
             })
             .collect();
+        // Registry order is preserved; only the starting cursor moves to the
+        // first available agent when the default itself isn't installed.
+        let selected_index =
+            crate::ui::agent_picker_modal::initial_selection(&choices, default_index);
         self.new_session.spawn_name = Some(name);
         self.new_session.spawn_config = Some(config);
         self.new_session.spawn_worktrees = worktrees;

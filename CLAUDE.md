@@ -451,6 +451,33 @@ workspace, so `--last`/`--continue` finds no parent session (multi-repo
 A session stores only its **agent name**; there are no
 per-session model/permission/prompt/tool knobs.
 
+**Installed-agent detection** (agent-neutral, no schema change). A single
+primitive `agent::preflight::command_on_path(command)` asks the OS whether an
+`AgentDef`'s opaque `command` string resolves to a runnable executable (walks
+`$PATH`, plus `PATHEXT` on Windows; a shell function / missing `$PATH` degrades
+to "assume present", so it's advisory only). It informs two point-in-time
+moments — it never special-cases any agent, and a custom `[[agents]]` entry is
+probed for free:
+
+- **Seed-time** (`render_seed`, first-run only, non-destructive). The seed still
+  writes **all seven** built-ins as a complete reference, but the `default`
+  becomes the first built-in, in canonical order, whose `command` is installed
+  (falling back to `claude` on a bare machine), and each un-installed built-in
+  gets a `# not found on PATH at seed time` comment above its `name` line. The
+  document still parses to the seven built-ins and passes strict `config
+  validate` (comments are ignored). Seeding only runs when `agents.toml` is
+  absent, so an edited file is never rewritten and the comments never refresh —
+  the picker carries the live truth.
+- **Pick-time** (`finish_prepare_spawn` → `agent_picker_modal`). Because `$PATH`
+  can change between runs, availability is recomputed when the picker opens:
+  each `AgentChoice` carries `available`, un-installed rows render **dimmed** with
+  a `(not installed)` marker but stay **selectable** (a shell rc may resolve the
+  binary the probe can't see), and the initial selection moves to the first
+  available agent (`initial_selection`) without reordering the list. A
+  **remote-host** session marks every agent available (no dimming) — the local
+  `$PATH` says nothing about the host. This is display only; it does not block a
+  spawn (the spawn-time binary guard is a separate concern).
+
 ### Multi-repo sessions (symlink workspace)
 
 A session can span several repositories (the repo picker allows
