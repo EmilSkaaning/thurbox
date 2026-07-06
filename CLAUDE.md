@@ -694,7 +694,12 @@ release — `--force` bypasses the up-to-date/dev-build guards; gated on
 `[features] auto_update`, off by default; the TUI also runs this silently on
 startup when the flag is on), `notify`
 (diagnose OS desktop notifications: prints the detected delivery backend
-and last error; `--test` fires a sample — see OS notifications below).
+and last error; `--test` fires a sample — see OS notifications below), `doctor`
+(aggregate runtime-environment health check: probes tmux ≥ 3.2 + git presence,
+each agent `command` on PATH (default-agent absence = error, others = warning),
+DB writability, and rolls up `config validate`; `--hosts` also probes each
+configured/discovered host for reachability concurrently. Reports only, never
+fixes; exits non-zero on any error-severity check so it works as a setup gate).
 Output is
 **human-readable by default** and switches to JSON automatically when stdout is
 piped (so `… | jq` keeps working); force a format with `--json` (compact),

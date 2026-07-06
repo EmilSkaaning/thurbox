@@ -639,6 +639,36 @@ impl TmuxBackend {
         Self::with_transport(transport, socket, session, host.backend_name())
     }
 
+    /// Probe the multiplexer over this backend's transport, returning its
+    /// trimmed `-V` banner (e.g. `"tmux 3.4"`) on success.
+    ///
+    /// `tmux -L <socket> -V` prints the version without connecting, and over the
+    /// SSH/WSL transport this verifies reachability + `tmux` presence at the same
+    /// time (see [`SessionBackend::check_available`], which is a thin `probe`
+    /// wrapper). The `>= 3.2` gate (`check_min_version`) only bites real tmux,
+    /// so a psmux host passes on its own banner. Doctor uses the returned string
+    /// for its per-check / per-host status line.
+    pub fn probe(&self) -> Result<String> {
+        let output = self
+            .transport
+            .tmux_command(&self.socket, &["-V"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .context("tmux is not installed or not in PATH")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("tmux -V failed: {}", stderr.trim());
+        }
+
+        let version_str = String::from_utf8_lossy(&output.stdout);
+        check_min_version(&version_str)?;
+        let version = version_str.trim().to_string();
+        debug!("multiplexer version: {version}");
+        Ok(version)
+    }
+
     /// Run a tmux command and return its stdout (used before control mode is available).
     fn tmux_output(&self, args: &[&str]) -> Result<String> {
         let output = self.run_tmux(args)?;
@@ -1105,25 +1135,7 @@ impl SessionBackend for TmuxBackend {
     }
 
     fn check_available(&self) -> Result<()> {
-        // `tmux -L <socket> -V` prints the version without connecting, and over
-        // the SSH transport this verifies remote connectivity at the same time.
-        let output = self
-            .transport
-            .tmux_command(&self.socket, &["-V"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .context("tmux is not installed or not in PATH")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("tmux -V failed: {}", stderr.trim());
-        }
-
-        let version_str = String::from_utf8_lossy(&output.stdout);
-        check_min_version(&version_str)?;
-        debug!("multiplexer version: {}", version_str.trim());
-        Ok(())
+        self.probe().map(|_| ())
     }
 
     fn ensure_ready(&self) -> Result<()> {

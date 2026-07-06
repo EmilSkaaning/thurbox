@@ -165,6 +165,15 @@ impl Database {
         &self.conn
     }
 
+    /// Confirm the database is writable and not held by another writer.
+    ///
+    /// `BEGIN IMMEDIATE` takes the reserved write lock immediately (failing on a
+    /// read-only file or a busy DB), then `ROLLBACK` releases it having mutated
+    /// nothing — a genuine writability probe used by `thurbox-cli doctor`.
+    pub fn check_writable(&self) -> rusqlite::Result<()> {
+        self.conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
+    }
+
     /// Open an in-memory database (for testing).
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;

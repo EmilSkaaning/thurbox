@@ -16,6 +16,7 @@ use crate::storage::Database;
 pub mod action;
 pub mod automations;
 pub mod config;
+pub mod doctor;
 pub mod editor;
 pub mod extensions;
 pub mod identity;
@@ -102,6 +103,8 @@ pub enum Command {
     Update(update::UpdateArgs),
     /// Diagnose OS desktop notifications; `--test` fires a sample.
     Notify(notify::NotifyArgs),
+    /// Check the runtime environment (tmux, git, agents, database, config).
+    Doctor(doctor::DoctorArgs),
 }
 
 /// Build the additional-repo list for a multi-repo `Spawn` from the repeatable
@@ -154,6 +157,7 @@ pub fn run(cli: Cli, db: &Database) -> Result<(), String> {
         Command::Version(args) => Ok(version::run(args)),
         Command::Update(args) => Ok(update::run(args)),
         Command::Notify(args) => Ok(notify::run(args)),
+        Command::Doctor(args) => Ok(doctor::run(args, db)),
     }?;
 
     println!("{}", format.render(&output));
@@ -843,6 +847,21 @@ mod tests {
             panic!("expected Notify");
         };
         assert!(args.test);
+    }
+
+    #[test]
+    fn parse_doctor_with_and_without_hosts() {
+        let cli = Cli::try_parse_from(["thurbox-cli", "doctor"]).unwrap();
+        let Command::Doctor(args) = cli.command else {
+            panic!("expected Doctor");
+        };
+        assert!(!args.hosts);
+
+        let cli = Cli::try_parse_from(["thurbox-cli", "doctor", "--hosts"]).unwrap();
+        let Command::Doctor(args) = cli.command else {
+            panic!("expected Doctor");
+        };
+        assert!(args.hosts);
     }
 
     #[test]

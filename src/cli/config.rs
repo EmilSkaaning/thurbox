@@ -103,7 +103,10 @@ fn validate_keybindings() -> (Value, bool) {
 
 /// Validate every config file. Returns the full report plus the list of files
 /// that failed (empty = all valid).
-fn validate() -> (Value, Vec<String>) {
+///
+/// Exposed to the sibling `doctor` module so it folds config validity in as one
+/// check without re-parsing (see `cli::doctor`).
+pub(crate) fn validate() -> (Value, Vec<String>) {
     let (agents, agents_ok) = validate_toml::<crate::session::AgentRegistry>(
         crate::agent::agent_config::agents_config_path(),
         "agents.toml",
