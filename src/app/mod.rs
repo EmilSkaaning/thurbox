@@ -780,22 +780,38 @@ const EDITOR_NOT_CONFIGURED: &str =
 const WORKING_OUTPUT_STALE_MS: u64 = 10_000;
 
 /// Map a session's persisted hook state to its rendered [`SessionStatus`]. Pure
-/// so it's unit-testable without an `App`/DB. `exited` forces `Idle` (a crashed/
-/// finished process); `just_seen` is `true` when the user just moved focus off a
-/// `done` session this tick (acknowledged → `Idle`); `quiet_for_ms` is the time
-/// since the session's last terminal output, used to rescue a stuck `working`
-/// state (see [`WORKING_OUTPUT_STALE_MS`]). A `done` session is `Done` (blue)
-/// until seen; `idle`/missing/unknown states are `Idle`.
+/// so it's unit-testable without an `App`/DB. `exited` maps to `Error`
+/// (`Exited`) for a crash/launch-failure or `Idle` for a graceful shutdown,
+/// decided from the last hook edge (see below); `just_seen` is `true` when the
+/// user just moved focus off a `done` session this tick (acknowledged →
+/// `Idle`); `quiet_for_ms` is the time since the session's last terminal output,
+/// used to rescue a stuck `working` state (see [`WORKING_OUTPUT_STALE_MS`]). A
+/// `done` session is `Done` (blue) until seen; `idle`/missing/unknown states are
+/// `Idle`.
 fn derive_session_status(
     hook: Option<&crate::storage::HookRow>,
     exited: bool,
     just_seen: bool,
     quiet_for_ms: u64,
 ) -> SessionStatus {
+    let state = hook.and_then(|h| h.state.as_deref());
     if exited {
-        return SessionStatus::Idle;
+        // A process exit is terminal but not always alarming. If the agent last
+        // reported a clean edge before the pane closed — `done` (a turn just
+        // finished) or `idle` (at rest, e.g. its boot hook) — treat it as a
+        // graceful shutdown and stay `Idle`. But an exit while `working`/
+        // `blocked`, or with *no* hook signal at all (the process died before
+        // its boot hook fired — the missing-binary / launch-failure case), is a
+        // crash: surface it as `Error` so a dead session no longer masquerades
+        // as a quiet green `Idle` dot. This runs before the stuck-`working`
+        // quiescence fallback below, so an interrupted-then-exited turn lands on
+        // `Error` (more informative) rather than being rescued to `Idle`.
+        return match state {
+            Some("done") | Some("idle") => SessionStatus::Idle,
+            _ => SessionStatus::Error,
+        };
     }
-    match hook.and_then(|h| h.state.as_deref()) {
+    match state {
         // A live `working` turn keeps emitting output; a stuck one (interrupt /
         // crash / an agent that missed its done edge) goes quiet → fall to Idle.
         Some("working") if quiet_for_ms <= WORKING_OUTPUT_STALE_MS => SessionStatus::Working,
@@ -6159,9 +6175,56 @@ mod tests {
             seen_at: Some(seen_at),
         };
 
-        // Exited forces Idle, even with a live hook state.
+        // Exited while `working` is a crash/interrupt → Error (Exited), even
+        // though a fresh, non-exited `working` row would read as Working.
         assert_eq!(
             derive_session_status(Some(&row("working", 1, 0)), true, false, 0),
+            SessionStatus::Error
+        );
+        // Exited while `blocked` (agent was waiting on the user, then the pane
+        // died) is likewise abnormal → Error.
+        assert_eq!(
+            derive_session_status(Some(&row("blocked", 1, 0)), true, false, 0),
+            SessionStatus::Error
+        );
+        // Exited with no hook at all (died before its boot hook — the
+        // missing-binary / launch-failure case) → Error.
+        assert_eq!(
+            derive_session_status(None, true, false, 0),
+            SessionStatus::Error
+        );
+        // A graceful exit after a clean edge stays Idle, not Error: `done` (a
+        // turn finished then the process quit) and `idle` (at rest then quit).
+        assert_eq!(
+            derive_session_status(Some(&row("done", 5, 0)), true, false, 0),
+            SessionStatus::Idle
+        );
+        assert_eq!(
+            derive_session_status(Some(&row("idle", 1, 0)), true, false, 0),
+            SessionStatus::Idle
+        );
+        // The exit check runs *before* the stuck-`working` quiescence fallback,
+        // so a session that both went quiet past the staleness window *and*
+        // exited lands on Error (the exit result), not the Idle the quiescence
+        // timer would give a live-but-stuck `working` state. Its graceful mirror
+        // (`done` + quiet + exited) still resolves to Idle — exit wins both ways.
+        assert_eq!(
+            derive_session_status(
+                Some(&row("working", 1, 0)),
+                true,
+                false,
+                WORKING_OUTPUT_STALE_MS + 1
+            ),
+            SessionStatus::Error,
+            "an exited pane is Error even once its output has gone stale"
+        );
+        assert_eq!(
+            derive_session_status(
+                Some(&row("done", 5, 0)),
+                true,
+                false,
+                WORKING_OUTPUT_STALE_MS + 1
+            ),
             SessionStatus::Idle
         );
         // No hook / idle / unknown → Idle.
@@ -6456,10 +6519,25 @@ mod tests {
     }
 
     #[test]
-    fn refresh_exited_session_is_idle_regardless_of_hook() {
+    fn refresh_exited_session_while_active_is_error() {
+        // A pane that dies while the agent is mid-turn (`blocked`/`working`) is a
+        // crash/interrupt, not a rest → surface it as Error (Exited) so it no
+        // longer masquerades as a quiet Idle dot.
         let mut app = app_with_sessions(1);
         let id = persist_session(&app, 0);
         signal_hook(&mut app, id, "blocked");
+        app.sessions[0].mark_exited_for_test();
+        app.refresh_session_statuses();
+        assert_eq!(app.sessions[0].info.status, SessionStatus::Error);
+    }
+
+    #[test]
+    fn refresh_exited_session_after_clean_edge_is_idle() {
+        // A graceful shutdown — the agent reported `done` (turn finished) and the
+        // process then quit — stays Idle rather than raising a false alarm.
+        let mut app = app_with_sessions(1);
+        let id = persist_session(&app, 0);
+        signal_hook(&mut app, id, "done");
         app.sessions[0].mark_exited_for_test();
         app.refresh_session_statuses();
         assert_eq!(app.sessions[0].info.status, SessionStatus::Idle);

@@ -1337,7 +1337,7 @@ or done. `SessionStatus` (`src/session/mod.rs`) has five states driven by
 | `Blocked` | red | `◆` | agent needs input or approval |
 | `Done` | blue | `●` (filled) | a turn just finished; shown until you switch away |
 | `Idle` | green | `○` (hollow) | acknowledged (you moved off a Done), never active, or at rest |
-| `Error` | red | `✗` | reserved for a crashed agent — **not derived yet** (no exit-code signal; exited → `Idle`) |
+| `Error` | red | `✗` | the agent process exited abnormally (crash / missing binary / interrupted mid-turn); rendered "Exited". A graceful exit after a clean `done`/`idle` edge stays `Idle` instead. No real exit *code* yet (`has_exited()` is boolean) |
 
 The live session list **animates** the `Working` spinner (`ui::SPINNER_FRAMES`,
 `App::spinner_frame` advanced from `tick_count`, ~8 fps, repaints forced only
@@ -1365,7 +1365,9 @@ frame; the static `icon()` is used in non-animated contexts (info panel).
   agent's hooks drive it from there (so an idle, just-booted agent doesn't look
   stuck working).
 - **Derivation.** `App::refresh_session_statuses` (`src/app/mod.rs`) derives
-  each session's status every tick from the hook rows — exited → `Idle`; else
+  each session's status every tick from the hook rows — an exited pane maps to
+  `Error` (crash: exited while `working`/`blocked` or with no hook edge) or
+  `Idle` (graceful: exited after a clean `done`/`idle` edge); a live pane uses
   the persisted state (`working`/`blocked`; `idle`/none → `Idle`). The rows are
   **cached** (`App::cached_hook_states`) and reloaded from the DB only when
   `PRAGMA data_version` moves (an external `session signal`), not on every tick;
@@ -1386,8 +1388,10 @@ frame; the static `icon()` is used in non-animated contexts (info panel).
   treated as `Idle`. TUI agents animate their progress line (Claude's
   `(Xs · esc to interrupt)` ticks every second) so a genuinely-live turn never
   trips it; only `working` is time-gated (`blocked`/`done` are not). The DB row is
-  left untouched — the override is purely in the per-tick derivation, like
-  exited → `Idle`.
+  left untouched — the override is purely in the per-tick derivation, like the
+  exited → `Error`/`Idle` mapping. (The exit check runs *first*, so a session
+  that both went quiet and exited lands on the exit result, not the
+  stuck-working `Idle`.)
 - **Rollup.** Repo groups roll up to their most-urgent member
   (`Blocked > Error > Working > Done > Idle`), rendered as a colored dot on
   the group header (`ui::project_list::group_status` +

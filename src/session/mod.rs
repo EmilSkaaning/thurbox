@@ -110,10 +110,12 @@ pub enum SessionStatus {
     Done,
     /// 🟢 Acknowledged (focus moved off a `Done`), at rest, or never-active.
     Idle,
-    /// Reserved for a crashed agent. **Not currently derived** — process exit has
-    /// no failure signal yet (a clean or crashed exit both map to `Idle`), so this
-    /// variant is wired through colour/glyph/rollup but never assigned. Kept for
-    /// when exit-code plumbing lands.
+    /// The agent process has exited abnormally — it crashed, failed to launch
+    /// (missing binary), or was interrupted mid-turn. Derived when a pane exits
+    /// while `working`/`blocked` or with no hook signal at all; a graceful exit
+    /// after a clean `done`/`idle` edge stays `Idle` instead. Rendered as
+    /// "Exited" (no real exit *code* is captured yet — `has_exited()` is a
+    /// boolean).
     Error,
 }
 
@@ -122,7 +124,7 @@ impl SessionStatus {
     /// the state survives in greyscale / for colour-blind users: a spinner
     /// (working — the live session list animates it, see `ui::SPINNER_FRAMES`)
     /// vs. diamond (blocked) vs. filled circle (done, unseen) vs. hollow circle
-    /// (idle, seen) vs. cross (error). The filled/hollow pair makes
+    /// (idle, seen) vs. cross (exited/failed). The filled/hollow pair makes
     /// done-vs-idle read at a glance.
     pub fn icon(self) -> &'static str {
         match self {
@@ -142,7 +144,7 @@ impl fmt::Display for SessionStatus {
             Self::Blocked => write!(f, "Blocked"),
             Self::Done => write!(f, "Done"),
             Self::Idle => write!(f, "Idle"),
-            Self::Error => write!(f, "Error"),
+            Self::Error => write!(f, "Exited"),
         }
     }
 }

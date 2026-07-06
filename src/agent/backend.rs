@@ -628,7 +628,8 @@ impl Session {
     }
 
     /// Force the session into the "process exited" state, for tests that need to
-    /// exercise the exited → `Idle` status branch.
+    /// exercise the exited status branch (`Error` on a crash, `Idle` on a
+    /// graceful exit after a clean hook edge).
     #[cfg(test)]
     pub fn mark_exited_for_test(&self) {
         self.exited.store(true, Ordering::SeqCst);
