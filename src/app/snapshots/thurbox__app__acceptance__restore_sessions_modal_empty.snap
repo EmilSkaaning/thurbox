@@ -8,21 +8,21 @@ expression: h.render()
 │    No sessions yet    ││                                                                         │
 │Press Ctrl+N to create ││                                                                         │
 │                       ││                                                                         │
+│  See the main panel   ││                                                                         │
 │                       ││                                                                         │
 │                       ││                                                                         │
-│                       ││                                                                         │
-│                       ││                                                                         │
-│                       ││                                                                         │
-│                       ││                                                                         │
-│                   ╭ Restore Deleted Sessions ────────────────────────────────╮                   │
-│                   │                    No deleted sessions                   │                   │
-│                   │                                                          │                   │
-│                   │                                                          │                   │
-│                   │Esc close                                                 │                   │
-│                   ╰──────────────────────────────────────────────────────────╯                   │
-│                       ││                                                                         │
-│                       ││                                                                         │
-│                       ││                                                                         │
+│                       ││            ┌────────────────────────────────────────────────┐           │
+│                       ││            │No active sessions                              │           │
+│                       ││            │                                                │           │
+│                   ╭ Restore Deleted Sessions ────────────────────────────────╮       │           │
+│                   │                    No deleted sessions                   │       │           │
+│                   │                                                          │       │           │
+│                   │                                                          │       │           │
+│                   │Esc close                                                 │lable  │           │
+│                   ╰──────────────────────────────────────────────────────────╯       │           │
+│                       ││            │  Config       ~/.config/thurbox                │           │
+│                       ││            │  Docs         github.com/Thurbeen/thurbox      │           │
+│                       ││            └────────────────────────────────────────────────┘           │
 │                       ││                                                                         │
 │                       ││                                                                         │
 │                       ││                                                                         │

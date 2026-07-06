@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
     // `agents` is reloaded after the extension heal below (which may patch
     // agents.toml), so the initial copy here is only used for its warnings.
     let t_phase = std::time::Instant::now();
-    let (backends, _agents, hosts, mut config_warnings) = init_backends_and_config()?;
+    let (backends, _agents, hosts, mut config_warnings, seed_notice) = init_backends_and_config()?;
     startup.config_init_ms = t_phase.elapsed().as_millis();
 
     let t_phase = std::time::Instant::now();
@@ -184,6 +184,12 @@ async fn main() -> Result<()> {
     // Surface agents.toml/hosts.toml load problems in the status bar — the
     // tracing::warn above only reaches the log file the TUI hides.
     app.report_config_warnings(config_warnings);
+    // On the very first launch (config just seeded) tell the user where their
+    // config landed. Reported last so this friendly Info notice wins the status
+    // line over the benign first-run hook-wiring "warnings" above.
+    if let Some(notice) = seed_notice {
+        app.report_seed_notice(notice);
+    }
 
     let t_phase = std::time::Instant::now();
     if let Some((sessions, counter)) = app.load_persisted_state_from_db() {
@@ -203,15 +209,25 @@ async fn main() -> Result<()> {
 
 /// Bring up the session backends and load every config file (settings, hosts,
 /// agents, custom themes), publishing the process-wide state each reader needs.
-/// Returns the backend registry, the agent registry, the host registry, and the
-/// accumulated load warnings (logged here and later surfaced in the status bar).
+/// Returns the backend registry, the agent registry, the host registry, the
+/// accumulated load warnings (logged here and later surfaced in the status bar),
+/// and a one-time first-run seed notice (`Some` only when config was just
+/// seeded this launch).
 #[allow(clippy::type_complexity)]
 fn init_backends_and_config() -> Result<(
     BackendRegistry,
     thurbox::session::AgentRegistry,
     thurbox::session::HostRegistry,
     Vec<String>,
+    Option<String>,
 )> {
+    // Detect first run *before* any load-or-seed writes the file: agents.toml is
+    // always seeded on a fresh install, so its prior absence marks first launch.
+    // (`None` path → can't tell; treat as not-first-run so we never toast wrongly.)
+    let first_run = thurbox::agent::agent_config::agents_config_path()
+        .map(|p| !p.exists())
+        .unwrap_or(false);
+
     let local_tmux: Arc<dyn SessionBackend> = Arc::new(LocalTmuxBackend::new());
     local_tmux.check_available()?;
     local_tmux.ensure_ready()?;
@@ -251,7 +267,17 @@ fn init_backends_and_config() -> Result<(
         tracing::warn!("{w}");
     }
 
-    Ok((backends, agents, hosts, config_warnings))
+    // Build the one-time seed notice now that the files exist on disk. Uses the
+    // resolved config dir (honors THURBOX_CONFIG_DIR), so it names the exact
+    // location the seeding just wrote to.
+    let seed_notice = first_run.then(|| {
+        let dir = thurbox::paths::config_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "~/.config/thurbox".to_string());
+        format!("Seeded config at {dir} — edit agents.toml to add agents")
+    });
+
+    Ok((backends, agents, hosts, config_warnings, seed_notice))
 }
 
 /// Open the SQLite database for persistent state, falling back to the default

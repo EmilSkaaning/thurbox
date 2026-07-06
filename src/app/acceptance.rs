@@ -368,6 +368,45 @@ fn empty_welcome_screen_renders() {
     insta::assert_snapshot!(h.render());
 }
 
+/// The welcome box has two size tiers: the full orientation panel (hosts /
+/// extensions / themes / config / docs) on a roomy pane, degrading to the
+/// minimal Ctrl+N/F1 box when the pane can't fit it — so a narrow terminal
+/// never overflows. Guards that degradation without pinning a snapshot per
+/// size.
+#[test]
+fn welcome_box_degrades_on_small_terminals() {
+    // Roomy pane → full orientation panel.
+    let mut wide = Harness::new(SNAP_COLS, SNAP_ROWS, 0);
+    let full = wide.render();
+    assert!(
+        full.contains("New session"),
+        "full box keeps the primary action"
+    );
+    // Assert on substrings unique to the orientation rows — not "thurbox",
+    // which the title bar already carries regardless of the welcome box.
+    assert!(
+        full.contains("extension available"),
+        "full box surfaces the extensions hint"
+    );
+    assert!(
+        full.contains("github.com/Thurbeen/thurbox"),
+        "full box surfaces the docs pointer"
+    );
+
+    // Cramped pane (narrower than the full box's width threshold) → minimal box:
+    // primary action survives, orientation drops so it can't overflow.
+    let mut small = Harness::new(46, 12, 0);
+    let minimal = small.render();
+    assert!(
+        minimal.contains("New session"),
+        "minimal box keeps the primary action"
+    );
+    assert!(
+        !minimal.contains("extension available"),
+        "minimal box drops the orientation lines so it can't overflow"
+    );
+}
+
 #[test]
 fn help_overlay_lists_keybindings() {
     let mut h = Harness::snapshot();

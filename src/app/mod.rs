@@ -994,6 +994,17 @@ impl App {
         self.set_status(StatusLevel::Error, text);
     }
 
+    /// Surface the one-time first-run seed notice as an `Info` toast — the only
+    /// in-TUI signal that a brand-new install just wrote its config files (they
+    /// were previously seeded with a `tracing::info!` nobody reads). Fired only
+    /// on the launch that actually seeded, so it never re-appears once the files
+    /// exist. Called *after* [`Self::report_config_warnings`] in `main` so this
+    /// friendly notice wins the status line on a fresh install (where the
+    /// warnings are only benign hook-wiring lines, already in the log).
+    pub fn report_seed_notice(&mut self, notice: String) {
+        self.set_status(StatusLevel::Info, notice);
+    }
+
     /// Attach the receiver for the background startup auto-update (see
     /// `main::spawn_auto_update`). The update runs off-thread so its download
     /// never delays the first frame; the result is drained in [`Self::tick`].

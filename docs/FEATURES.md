@@ -1677,17 +1677,44 @@ silently drops everything (`off`, a soft switch distinct from the
 
 ## Empty Terminal State
 
-When the active session has no terminal content yet, the terminal
-panel shows a centered hint box:
+When there is no active session (a fresh install, or after the last
+session is deleted), the central pane shows a centered orientation box.
+It has **two size tiers** (`render_empty_terminal`,
+`src/ui/terminal_view.rs`): a roomy pane gets the full panel, which leads
+with the primary actions and then points at where hosts, extensions,
+themes, config, and docs live; a cramped pane degrades to the minimal
+`Ctrl+N`/`F1` box so a narrow terminal never overflows (below the minimal
+size, nothing renders).
 
 ```text
-┌───────────────────────────────┐
-│ No active sessions            │
-│                               │
-│   Ctrl+N  New session         │
-│   F1      Help                │
-└───────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│ No active sessions                             │
+│                                                │
+│   Ctrl+N   New session                         │
+│   F1       Help                                │
+│                                                │
+│   Hosts        add SSH/WSL in hosts.toml       │
+│   Extensions   thurbox-cli extension available │
+│   Themes       Ctrl+Y                          │
+│   Config       ~/.config/thurbox               │
+│   Docs         github.com/Thurbeen/thurbox     │
+└────────────────────────────────────────────────┘
 ```
+
+The content is deliberately static (no clock/metrics/machine paths) so
+the insta-pinned welcome snapshot stays deterministic; the `Config` line
+shows the conventional `~/.config/thurbox` literal rather than the
+resolved absolute path. The session-list placeholder gains a muted
+`See the main panel` line pointing here for the full hints.
+
+**First-run seed notice.** On the very first launch — the one that
+actually seeds the config files — the TUI raises a one-time
+`StatusLevel::Info` toast naming the *resolved* config dir, e.g.
+`Seeded config at ~/.config/thurbox — edit agents.toml to add agents`
+(`App::report_seed_notice`, threaded from `main` alongside the config
+warnings). Seeding was previously a silent `tracing::info!` nobody reads;
+the notice fires only when config was just written, so it never reappears
+once the files exist.
 
 The session list is empty until the first session is created; the
 active terminal can also briefly be empty during spawn.

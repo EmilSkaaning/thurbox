@@ -8,21 +8,21 @@ expression: h.render()
 │    No sessions yet    ││                                                                         │
 │Press Ctrl+N to create ││                                                                         │
 │                   ╭ Keybindings ─────────────────────────────────────────────╮                   │
-│                   │Navigation                                               ▲│                   │
+│  See the main pane│Navigation                                               ▲│                   │
 │                   │› ctrl+h          Focus previous pane                    █│                   │
 │                   │  ctrl+l          Focus next pane                        █│                   │
-│                   │  ctrl+j          Next session                           █│                   │
-│                   │  ctrl+k          Previous session                       ║│                   │
-│                   │                                                         ║│                   │
-│                   │Sessions                                                 ║│                   │
-│                   │  ctrl+n          New session                            ║│                   │
-│                   │  ctrl+d          Delete session                         ║│                   │
-│                   │  ctrl+r          Restart session                        ║│                   │
-│                   │  ctrl+f          Fork session                           ║│                   │
-│                   │  ctrl+p          Automations                            ║│                   │
-│                   │  ctrl+w / f5     Tasks                                  ║│                   │
-│                   │  ctrl+z          Undo delete                            ║│                   │
-│                   │  ctrl+u          Restore deleted sessions               ║│                   │
+│                   │  ctrl+j          Next session                           █│───────┐           │
+│                   │  ctrl+k          Previous session                       ║│       │           │
+│                   │                                                         ║│       │           │
+│                   │Sessions                                                 ║│       │           │
+│                   │  ctrl+n          New session                            ║│       │           │
+│                   │  ctrl+d          Delete session                         ║│       │           │
+│                   │  ctrl+r          Restart session                        ║│       │           │
+│                   │  ctrl+f          Fork session                           ║│lable  │           │
+│                   │  ctrl+p          Automations                            ║│       │           │
+│                   │  ctrl+w / f5     Tasks                                  ║│       │           │
+│                   │  ctrl+z          Undo delete                            ║│x      │           │
+│                   │  ctrl+u          Restore deleted sessions               ║│───────┘           │
 │                   │                                                         ║│                   │
 │                   │Project                                                  ║│                   │
 │                   │  ctrl+o          Open in editor                         ▼│                   │

@@ -8,21 +8,21 @@ expression: h.render()
 │    No sessions yet    ││                                                                         │
 │Press Ctrl+N to create ││                                                                         │
 │                       ││                                                                         │
+│  See the main panel   ││                                                                         │
 │                       ││                                                                         │
 │                       ││                                                                         │
-│                       ││                                                                         │
-│                       ││                                                                         │
-│                       ││                                                                         │
-│                       ││                                                                         │
-│                       ││                    ┌───────────────────────────────┐                    │
-│                       ││                    │No active sessions             │                    │
-│                       ││                    │                               │                    │
-│                       ││                    │  Ctrl+N  New session          │                    │
-│                       ││                    │  F1      Help                 │                    │
-│                       ││                    └───────────────────────────────┘                    │
-│                       ││                                                                         │
-│                       ││                                                                         │
-│                       ││                                                                         │
+│                       ││            ┌────────────────────────────────────────────────┐           │
+│                       ││            │No active sessions                              │           │
+│                       ││            │                                                │           │
+│                       ││            │  Ctrl+N   New session                          │           │
+│                       ││            │  F1       Help                                 │           │
+│                       ││            │                                                │           │
+│                       ││            │  Hosts        add SSH/WSL in hosts.toml        │           │
+│                       ││            │  Extensions   thurbox-cli extension available  │           │
+│                       ││            │  Themes       Ctrl+Y                           │           │
+│                       ││            │  Config       ~/.config/thurbox                │           │
+│                       ││            │  Docs         github.com/Thurbeen/thurbox      │           │
+│                       ││            └────────────────────────────────────────────────┘           │
 │                       ││                                                                         │
 │                       ││                                                                         │
 │                       ││                                                                         │

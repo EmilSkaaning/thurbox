@@ -219,6 +219,16 @@ pub fn config_file() -> Option<PathBuf> {
     resolve(PathKind::Config)
 }
 
+/// Resolve the thurbox config directory (where agents.toml/hosts.toml/…live).
+///
+/// Returns: `$XDG_CONFIG_HOME/thurbox/` or `$HOME/.config/thurbox/`. Derived
+/// from [`config_file`]'s parent so it tracks the *same* resolution — the
+/// `THURBOX_CONFIG_DIR` override and the test path strategy alike — as the
+/// config files that actually live in it.
+pub fn config_dir() -> Option<PathBuf> {
+    Some(config_file()?.parent()?.to_path_buf())
+}
+
 /// Resolve the log directory path.
 ///
 /// Returns: `$XDG_DATA_HOME/thurbox/` or `$HOME/.local/share/thurbox/`
@@ -717,6 +727,23 @@ mod tests {
 
         let path = config_file().unwrap();
         assert!(path.ends_with("config.toml"));
+
+        reset_to_xdg();
+    }
+
+    #[test]
+    fn config_dir_is_config_file_parent() {
+        // The seed notice names config_dir(); it must resolve to the *same*
+        // directory the config files live in under every path strategy — hence
+        // it tracks config_file()'s parent, honoring the test override here.
+        let base = PathBuf::from("/custom");
+        set_test_dir(&base);
+
+        assert_eq!(config_dir(), Some(base.clone()));
+        assert_eq!(
+            config_dir().as_deref(),
+            config_file().as_deref().and_then(|p| p.parent())
+        );
 
         reset_to_xdg();
     }

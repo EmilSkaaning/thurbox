@@ -8,21 +8,21 @@ expression: h.render()
 │    No sessions yet    ││                                                                         │
 │Press Ctrl+N to create ││                                                                         │
 │                   ╭ Theme ───────────────────────────────────────────────────╮                   │
-│                   │▸ Default                   Accent      █████ █████       │                   │
+│  See the main pane│▸ Default                   Accent      █████ █████       │                   │
 │                   │  Catppuccin Mocha          Status      ◐ ◆ ● ○ ✗         │                   │
 │                   │  Tokyo Night               Border      ╭─────╮           │                   │
-│                   │  Gruvbox Dark              Modal bg                      │                   │
-│                   │  Doom                                                    │                   │
-│                   │  Nord                                                    │                   │
-│                   │  Dracula                                                 │                   │
-│                   │  One Dark                                                │                   │
-│                   │  Rosé Pine Moon                                          │                   │
-│                   │  Everforest                                              │                   │
-│                   │  Kanagawa                                                │                   │
-│                   │  Catppuccin Latte (light)                                │                   │
-│                   │  Tokyo Night Day (light)                                 │                   │
-│                   │  Gruvbox Light (light)                                   │                   │
-│                   │  Solarized Light (light)                                 │                   │
+│                   │  Gruvbox Dark              Modal bg                      │───────┐           │
+│                   │  Doom                                                    │       │           │
+│                   │  Nord                                                    │       │           │
+│                   │  Dracula                                                 │       │           │
+│                   │  One Dark                                                │       │           │
+│                   │  Rosé Pine Moon                                          │       │           │
+│                   │  Everforest                                              │       │           │
+│                   │  Kanagawa                                                │lable  │           │
+│                   │  Catppuccin Latte (light)                                │       │           │
+│                   │  Tokyo Night Day (light)                                 │       │           │
+│                   │  Gruvbox Light (light)                                   │x      │           │
+│                   │  Solarized Light (light)                                 │───────┘           │
 │                   │                                                          │                   │
 │                   │                                                          │                   │
 │                   │  theme id: default                                       │                   │

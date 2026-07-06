@@ -102,52 +102,117 @@ pub fn render_empty_terminal(frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let box_width: u16 = 33;
-    let box_height: u16 = 6;
+    // Two size tiers. The full orientation panel wants a taller/wider box; when
+    // the pane can't fit it we degrade to the minimal Ctrl+N/F1 box (and below
+    // that, nothing) so narrow layouts never overflow.
+    const FULL_WIDTH: u16 = 50;
+    const FULL_HEIGHT: u16 = 12;
+    const MIN_WIDTH: u16 = 33;
+    const MIN_HEIGHT: u16 = 6;
 
-    if inner.width >= box_width && inner.height >= box_height {
-        let vert = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(0),
-                Constraint::Length(box_height),
-                Constraint::Min(0),
-            ])
-            .split(inner);
-        let horiz = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Min(0),
-                Constraint::Length(box_width),
-                Constraint::Min(0),
-            ])
-            .split(vert[1]);
-        let center = horiz[1];
+    let (box_width, box_height, lines) = if inner.width >= FULL_WIDTH && inner.height >= FULL_HEIGHT
+    {
+        (FULL_WIDTH, FULL_HEIGHT, welcome_lines_full())
+    } else if inner.width >= MIN_WIDTH && inner.height >= MIN_HEIGHT {
+        (MIN_WIDTH, MIN_HEIGHT, welcome_lines_minimal())
+    } else {
+        return;
+    };
 
-        let hint_block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Theme::border_unfocused()));
+    let vert = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(box_height),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+    let horiz = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(box_width),
+            Constraint::Min(0),
+        ])
+        .split(vert[1]);
+    let center = horiz[1];
 
-        let hint_inner = hint_block.inner(center);
-        frame.render_widget(hint_block, center);
+    let hint_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Theme::border_unfocused()));
 
-        let lines = vec![
-            Line::from(Span::styled(
-                "No active sessions",
-                Style::default().fg(Theme::text_secondary()),
-            )),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("  Ctrl+N", Theme::keybind()),
-                Span::styled("  New session", Style::default().fg(Theme::text_muted())),
-            ]),
-            Line::from(vec![
-                Span::styled("  F1    ", Theme::keybind()),
-                Span::styled("  Help", Style::default().fg(Theme::text_muted())),
-            ]),
-        ];
-        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Left), hint_inner);
-    }
+    let hint_inner = hint_block.inner(center);
+    frame.render_widget(hint_block, center);
+
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Left), hint_inner);
+}
+
+/// The minimal welcome box: just the primary working actions. Shown when the
+/// pane is too small for the full orientation panel.
+fn welcome_lines_minimal() -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            "No active sessions",
+            Style::default().fg(Theme::text_secondary()),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Ctrl+N", Theme::keybind()),
+            Span::styled("  New session", Style::default().fg(Theme::text_muted())),
+        ]),
+        Line::from(vec![
+            Span::styled("  F1    ", Theme::keybind()),
+            Span::styled("  Help", Style::default().fg(Theme::text_muted())),
+        ]),
+    ]
+}
+
+/// The full orientation panel: working actions first, then where the extras
+/// (hosts, extensions, themes), config, and docs live. Content is deliberately
+/// static — no clock/metrics/machine paths — so the insta-pinned welcome
+/// snapshot stays deterministic. The absolute config dir is machine-specific,
+/// so this shows the conventional `~/.config/thurbox` literal; the resolved
+/// path is surfaced in the one-time first-run seed toast instead.
+fn welcome_lines_full() -> Vec<Line<'static>> {
+    // The label column and its value are both muted; only the two keybind
+    // callouts (Ctrl+N/F1/Ctrl+Y) stand out. Trailing spaces align the values.
+    let muted = Style::default().fg(Theme::text_muted());
+    vec![
+        Line::from(Span::styled(
+            "No active sessions",
+            Style::default().fg(Theme::text_secondary()),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Ctrl+N", Theme::keybind()),
+            Span::styled("   New session", muted),
+        ]),
+        Line::from(vec![
+            Span::styled("  F1    ", Theme::keybind()),
+            Span::styled("   Help", muted),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Hosts        ", muted),
+            Span::styled("add SSH/WSL in hosts.toml", muted),
+        ]),
+        Line::from(vec![
+            Span::styled("  Extensions   ", muted),
+            Span::styled("thurbox-cli extension available", muted),
+        ]),
+        Line::from(vec![
+            Span::styled("  Themes       ", muted),
+            Span::styled("Ctrl+Y", Theme::keybind()),
+        ]),
+        Line::from(vec![
+            Span::styled("  Config       ", muted),
+            Span::styled("~/.config/thurbox", muted),
+        ]),
+        Line::from(vec![
+            Span::styled("  Docs         ", muted),
+            Span::styled("github.com/Thurbeen/thurbox", muted),
+        ]),
+    ]
 }
 
 /// Property/fuzz tests proving the **rendering** path is transparent: whatever

@@ -740,17 +740,16 @@ fn render_session_section(
 }
 
 /// Render the centered "no sessions yet" placeholder inside the given block.
+/// The last line points at the central welcome box, which carries the fuller
+/// orientation hints this narrow column has no room for.
 fn render_empty_sessions(frame: &mut Frame, area: Rect, block: ratatui::widgets::Block) {
+    let muted = Style::default().fg(Theme::text_muted());
     let text = Paragraph::new(vec![
         Line::from(""),
-        Line::from(Span::styled(
-            "No sessions yet",
-            Style::default().fg(Theme::text_muted()),
-        )),
-        Line::from(Span::styled(
-            "Press Ctrl+N to create one",
-            Style::default().fg(Theme::text_muted()),
-        )),
+        Line::from(Span::styled("No sessions yet", muted)),
+        Line::from(Span::styled("Press Ctrl+N to create one", muted)),
+        Line::from(""),
+        Line::from(Span::styled("See the main panel", muted)),
     ])
     .block(block)
     .alignment(ratatui::layout::Alignment::Center);
