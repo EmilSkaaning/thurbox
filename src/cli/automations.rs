@@ -10,7 +10,10 @@ use serde_json::{json, Value};
 use crate::cli::action::{self, SpawnDeliverError};
 use crate::cli::output::{self, CommandOutput};
 use crate::session::automation::parse_trigger;
-use crate::session::{Automation, AutomationAction, AutomationRun, AutomationRunStatus, SessionId};
+use crate::session::{
+    Automation, AutomationAction, AutomationRun, AutomationRunStatus, SessionId, SEND_TARGET_GONE,
+    SEND_TARGET_NOT_RUNNING,
+};
 use crate::session_ops::SpawnRequest;
 use crate::storage::automations::NewAutomation;
 use crate::storage::Database;
@@ -521,11 +524,18 @@ fn fire_send(
     let name = match db.get_session_name(session_id) {
         Ok(Some(name)) => name,
         Ok(None) => {
+            // The target row is gone (missing / soft- / force-deleted). This
+            // `send` can never succeed again, so disable it — the same
+            // treatment `disable_send_automations_for_session` applies on
+            // force-delete — instead of silently skipping on every fire.
+            if let Err(e) = db.disable_send_automations_for_session(session_id) {
+                tracing::warn!("disable_send_automations_for_session: {e}");
+            }
             return (
                 AutomationRunStatus::Skipped,
-                "target session not found".into(),
+                SEND_TARGET_GONE.to_string(),
                 None,
-            )
+            );
         }
         Err(e) => {
             return (
@@ -538,7 +548,7 @@ fn fire_send(
     if !crate::agent::tmux::window_exists(&name) {
         return (
             AutomationRunStatus::Skipped,
-            "target session not running".into(),
+            SEND_TARGET_NOT_RUNNING.to_string(),
             None,
         );
     }
@@ -898,5 +908,37 @@ mod tests {
             ..run
         };
         assert_eq!(run_to_json(&run)["related_session_id"], Value::Null);
+    }
+
+    #[test]
+    fn fire_send_disables_automation_when_target_row_is_gone() {
+        let db = Database::open_in_memory().unwrap();
+        let target = SessionId::default();
+        // A `send` automation whose target session was never created (or was
+        // deleted): the row is gone, so the fire can never succeed again.
+        let id = db
+            .create_automation(&crate::storage::automations::NewAutomation {
+                name: "nudge".into(),
+                enabled: true,
+                schedule: crate::session::AutomationSchedule::Cron {
+                    expr: "0 9 * * *".into(),
+                },
+                timezone: None,
+                action: AutomationAction::Send { session_id: target },
+                prompt: "hi".into(),
+                next_run_at: Some(1),
+            })
+            .unwrap();
+        let auto = db.get_automation(id).unwrap().unwrap();
+
+        let (status, detail, related) = fire_send(&db, &auto, target);
+
+        assert_eq!(status, AutomationRunStatus::Skipped);
+        assert_eq!(detail, SEND_TARGET_GONE);
+        assert!(related.is_none());
+        // The automation is now disabled so it stops silently retrying.
+        let after = db.get_automation(id).unwrap().unwrap();
+        assert!(!after.enabled);
+        assert_eq!(after.next_run_at, None);
     }
 }

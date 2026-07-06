@@ -2233,3 +2233,54 @@ fn remote_hook_event_dedupes_repeated_state() {
         "an identical re-report must not re-stamp state_at"
     );
 }
+
+#[test]
+fn send_automation_at_a_dead_target_toasts_and_disables() {
+    use crate::session::{AutomationAction, AutomationRunStatus, AutomationSchedule};
+    // No live session, and the target row doesn't exist in the DB either — a
+    // permanent miss: the send can never land, so firing it must surface a
+    // warning toast AND auto-disable the automation instead of skipping silently
+    // forever.
+    let mut h = Harness::standard(0);
+    let id = h
+        .app
+        .db
+        .create_automation(&crate::storage::automations::NewAutomation {
+            name: "dead-nudge".into(),
+            enabled: true,
+            schedule: AutomationSchedule::Cron {
+                expr: "0 9 * * *".into(),
+            },
+            timezone: None,
+            action: AutomationAction::Send {
+                session_id: crate::session::SessionId::default(),
+            },
+            prompt: "ping".into(),
+            // Already due so `process_automations` picks it up this pass.
+            next_run_at: Some(1),
+        })
+        .unwrap();
+
+    h.app.process_automations(true);
+
+    // Toast surfaces the miss, naming the automation.
+    let msg = h.app.status_message.as_ref().expect("a toast was raised");
+    assert!(
+        matches!(msg.level, StatusLevel::Error),
+        "warned as an error"
+    );
+    assert!(msg.text.contains("dead-nudge"), "names it: {}", msg.text);
+
+    // The automation is auto-disabled (its target is gone for good).
+    let after = h.app.db.get_automation(id).unwrap().unwrap();
+    assert!(
+        !after.enabled,
+        "a permanently-missing target disables the send"
+    );
+
+    // The run is still recorded, tagged with the shared gone-for-good detail.
+    let runs = h.app.db.list_automation_runs(id, 10).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, AutomationRunStatus::Skipped);
+    assert_eq!(runs[0].detail, crate::session::SEND_TARGET_GONE);
+}

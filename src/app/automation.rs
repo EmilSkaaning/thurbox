@@ -12,9 +12,10 @@ use super::view;
 use super::{App, InputFocus, StatusLevel};
 use crate::session::{
     Automation, AutomationAction, AutomationRunStatus, AutomationSchedule, SessionId,
+    SEND_TARGET_GONE, SEND_TARGET_NOT_RUNNING,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 impl App {
     /// Fire any due automations. Called once per ~second from `tick()`; pass
@@ -65,6 +66,24 @@ impl App {
             {
                 error!("Failed to record run for automation {}: {e}", auto.id);
             }
+            // A `send` that misses its target is a real delivery failure, not a
+            // silent no-op: surface it as a toast (the run is otherwise only
+            // visible in the per-automation run-history panel). `Spawn`/`Exec`
+            // have no live-target precondition, so this is `send`-specific.
+            if matches!(auto.action, AutomationAction::Send { .. })
+                && matches!(
+                    status,
+                    AutomationRunStatus::Skipped | AutomationRunStatus::Error
+                )
+            {
+                self.set_status(
+                    StatusLevel::Error,
+                    format!("Automation \"{}\": {detail}", auto.name),
+                );
+                // A skip may have auto-disabled the automation (target gone for
+                // good) — refresh so the pane/list reflects it.
+                self.refresh_automations();
+            }
         }
     }
 
@@ -75,23 +94,7 @@ impl App {
         auto: &Automation,
     ) -> (AutomationRunStatus, String, Option<SessionId>) {
         match &auto.action {
-            AutomationAction::Send { session_id } => {
-                if self.sessions.iter().any(|s| s.info.id == *session_id) {
-                    self.send_prompt_to_session(*session_id, &auto.prompt, 0);
-                    info!("Automation {} sent prompt to {}", auto.id, session_id);
-                    (
-                        AutomationRunStatus::Success,
-                        format!("sent to {session_id}"),
-                        Some(*session_id),
-                    )
-                } else {
-                    (
-                        AutomationRunStatus::Skipped,
-                        "target session not running".to_string(),
-                        None,
-                    )
-                }
-            }
+            AutomationAction::Send { session_id } => self.fire_send_automation(auto, *session_id),
             AutomationAction::Spawn {
                 repo_path,
                 worktree_branch,
@@ -120,6 +123,52 @@ impl App {
                 let (status, detail) = crate::session_ops::run_exec_command(command);
                 (status, detail, None)
             }
+        }
+    }
+
+    /// Execute a `Send` automation: type the prompt into the target session's
+    /// live pane. When the target isn't a running session, distinguish a
+    /// *transient* miss (the row still exists but its window isn't adopted yet —
+    /// stay enabled, it may be restored) from a *permanent* one (the row is
+    /// gone / soft- / force-deleted — disable the automation so it stops
+    /// silently retrying, mirroring force-delete's `disable_send_automations_for_session`).
+    fn fire_send_automation(
+        &mut self,
+        auto: &Automation,
+        session_id: SessionId,
+    ) -> (AutomationRunStatus, String, Option<SessionId>) {
+        if self.sessions.iter().any(|s| s.info.id == session_id) {
+            self.send_prompt_to_session(session_id, &auto.prompt, 0);
+            info!("Automation {} sent prompt to {}", auto.id, session_id);
+            return (
+                AutomationRunStatus::Success,
+                format!("sent to {session_id}"),
+                Some(session_id),
+            );
+        }
+        // Not live. `get_session_name` filters `deleted_at IS NULL`, so `None`
+        // means the target row is gone for good.
+        match self.db.get_session_name(session_id) {
+            Ok(Some(_)) => (
+                AutomationRunStatus::Skipped,
+                SEND_TARGET_NOT_RUNNING.to_string(),
+                None,
+            ),
+            Ok(None) => {
+                if let Err(e) = self.db.disable_send_automations_for_session(session_id) {
+                    warn!("disable_send_automations_for_session: {e}");
+                }
+                (
+                    AutomationRunStatus::Skipped,
+                    SEND_TARGET_GONE.to_string(),
+                    None,
+                )
+            }
+            Err(e) => (
+                AutomationRunStatus::Error,
+                format!("get_session_name: {e}"),
+                None,
+            ),
         }
     }
 

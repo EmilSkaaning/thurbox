@@ -12,7 +12,7 @@ pub mod theme_config;
 pub use agent_def::{AgentDef, AgentRegistry};
 pub use automation::{
     parse_hhmm, preset_to_cron, Automation, AutomationAction, AutomationRun, AutomationRunStatus,
-    AutomationSchedule, ExtraRepo, SchedulePreset,
+    AutomationSchedule, ExtraRepo, SchedulePreset, SEND_TARGET_GONE, SEND_TARGET_NOT_RUNNING,
 };
 pub use extension_def::{
     AgentPatch, ConfigMerge, ExtensionAutomation, ExtensionDef, ExtensionFile, ExtensionSession,

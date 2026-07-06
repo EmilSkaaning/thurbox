@@ -165,6 +165,17 @@ impl AutomationAction {
     }
 }
 
+/// Run-detail for a `Send` whose target isn't running but whose session row
+/// still exists (not adopted yet / restartable) — a *transient* miss that
+/// leaves the automation enabled. Shared by the TUI (`App::fire_send_automation`)
+/// and headless (`cli::fire_send`) paths so the two stay byte-identical.
+pub const SEND_TARGET_NOT_RUNNING: &str = "target session not running";
+
+/// Run-detail for a `Send` whose target row is gone for good (missing / soft- or
+/// force-deleted) — a *permanent* miss that auto-disables the automation. Shared
+/// by both firing paths (see [`SEND_TARGET_NOT_RUNNING`]).
+pub const SEND_TARGET_GONE: &str = "target session no longer exists (automation disabled)";
+
 /// Outcome of a single automation fire, kept for history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutomationRunStatus {

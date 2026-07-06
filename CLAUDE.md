@@ -857,6 +857,21 @@ extension manifest (`[[automations]]` with a `command` field instead of
 `session_ref`/`prompt`). `Task.action` shares the enum but tasks never carry an
 `Exec` (it's automation-only).
 
+Only **Send** has a live-target precondition, so it's the only action that can
+*miss*. When a `Send` fires against a target that isn't a running session, the
+run is recorded `Skipped` (as before) and, in the TUI, an error toast surfaces
+it (`Automation "<name>": <reason>` — otherwise the miss is buried in the
+per-automation run-history panel). The two miss modes are distinguished by the
+run detail and drive different follow-up (identically in the TUI
+`App::fire_send_automation` and the headless `cli::automations::fire_send`): a
+*transient* miss — the session row still exists but its tmux window isn't
+adopted yet (`target session not running`) — leaves the automation **enabled**
+(it may be restored); a *permanent* miss — the row is gone / soft- or
+force-deleted (`target session no longer exists`) — **auto-disables** the
+automation via `disable_send_automations_for_session` (the same primitive
+force-delete uses), since it can never succeed again. `Spawn`/`Exec` have no
+such precondition and are unaffected.
+
 Automations fire even when the TUI is closed: a tmux heartbeat
 keeper window (`automation-heartbeat`, armed on TUI startup and on
 `automation create`) loops `automation tick` every 60 s and keeps
