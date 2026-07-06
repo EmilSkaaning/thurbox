@@ -375,6 +375,7 @@ impl App {
             Modal::ConfirmDelete(_) => self.handle_confirm_delete_key(code),
             Modal::ConfirmRestore(_) => self.handle_confirm_restore_key(code),
             Modal::Settings(_) => self.handle_settings_key(code, mods),
+            Modal::ConfigProblems(_) => self.handle_config_problems_key(code),
             _ => return false,
         }
         true
@@ -399,6 +400,14 @@ impl App {
     /// Drive the Settings panel: edits a working copy, persists on `Ctrl+S`,
     /// discards on `Esc` (no live preview to revert).
     fn handle_settings_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+        // "Validate" — re-run config validation on demand (also replayed by the
+        // footer button). Intercepted before the field editor so a plain `v`
+        // never leaks into field handling. The modal reads `App::config_status`
+        // at render time, so refreshing the cache updates the section in place.
+        if mods.is_empty() && matches!(code, KeyCode::Char('v') | KeyCode::Char('V')) {
+            self.refresh_config_status();
+            return;
+        }
         let super::modals::Modal::Settings(ref mut m) = self.modal else {
             return;
         };
@@ -406,6 +415,16 @@ impl App {
             super::modals::EditorOutcome::Continue => {}
             super::modals::EditorOutcome::Save => self.submit_settings_panel(),
             super::modals::EditorOutcome::Cancel => self.modal.close(),
+        }
+    }
+
+    /// Drive the read-only "Config problems" modal: `Enter` (or the `Open
+    /// Settings` button) jumps into the Settings panel; `Esc` closes it.
+    fn handle_config_problems_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => self.open_settings_panel(),
+            KeyCode::Esc => self.modal.close(),
+            _ => {}
         }
     }
 

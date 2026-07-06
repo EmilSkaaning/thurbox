@@ -1,5 +1,6 @@
 pub mod agent_def;
 pub mod automation;
+pub mod config_status;
 pub mod extension_def;
 pub mod host_def;
 pub mod keybindings;
@@ -14,6 +15,7 @@ pub use automation::{
     parse_hhmm, preset_to_cron, Automation, AutomationAction, AutomationRun, AutomationRunStatus,
     AutomationSchedule, ExtraRepo, SchedulePreset,
 };
+pub use config_status::{any_problem, ConfigFile, ConfigValidity};
 pub use extension_def::{
     AgentPatch, ConfigMerge, ExtensionAutomation, ExtensionDef, ExtensionFile, ExtensionSession,
     ExtensionSymlink, ExternalFile,

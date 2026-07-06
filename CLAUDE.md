@@ -2061,6 +2061,34 @@ The renderer is `ui::settings_modal::render_settings_modal` (modeled on
 Notifications / Scalars sections, an aligned value column, and
 scroll-windowing for short terminals).
 
+### Config-file paths + validation (discoverability)
+
+The Settings modal leads with a **read-only "Config files"** band above the
+editable sections: one non-selectable row per config file (`agents.toml` /
+`hosts.toml` / `settings.toml` / `themes.toml` / `keybindings.json` / the
+`database`) with its **resolved path** and an at-a-glance validity mark
+(`✓ ok` / `✗ invalid` / `· absent`), problem detail expanded inline under an
+invalid file. A **`Validate`** footer action (key `v`) re-runs validation on
+demand. The single source of truth for both paths and validity is
+`session_ops::config_check::check_all() -> Vec<session::ConfigFile>` (pure data
+in `session::config_status`, so `ui` can render it); `cli::config`
+(`validate`/`show`) and the TUI both consume it, so the CLI and the panel never
+disagree. The snapshot is cached on `App.config_status`, computed once at
+startup and refreshed on the config live-reload (`poll_config_reload`) + the
+`Validate` action — never per frame (each refresh re-parses every file).
+
+When any file fails validation (`App::config_has_problems`), a **persistent
+`Config ⚠` badge** renders in the status-bar footer (`status_bar::render_footer`
+via the `FooterButton::ConfigProblems` pill — an *essential* pill, never
+dropped by the narrow-footer trim, unlike the optional Info/Files/Tasks
+toggles). It has no rebindable action (it's a conditional problem indicator, not
+a standing command): a click records the bespoke `ClickAction::OpenConfigProblems`,
+opening a read-only **"Config problems"** modal
+(`Modal::ConfigProblems` / `ui::config_problems_modal`) that lists each broken
+file + its messages, with `Open Settings` (Enter) jumping into the panel. The
+badge is purely derived from current validity — fixing the file clears it on the
+next reload; there is no dismiss state.
+
 ## Design Documentation
 
 For rationale behind decisions, see `docs/`:

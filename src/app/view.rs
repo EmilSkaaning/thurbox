@@ -146,6 +146,7 @@ impl App {
                         | ClickAction::CentralTab(_)
                         | ClickAction::PaneField { .. }
                         | ClickAction::CopyStatus
+                        | ClickAction::OpenConfigProblems
                 )
             };
             reachable && t.rect.contains(pos)
@@ -167,6 +168,7 @@ impl App {
                 | ClickAction::ModalButton { .. }
                 | ClickAction::ReviewButton(_)
                 | ClickAction::CentralTab(_)
+                | ClickAction::OpenConfigProblems
         );
         let hover_bg = if is_button {
             Theme::accent_bright()
@@ -824,6 +826,7 @@ impl App {
             tasks_enabled: self.features.tasks,
             file_viewer_enabled: self.features.file_viewer,
             info_panel_enabled: self.features.info_panel,
+            config_problems: self.config_has_problems(),
             keybindings: &self.keybindings,
         }
     }
@@ -831,10 +834,16 @@ impl App {
     /// Render the bottom status-bar footer.
     fn render_footer(&mut self, frame: &mut Frame, footer: Rect) {
         let button_hits = status_bar::render_footer(frame, footer, &self.footer_state());
-        // The renderer pairs each surviving button with its Action, so the
-        // click map can't drift from the (feature-filtered) render.
-        for (hit, action) in button_hits {
-            self.record_click(hit.rect, ClickAction::Global(action));
+        // The renderer pairs each surviving button with what it dispatches, so
+        // the click map can't drift from the (feature-filtered) render. The
+        // `Config ⚠` badge has no rebindable action — it maps to a bespoke
+        // click target that opens the read-only problems modal.
+        for (hit, button) in button_hits {
+            let action = match button {
+                status_bar::FooterButton::Action(a) => ClickAction::Global(a),
+                status_bar::FooterButton::ConfigProblems => ClickAction::OpenConfigProblems,
+            };
+            self.record_click(hit.rect, action);
         }
     }
 
@@ -927,6 +936,14 @@ impl App {
             );
         }
 
+        // Read-only "Config problems" modal (from the `Config ⚠` footer badge)
+        if let super::modals::Modal::ConfigProblems(ref cp) = self.modal {
+            return crate::ui::config_problems_modal::render_config_problems_modal(
+                frame,
+                &crate::ui::config_problems_modal::ConfigProblemsState { files: &cp.files },
+            );
+        }
+
         Vec::new()
     }
 
@@ -988,6 +1005,7 @@ impl App {
                 &crate::ui::settings_modal::SettingsModalState {
                     modal: m,
                     restart_pending: m.restart_required_changed(),
+                    config_files: self.config_status(),
                 },
             );
             return Some(((fields, None), buttons));

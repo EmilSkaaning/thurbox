@@ -18,6 +18,10 @@ fn brand_style() -> Style {
 
 const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/// Label of the persistent "config has problems" footer badge. Shown only when
+/// a config file fails validation; opens the read-only problems modal.
+const CONFIG_BADGE_LABEL: &str = "Config ⚠";
+
 pub fn render_header(frame: &mut Frame, area: Rect, badge: Option<HeaderBadge<'_>>) {
     if area.height == 0 {
         return;
@@ -84,8 +88,20 @@ pub struct FooterState<'a> {
     pub tasks_enabled: bool,
     pub file_viewer_enabled: bool,
     pub info_panel_enabled: bool,
+    /// Whether any config file currently fails validation — shows the
+    /// persistent `Config ⚠` badge (an essential, never-trimmed pill).
+    pub config_problems: bool,
     /// Live keybindings, so each footer pill can show its (rebindable) shortcut.
     pub keybindings: &'a KeyBindings,
+}
+
+/// What a clicked footer pill dispatches: either a rebindable global `Action`,
+/// or the bespoke "open config problems" badge (which has no rebindable action
+/// — it's a conditional problem indicator, not a standing command).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FooterButton {
+    Action(Action),
+    ConfigProblems,
 }
 
 /// The clickable footer buttons, in render order, paired with the `Action` each
@@ -145,7 +161,7 @@ pub fn render_footer(
     frame: &mut Frame,
     area: Rect,
     state: &FooterState<'_>,
-) -> Vec<(super::ButtonHit, Action)> {
+) -> Vec<(super::ButtonHit, FooterButton)> {
     // The footer always carries the idle session/automation counts + the focus
     // hint; the transient status/error message (and sync spinner) now live on
     // their own dedicated row above the footer (`render_status_message_row`), so
@@ -159,40 +175,64 @@ pub fn render_footer(
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
-    let mut entries = footer_entries(state);
-    // Suffix each pill with its live shortcut (`Help · F1`); own the strings so
-    // the borrowed `ButtonSpec`s can reference them. Kept index-aligned with
-    // `entries` through the responsive trim below.
-    let mut labels: Vec<String> = entries
+    // One pill per button: the leading `Config ⚠` badge (only when config has
+    // problems) is a primary, essential pill; the action pills carry their live
+    // shortcut. `essential` pills survive the narrow-footer trim below.
+    struct Pill {
+        label: String,
+        button: FooterButton,
+        primary: bool,
+        essential: bool,
+    }
+    let mut pills: Vec<Pill> = Vec::new();
+    if state.config_problems {
+        pills.push(Pill {
+            label: CONFIG_BADGE_LABEL.to_string(),
+            button: FooterButton::ConfigProblems,
+            primary: true,
+            essential: true,
+        });
+    }
+    // Panel-toggle pills (Info/Files/Tasks) are the *optional* set: dropped
+    // together when the full row won't fit, so the essential pills never fall
+    // off. The badge above is never optional (a dropped problem indicator
+    // defeats its purpose).
+    let optional = |a: Action| {
+        matches!(
+            a,
+            Action::ToggleInfoPanel | Action::ToggleFileViewer | Action::FocusTasks
+        )
+    };
+    for (label, action) in footer_entries(state) {
+        let shortcut = crate::session::compact_shortcut(state.keybindings.chords_for(action));
+        let full = match shortcut {
+            Some(sc) => format!("{label} · {sc}"),
+            None => label.to_string(),
+        };
+        pills.push(Pill {
+            label: full,
+            button: FooterButton::Action(action),
+            primary: false,
+            essential: !optional(action),
+        });
+    }
+
+    // When the full set won't fit, drop the optional pills together rather than
+    // letting `render_button_bar` shed the rightmost essential pill.
+    let all_labels: Vec<String> = pills.iter().map(|p| p.label.clone()).collect();
+    if pill_block_width(&all_labels) > area.width {
+        pills.retain(|p| p.essential);
+    }
+
+    let specs: Vec<super::ButtonSpec<'_>> = pills
         .iter()
-        .map(|(label, action)| {
-            match crate::session::compact_shortcut(state.keybindings.chords_for(*action)) {
-                Some(sc) => format!("{label} · {sc}"),
-                None => label.to_string(),
+        .map(|p| {
+            if p.primary {
+                super::ButtonSpec::primary(&p.label)
+            } else {
+                super::ButtonSpec::secondary(&p.label)
             }
         })
-        .collect();
-    // When the full set won't fit, drop the optional panel-toggle pills
-    // together (all-or-nothing) rather than letting `render_button_bar` shed
-    // the rightmost essential pill (Quit).
-    if pill_block_width(&labels) > area.width {
-        let optional = |a: &Action| {
-            matches!(
-                a,
-                Action::ToggleInfoPanel | Action::ToggleFileViewer | Action::FocusTasks
-            )
-        };
-        labels = entries
-            .iter()
-            .zip(&labels)
-            .filter(|((_, a), _)| !optional(a))
-            .map(|(_, l)| l.clone())
-            .collect();
-        entries.retain(|(_, a)| !optional(a));
-    }
-    let specs: Vec<super::ButtonSpec<'_>> = labels
-        .iter()
-        .map(|l| super::ButtonSpec::secondary(l))
         .collect();
     let hits = super::render_button_bar(frame, area, &specs, true);
 
@@ -215,12 +255,12 @@ pub fn render_footer(
         }
     }
 
-    // Each placed hit keeps its index into `entries`, so the click→action map
-    // follows the same feature-filtered list that was rendered.
+    // Each placed hit keeps its index into `pills`, so the click→button map
+    // follows the same trimmed list that was rendered.
     hits.into_iter()
         .map(|hit| {
-            let action = entries[hit.index].1;
-            (hit, action)
+            let button = pills[hit.index].button;
+            (hit, button)
         })
         .collect()
 }
@@ -393,15 +433,16 @@ mod tests {
             tasks_enabled: true,
             file_viewer_enabled: true,
             info_panel_enabled: true,
+            config_problems: false,
             keybindings: test_keybindings(),
         }
     }
 
-    /// Render the given state into a 120×1 buffer and return (button+action
+    /// Render the given state into a 120×1 buffer and return (button+button
     /// hits, line text).
     fn render_footer_state(
         state: &FooterState<'_>,
-    ) -> (Vec<(super::super::ButtonHit, Action)>, String) {
+    ) -> (Vec<(super::super::ButtonHit, FooterButton)>, String) {
         let backend = TestBackend::new(120, 1);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut hits = Vec::new();
@@ -417,12 +458,21 @@ mod tests {
 
     /// Render a default footer (all features on) with the given file-viewer
     /// visibility.
-    fn footer_render(file_viewer_open: bool) -> (Vec<(super::super::ButtonHit, Action)>, String) {
+    fn footer_render(
+        file_viewer_open: bool,
+    ) -> (Vec<(super::super::ButtonHit, FooterButton)>, String) {
         render_footer_state(&footer_state(file_viewer_open))
     }
 
-    fn hit_actions(hits: &[(super::super::ButtonHit, Action)]) -> Vec<Action> {
-        hits.iter().map(|(_, a)| *a).collect()
+    /// The rebindable actions among the placed pills (the `Config ⚠` badge has
+    /// no action, so it's filtered out here).
+    fn hit_actions(hits: &[(super::super::ButtonHit, FooterButton)]) -> Vec<Action> {
+        hits.iter()
+            .filter_map(|(_, b)| match b {
+                FooterButton::Action(a) => Some(*a),
+                FooterButton::ConfigProblems => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -542,6 +592,56 @@ mod tests {
         // The rightmost button ends at the footer's right edge.
         let last = hits.iter().max_by_key(|(h, _)| h.rect.x).unwrap().0.rect;
         assert_eq!(last.x + last.width, 120);
+    }
+
+    /// The `Config ⚠` badge appears only when config has problems, renders as a
+    /// clickable pill mapped to `FooterButton::ConfigProblems`, and never shows
+    /// on a healthy footer.
+    #[test]
+    fn config_badge_shows_only_with_problems() {
+        // Healthy: no badge.
+        let (hits, line) = footer_render(false);
+        assert!(!line.contains("Config"), "no badge when clean: {line:?}");
+        assert!(
+            !hits.iter().any(|(_, b)| *b == FooterButton::ConfigProblems),
+            "no ConfigProblems hit when clean"
+        );
+
+        // With problems: the badge is present and clickable.
+        let mut state = footer_state(false);
+        state.config_problems = true;
+        let (hits, line) = render_footer_state(&state);
+        assert!(
+            line.contains("Config"),
+            "badge present with problems: {line:?}"
+        );
+        assert!(
+            hits.iter().any(|(_, b)| *b == FooterButton::ConfigProblems),
+            "ConfigProblems click target present"
+        );
+    }
+
+    /// The badge is essential: on a footer too narrow for every pill, the
+    /// optional panel toggles drop but `Config ⚠` survives.
+    #[test]
+    fn config_badge_survives_a_narrow_footer() {
+        let mut state = footer_state(false);
+        state.config_problems = true;
+        let backend = TestBackend::new(70, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut hits = Vec::new();
+        terminal
+            .draw(|f| hits = render_footer(f, Rect::new(0, 0, 70, 1), &state))
+            .unwrap();
+        assert!(
+            hits.iter().any(|(_, b)| *b == FooterButton::ConfigProblems),
+            "badge must survive a narrow footer: {hits:?}"
+        );
+        let actions = hit_actions(&hits);
+        assert!(
+            !actions.contains(&Action::ToggleInfoPanel),
+            "optional pills still drop when narrow: {actions:?}"
+        );
     }
 
     fn long_error() -> StatusMessage {

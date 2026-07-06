@@ -571,6 +571,132 @@ fn settings_panel_esc_discards() {
     );
 }
 
+/// The Settings panel carries the read-only "Config files" band listing every
+/// config file's resolved path (discoverability the CLI used to hold alone).
+#[test]
+fn settings_panel_lists_config_files() {
+    let mut h = Harness::standard(1);
+    h.ctrl(','); // OpenSettings
+    let screen = h.render();
+    assert!(
+        screen.contains("CONFIG FILES"),
+        "config-files section header renders: {screen}"
+    );
+    for file in [
+        "agents.toml",
+        "hosts.toml",
+        "settings.toml",
+        "keybindings.json",
+    ] {
+        assert!(
+            screen.contains(file),
+            "config section lists {file}: {screen}"
+        );
+    }
+    // A fresh (hermetic) environment has no config files on disk, so each row
+    // reads as absent — the mark column renders, and none are flagged invalid.
+    assert!(
+        screen.contains("absent"),
+        "absent files show an absent mark: {screen}"
+    );
+    assert!(
+        !screen.contains("invalid"),
+        "clean env has no invalid files: {screen}"
+    );
+    assert!(
+        !h.app.config_has_problems(),
+        "fresh env has no config problems"
+    );
+}
+
+/// The Settings "Validate" action (key `v` / the footer button) re-runs config
+/// validation on demand, so a file broken *after* the panel opened surfaces
+/// without a restart.
+#[test]
+fn settings_validate_action_refreshes_config_status() {
+    let mut h = Harness::standard(1);
+    h.ctrl(','); // OpenSettings — snapshot taken at open (clean)
+    assert!(!h.app.config_has_problems());
+
+    // Break hosts.toml behind the panel's back.
+    let path = crate::agent::host_config::hosts_config_path().unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "not valid toml {{{").unwrap();
+
+    // Validate (plain `v`) re-reads from disk; the modal stays open.
+    h.key(KeyCode::Char('v'), KeyModifiers::NONE);
+    assert!(
+        h.app.config_has_problems(),
+        "Validate re-runs the check and finds the broken file"
+    );
+    assert!(
+        matches!(h.app.modal, modals::Modal::Settings(_)),
+        "Validate keeps the Settings panel open"
+    );
+    let screen = h.render();
+    assert!(
+        screen.contains("invalid"),
+        "the broken file now shows an invalid mark: {screen}"
+    );
+}
+
+/// A malformed config file lights the persistent `Config ⚠` footer badge;
+/// clicking it opens the read-only problems modal, and `Enter` jumps to
+/// Settings. The badge is absent on a clean config (so snapshots stay green).
+#[test]
+fn config_badge_opens_problems_modal() {
+    let mut h = Harness::standard(1);
+    assert!(!h.app.config_has_problems(), "fresh env is clean");
+    let clean = h.render();
+    assert!(!clean.contains("Config ⚠"), "no badge when clean: {clean}");
+
+    // Break hosts.toml and re-validate (mirrors the live-reload path).
+    let path = crate::agent::host_config::hosts_config_path().unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "not valid toml {{{").unwrap();
+    h.app.refresh_config_status();
+    assert!(h.app.config_has_problems());
+
+    // The badge renders and records an OpenConfigProblems click target.
+    let screen = h.render();
+    assert!(
+        screen.contains("Config"),
+        "badge visible with problems: {screen}"
+    );
+    let rect = h
+        .app
+        .click_targets
+        .iter()
+        .find_map(|t| match t.action {
+            ClickAction::OpenConfigProblems => Some(t.rect),
+            _ => None,
+        })
+        .expect("badge records an OpenConfigProblems click target");
+
+    // Clicking the badge opens the read-only problems modal listing the file.
+    h.app.update(AppMessage::MouseClick {
+        x: rect.x + 1,
+        y: rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(
+        matches!(h.app.modal, modals::Modal::ConfigProblems(_)),
+        "the badge opens the problems modal"
+    );
+    let modal_screen = h.render();
+    assert!(
+        modal_screen.contains("hosts.toml"),
+        "problems modal names the broken file: {modal_screen}"
+    );
+
+    // Enter jumps into the Settings panel (its "Open Settings" button).
+    h.key(KeyCode::Enter, KeyModifiers::NONE);
+    assert!(
+        matches!(h.app.modal, modals::Modal::Settings(_)),
+        "Enter jumps from the problems modal into Settings"
+    );
+}
+
 #[test]
 fn ctrl_q_requests_quit() {
     let mut h = Harness::standard(1);

@@ -6,6 +6,7 @@
 //! thurbox` server.
 
 pub mod builtin_hooks;
+pub mod config_check;
 pub mod delete;
 pub mod extensions;
 pub mod restart;

@@ -45,6 +45,14 @@ the panel — set it only by hand-editing `settings.toml`. Hand-editing
 the file (or the panel in another instance) is picked up the same way,
 via the live mtime poll.
 
+The panel also leads with a **read-only "Config files"** band: every config
+file (`agents.toml` / `hosts.toml` / `settings.toml` / `themes.toml` /
+`keybindings.json` / the database) with its **resolved path** and an
+at-a-glance validity mark (`✓ ok` / `✗ invalid` / `· absent`) — the same
+paths + validity `thurbox-cli config show`/`validate` report, so you no longer
+need the CLI to find where a file lives. A **`Validate`** action (key `v` / the
+footer button) re-runs strict validation on demand.
+
 All paths respect `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME`.
 
 ### Which file do I edit?
@@ -69,7 +77,13 @@ fall back to built-in defaults.
 
 Config problems are **not silent**: parse errors, unknown fields,
 invalid chords, and chord conflicts surface as a status-bar toast on
-startup (and in the log file). Unknown TOML keys are tolerated —
+startup (and in the log file). That toast is transient, so a problem also
+lights a **persistent `Config ⚠` badge** in the status-bar footer for as long
+as any file fails validation (it clears itself when you fix the file — the
+badge is re-derived on the config live-reload). Clicking the badge opens a
+read-only **"Config problems"** modal listing each broken file and its
+messages, with an `Open Settings` jump into the Settings panel's Config-files
+section. Unknown TOML keys are tolerated —
 stale keys from older versions or typos are *reported by name* but
 your file still loads — while syntax/type errors fall back to
 built-ins (agents), zero hosts, or defaults (settings).

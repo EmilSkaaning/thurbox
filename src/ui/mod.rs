@@ -5,6 +5,7 @@ pub mod automations_list_modal;
 pub mod automations_panel;
 pub mod branch_selector_modal;
 pub mod code_review;
+pub mod config_problems_modal;
 pub mod confirm_delete_modal;
 pub mod confirm_restore_modal;
 pub mod file_viewer;

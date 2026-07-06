@@ -46,116 +46,56 @@ pub fn run(action: Action, db: &Database) -> Result<CommandOutput, String> {
     }
 }
 
-/// One file's validation outcome.
-fn file_report(path: Option<std::path::PathBuf>, problems: Vec<String>, exists: bool) -> Value {
+/// The validated config files in stable order, as `(display label, JSON key)`
+/// pairs. Shared by [`validate`] (which builds the report) and
+/// [`render_validate`] (which prints it) so their ordering can't drift. The
+/// database is path-only and lives in `show`'s paths block, not here.
+const VALIDATED_FILES: [(&str, &str); 5] = [
+    ("agents.toml", "agents_toml"),
+    ("hosts.toml", "hosts_toml"),
+    ("settings.toml", "settings_toml"),
+    ("themes.toml", "themes_toml"),
+    ("keybindings.json", "keybindings_json"),
+];
+
+/// One file's validation outcome as the JSON block `config validate`/`show`
+/// consumers expect.
+fn file_report(file: &crate::session::ConfigFile) -> Value {
     json!({
-        "path": path.map(|p| p.display().to_string()),
-        "exists": exists,
-        "valid": problems.is_empty(),
-        "problems": problems,
+        "path": file.path.as_ref().map(|p| p.display().to_string()),
+        "exists": file.exists,
+        "valid": file.valid,
+        "problems": file.problems,
     })
 }
 
-/// Validate one TOML config file against `T`. Absent files are valid
-/// (defaults/seeding apply). Unknown fields don't fail the *load* at startup,
-/// but they do fail *validation* — they are typos or stale keys either way.
-fn validate_toml<T: serde::de::DeserializeOwned>(
-    path: Option<std::path::PathBuf>,
-    label: &str,
-) -> (Value, bool) {
-    let Some(path) = path else {
-        return (
-            file_report(None, vec!["could not resolve path".into()], false),
-            false,
-        );
-    };
-    if !path.exists() {
-        return (file_report(Some(path), Vec::new(), false), true);
-    }
-    let problems = match std::fs::read_to_string(&path) {
-        Ok(contents) => {
-            match crate::agent::agent_config::parse_toml_reporting_unknown::<T>(&contents, label) {
-                Ok((_, warnings)) => warnings,
-                Err(e) => vec![e.to_string()],
-            }
-        }
-        Err(e) => vec![format!("read failed: {e}")],
-    };
-    let ok = problems.is_empty();
-    (file_report(Some(path), problems, true), ok)
-}
-
-fn validate_keybindings() -> (Value, bool) {
-    let path = crate::paths::keybindings_file();
-    match crate::storage::keybindings::load_keybindings_json() {
-        Ok(Some(jsonbody)) => {
-            let problems = match crate::session::KeyBindings::from_json_with_warnings(&jsonbody) {
-                Ok((_, warnings)) => warnings,
-                Err(e) => vec![e],
-            };
-            let ok = problems.is_empty();
-            (file_report(path, problems, true), ok)
-        }
-        Ok(None) => (file_report(path, Vec::new(), false), true),
-        Err(e) => (file_report(path, vec![e], true), false),
-    }
-}
-
 /// Validate every config file. Returns the full report plus the list of files
-/// that failed (empty = all valid).
+/// that failed (empty = all valid). Sources its data from the shared
+/// [`crate::session_ops::config_check`] so the TUI badge/section and the CLI
+/// never disagree about validity.
 fn validate() -> (Value, Vec<String>) {
-    let (agents, agents_ok) = validate_toml::<crate::session::AgentRegistry>(
-        crate::agent::agent_config::agents_config_path(),
-        "agents.toml",
-    );
-    let (hosts, hosts_ok) = validate_toml::<crate::session::HostRegistry>(
-        crate::agent::host_config::hosts_config_path(),
-        "hosts.toml",
-    );
-    let (settings, settings_ok) = validate_toml::<crate::session::settings::Settings>(
-        crate::agent::settings_config::settings_config_path(),
-        "settings.toml",
-    );
-    let (themes, themes_ok) = validate_toml::<crate::session::theme_config::ThemesFile>(
-        crate::agent::themes_config::themes_config_path(),
-        "themes.toml",
-    );
-    let (keybindings, kb_ok) = validate_keybindings();
+    let files = crate::session_ops::config_check::check_all();
+    let get = |label: &str| files.iter().find(|f| f.label == label);
 
-    let failed: Vec<String> = [
-        ("agents.toml", agents_ok),
-        ("hosts.toml", hosts_ok),
-        ("settings.toml", settings_ok),
-        ("themes.toml", themes_ok),
-        ("keybindings.json", kb_ok),
-    ]
-    .iter()
-    .filter(|(_, ok)| !ok)
-    .map(|(name, _)| (*name).to_string())
-    .collect();
+    let failed: Vec<String> = VALIDATED_FILES
+        .iter()
+        .filter(|(label, _)| get(label).is_some_and(|f| !f.valid))
+        .map(|(label, _)| (*label).to_string())
+        .collect();
 
-    let report = json!({
-        "valid": failed.is_empty(),
-        "agents_toml": agents,
-        "hosts_toml": hosts,
-        "settings_toml": settings,
-        "themes_toml": themes,
-        "keybindings_json": keybindings,
-    });
+    let mut report = json!({ "valid": failed.is_empty() });
+    for (label, key) in VALIDATED_FILES {
+        if let Some(f) = get(label) {
+            report[key] = file_report(f);
+        }
+    }
     (report, failed)
 }
 
 /// Render `config validate` as a per-file status list.
 fn render_validate(report: &Value, failed: &[String]) -> String {
-    let files = [
-        ("agents.toml", "agents_toml"),
-        ("hosts.toml", "hosts_toml"),
-        ("settings.toml", "settings_toml"),
-        ("themes.toml", "themes_toml"),
-        ("keybindings.json", "keybindings_json"),
-    ];
     let mut lines = Vec::new();
-    for (label, key) in files {
+    for (label, key) in VALIDATED_FILES {
         push_validate_file_lines(&mut lines, label, &report[key]);
     }
     if failed.is_empty() {
@@ -246,19 +186,25 @@ fn show(db: &Database) -> Result<Value, String> {
     let (editor, editor_source) = resolve_editor(db);
     let overridden_actions = overridden_action_names();
 
+    // Path set from the shared checker, so `show` and `validate` (and the TUI's
+    // "Config files" section) resolve every path the same way.
+    let files = crate::session_ops::config_check::check_all();
+    let path_of = |label: &str| {
+        files
+            .iter()
+            .find(|f| f.label == label)
+            .and_then(|f| f.path.as_ref())
+            .map(|p| p.display().to_string())
+    };
+
     Ok(json!({
         "paths": {
-            "agents_toml": crate::agent::agent_config::agents_config_path()
-                .map(|p| p.display().to_string()),
-            "hosts_toml": crate::agent::host_config::hosts_config_path()
-                .map(|p| p.display().to_string()),
-            "settings_toml": crate::agent::settings_config::settings_config_path()
-                .map(|p| p.display().to_string()),
-            "themes_toml": crate::agent::themes_config::themes_config_path()
-                .map(|p| p.display().to_string()),
-            "keybindings_json": crate::paths::keybindings_file()
-                .map(|p| p.display().to_string()),
-            "database": crate::paths::database_file().map(|p| p.display().to_string()),
+            "agents_toml": path_of("agents.toml"),
+            "hosts_toml": path_of("hosts.toml"),
+            "settings_toml": path_of("settings.toml"),
+            "themes_toml": path_of("themes.toml"),
+            "keybindings_json": path_of("keybindings.json"),
+            "database": path_of("database"),
         },
         "agents": { "default": agents.default_name(), "names": agents.names() },
         "hosts": { "names": hosts.names() },

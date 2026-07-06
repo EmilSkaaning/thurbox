@@ -1845,6 +1845,26 @@ fn step_clamp(current: i64, delta: i32, step: i64, min: i64, max: i64) -> i64 {
     (current + i64::from(delta) * step).clamp(min, max)
 }
 
+/// Read-only "Config problems" modal: opened from the persistent `Config ⚠`
+/// footer badge, it lists each config file that failed validation and its
+/// problem messages, with an `[ Open Settings ]` jump into the full editor.
+/// Purely a display snapshot (the fields are captured when it opens).
+#[derive(Debug, Clone)]
+pub struct ConfigProblemsModal {
+    /// The problem files (existing + invalid), captured at open time.
+    pub files: Vec<crate::session::ConfigFile>,
+}
+
+impl ConfigProblemsModal {
+    /// Build from the app's cached config snapshot, keeping only the problem
+    /// files (an existing validated file that failed to parse).
+    pub fn from_status(status: &[crate::session::ConfigFile]) -> Self {
+        Self {
+            files: status.iter().filter(|f| f.is_problem()).cloned().collect(),
+        }
+    }
+}
+
 /// Single, discriminated union replacing boolean flags for modal state.
 /// Only one modal can be active at a time, making invalid states unrepresentable.
 #[derive(Debug, Clone, Default)]
@@ -1866,6 +1886,7 @@ pub enum Modal {
     ConfirmDelete(ConfirmDeleteModal),
     ConfirmRestore(ConfirmRestoreModal),
     Settings(SettingsModal),
+    ConfigProblems(ConfigProblemsModal),
 }
 
 impl Modal {

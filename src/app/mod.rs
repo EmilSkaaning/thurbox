@@ -480,6 +480,9 @@ pub(crate) enum ClickAction {
     /// Copy the current status-bar message to the clipboard (click the status
     /// row). Dispatched by `activate_click_target`.
     CopyStatus,
+    /// Open the read-only "Config problems" modal (click the persistent
+    /// `Config ⚠` footer badge). Dispatched by `activate_click_target`.
+    OpenConfigProblems,
 }
 
 /// One clickable region rendered this frame: its rect plus what a click on it
@@ -702,6 +705,12 @@ pub struct App {
     /// agents.toml/hosts.toml reported by main), shown joined in one status
     /// toast via [`Self::report_config_warnings`].
     config_warnings: Vec<String>,
+    /// Per-file config validity snapshot (paths + parse status) surfaced in the
+    /// Settings "Config files" section and the persistent `Config ⚠` footer
+    /// badge. Computed once at startup and refreshed on the config live-reload
+    /// path + the Settings "Validate" action — never every frame (each refresh
+    /// re-parses every file from disk). See [`Self::refresh_config_status`].
+    config_status: Vec<crate::session::ConfigFile>,
     /// Receives the result of the silent startup auto-update, which runs on a
     /// background thread so a slow download never blocks the TUI from starting
     /// (`[features] auto_update`; see `main::spawn_auto_update`). `None` when the
@@ -960,6 +969,9 @@ impl App {
             usage_tx,
             usage_rx,
             config_warnings: Vec::new(),
+            // Strict-validate every config file once at startup so the badge +
+            // Settings section reflect real on-disk state from the first frame.
+            config_status: crate::session_ops::config_check::check_all(),
             auto_update_rx: None,
             config_reload: config_reload::ConfigReloadState {
                 agents_mtime: config_reload::agents_mtime(),
@@ -992,6 +1004,24 @@ impl App {
         self.config_warnings.extend(warnings);
         let text = format!("Config: {}", self.config_warnings.join(" · "));
         self.set_status(StatusLevel::Error, text);
+    }
+
+    /// Re-strict-validate every config file and cache the result. Called at the
+    /// Settings "Validate" action and whenever the config live-reload poll
+    /// detects a change — not every frame (each call re-reads from disk).
+    pub(crate) fn refresh_config_status(&mut self) {
+        self.config_status = crate::session_ops::config_check::check_all();
+    }
+
+    /// The cached per-file config validity snapshot (for the Settings section).
+    pub(crate) fn config_status(&self) -> &[crate::session::ConfigFile] {
+        &self.config_status
+    }
+
+    /// Whether any config file currently fails validation — drives the
+    /// persistent `Config ⚠` footer badge.
+    pub(crate) fn config_has_problems(&self) -> bool {
+        crate::session::any_problem(&self.config_status)
     }
 
     /// Attach the receiver for the background startup auto-update (see
@@ -1027,18 +1057,30 @@ impl App {
     /// (the F1 editor persisting a rebind) refresh the stored mtime at save
     /// time, so they don't re-toast here.
     fn poll_config_reload(&mut self) {
+        let mut changed = false;
         if config_reload::agents_mtime() != self.config_reload.agents_mtime {
             self.reload_agents_config();
+            changed = true;
         }
 
         let kb_mtime = config_reload::keybindings_mtime();
         if kb_mtime != self.config_reload.keybindings_mtime {
             self.config_reload.keybindings_mtime = kb_mtime;
             self.reload_keybindings_config();
+            changed = true;
         }
 
         if config_reload::settings_mtime() != self.config_reload.settings_mtime {
             self.reload_settings_config();
+            changed = true;
+        }
+
+        // Re-validate on any live-reloadable change so the `Config ⚠` badge +
+        // the Settings section clear (or appear) without a restart. hosts.toml /
+        // themes.toml aren't mtime-tracked; the Settings "Validate" action
+        // covers those on demand.
+        if changed {
+            self.refresh_config_status();
         }
     }
 
@@ -1905,6 +1947,16 @@ impl App {
         self.modal = modals::Modal::Settings(modals::SettingsModal::new(draft));
     }
 
+    /// Open the read-only "Config problems" modal (from the `Config ⚠` footer
+    /// badge). Re-validates first so the list reflects the current on-disk state
+    /// even for the mtime-untracked files (hosts.toml / themes.toml).
+    pub(crate) fn open_config_problems_modal(&mut self) {
+        self.refresh_config_status();
+        self.modal = modals::Modal::ConfigProblems(modals::ConfigProblemsModal::from_status(
+            &self.config_status,
+        ));
+    }
+
     /// Persist the Settings panel draft to `settings.toml`, apply the live
     /// feature flags immediately, and toast the result. Keeps the modal open on
     /// a write error so edits aren't lost.
@@ -2621,6 +2673,10 @@ impl App {
             }
             ClickAction::CopyStatus => {
                 self.copy_status_to_clipboard();
+                true
+            }
+            ClickAction::OpenConfigProblems => {
+                self.open_config_problems_modal();
                 true
             }
         }
