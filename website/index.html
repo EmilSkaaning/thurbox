@@ -194,9 +194,10 @@ footer: true
               <code>microsoft/winget-pkgs</code>
               but not yet merged, so
               <code>winget install Thurbeen.thurbox</code>
-              won't resolve until the PR is approved &mdash; use
-              <strong>Chocolatey</strong>
-              or the install script meanwhile.
+              won't resolve until the PR is approved. Even once published,
+              <strong>winget updates are slow</strong>
+              and may install old versions; the newest binary always ships immediately via
+              GitHub Releases.
             </p>
             <pre><code class="language-powershell">winget install Thurbeen.thurbox</code></pre>
           </div>
@@ -216,6 +217,13 @@ footer: true
               . Needs
               <a href="https://github.com/psmux/psmux" target="_blank" rel="noopener">psmux</a>
               as the multiplexer (installed separately).
+            </p>
+            <p>
+              <strong>Slow delivery:</strong>
+              the Chocolatey community repository has a
+              <strong>moderation queue and rate limits</strong>
+              &mdash; new versions can take weeks to appear and may install old releases. The
+              newest binary always ships immediately via GitHub Releases.
             </p>
             <pre><code class="language-powershell">choco install thurbox</code></pre>
           </div>

@@ -70,8 +70,9 @@ separately).
 
 > **⚠️ Pending review.** The winget package has been submitted to
 > `microsoft/winget-pkgs` but is **not yet merged/live**, so `winget install
-> Thurbeen.thurbox` won't resolve it until the PR is approved. Use
-> **Chocolatey** or the PowerShell installer (both below) in the meantime.
+> Thurbeen.thurbox` won't resolve until the PR is approved. Even once published,
+> **winget updates are slow** and may install old versions — the newest binary
+> always ships immediately via GitHub Releases.
 
 **Chocolatey (Windows):**
 
@@ -83,6 +84,10 @@ Installs the prebuilt x86_64 Windows binaries (`thurbox.exe` +
 `thurbox-cli.exe`) from the GitHub Release and shims them onto your `PATH`.
 Needs [psmux](https://github.com/psmux/psmux) as the multiplexer (installed
 separately — there is no Chocolatey package for it).
+
+> **⚠️ Slow delivery.** The Chocolatey community repository has a **moderation
+> queue and rate limits** — new versions can take weeks to appear and may install
+> old releases. The newest binary always ships immediately via GitHub Releases.
 
 **Homebrew (macOS / Linux):**
 
