@@ -495,11 +495,18 @@ fn footer_line(state: &RepoPickerState<'_>) -> Line<'static> {
             } else {
                 " browse  "
             };
+            // Enter on an empty field finishes the picker (Done); with a path
+            // typed it commits it as a repo — mirror that in the hint.
+            let enter_hint = if state.path_input.trim().is_empty() {
+                " done  "
+            } else {
+                " add repo  "
+            };
             Line::from(vec![
                 Span::styled("Tab", Theme::keybind()),
                 Span::styled(tab_hint, Theme::keybind_desc()),
                 Span::styled("Enter", Theme::keybind()),
-                Span::styled(" add repo  ", Theme::keybind_desc()),
+                Span::styled(enter_hint, Theme::keybind_desc()),
                 Span::styled("Ctrl+P", Theme::keybind()),
                 Span::styled(" import parent  ", Theme::keybind_desc()),
                 Span::styled("S-Tab", Theme::keybind()),
@@ -615,7 +622,8 @@ mod tests {
 
     #[test]
     fn footer_line_input_focus_tab_hint_depends_on_suggestion() {
-        let with = picker_state(RepoPickerFocus::Input, Some("/home/me/proj"));
+        let mut with = picker_state(RepoPickerFocus::Input, Some("/home/me/proj"));
+        with.path_input = "/home/me/proj";
         let with_text = span_text(&footer_line(&with).spans);
         assert!(with_text.contains("complete"));
         assert!(with_text.contains("add repo"));
@@ -627,6 +635,16 @@ mod tests {
         // Shift+Tab back to the list is discoverable from the input.
         assert!(without_text.contains("S-Tab"));
         assert!(without_text.contains("list"));
+    }
+
+    #[test]
+    fn footer_line_input_focus_empty_field_shows_done() {
+        // With nothing typed, Enter finishes the picker, so the hint reads
+        // "done" rather than "add repo" (empty-field confirm, matching Done).
+        let empty = picker_state(RepoPickerFocus::Input, None);
+        let empty_text = span_text(&footer_line(&empty).spans);
+        assert!(empty_text.contains("done"));
+        assert!(!empty_text.contains("add repo"));
     }
 
     #[test]

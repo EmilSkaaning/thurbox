@@ -1773,7 +1773,16 @@ impl App {
                 return;
             }
             KeyCode::Enter => {
-                self.repo_picker_commit_path_input();
+                // A non-empty field commits the typed path (add repo); an empty
+                // one has nothing to add, so Enter finishes the picker instead.
+                // This is also what the footer "Done" button replays, so without
+                // it a user who clicked into the path field could never confirm
+                // (the Enter/confirm arm otherwise lives only in the list focus).
+                if rp.path_input.value().trim().is_empty() {
+                    self.submit_repo_picker();
+                } else {
+                    self.repo_picker_commit_path_input();
+                }
                 return;
             }
             other => {

@@ -462,6 +462,34 @@ fn ctrl_n_opens_repo_picker() {
     assert!(!h.app.modal.is_open(), "Esc should dismiss the modal");
 }
 
+/// Regression: clicking into the path-input field (here reached via Tab) must
+/// not trap the user. With nothing typed, Enter — which the footer "Done"
+/// button also replays — finishes the picker instead of being swallowed as an
+/// empty "add repo". Previously the confirm arm lived only in the list focus,
+/// so an empty Enter here did nothing and the modal never advanced.
+#[test]
+fn repo_picker_enter_on_empty_path_input_confirms() {
+    let mut h = Harness::standard(0);
+    h.render();
+    h.ctrl('n'); // open the repo picker
+    h.key(KeyCode::Tab, KeyModifiers::NONE); // list → path input focus
+    assert!(
+        matches!(
+            h.app.modal,
+            modals::Modal::RepoPicker(ref rp)
+                if rp.focus == modals::RepoPickerFocus::Input
+        ),
+        "Tab should move focus into the path input"
+    );
+
+    h.key(KeyCode::Enter, KeyModifiers::NONE); // Done on an empty field
+    // No repos selected → the picker submits and advances to the name modal.
+    assert!(
+        matches!(h.app.modal, modals::Modal::SessionName(_)),
+        "empty-field Enter should confirm the picker, not stay stuck in it"
+    );
+}
+
 /// Create `~/code` under the harness's guarded home with one git child and
 /// one plain child, and drive the picker to the path input with `~/code/`
 /// typed — the setup shared by the path-browser tests. (Local listings
