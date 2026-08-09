@@ -14,6 +14,13 @@ event loop), see [`CLAUDE.md`](../CLAUDE.md).
 | [ORCHESTRATION.md](ORCHESTRATION.md) | The control-plane pattern for running sessions across many repos | Changing the session/message/extension surface the pattern relies on |
 | [CONFIG.md](CONFIG.md) | Every config file / env var / DB setting in one place | Adding/changing a config file, env var, or DB setting |
 
+## Forward-looking design
+
+[`v2/`](v2/README.md) holds the design set for **Thurbox v2** — the refactor
+that turns the TUI into a minimal Rust kernel hosting reloadable TypeScript
+plugins. Nothing there is implemented; the documents above remain
+authoritative for the shipping product until v2 lands.
+
 ## Keeping Docs Current
 
 **Rule**: If a code change invalidates or extends a documented decision,

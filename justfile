@@ -36,6 +36,7 @@ lint:
     cargo deny check advisories
     cargo deny check bans licenses sources
     rumdl check .
+    scripts/dev/check-doc-links.sh
     git ls-files -z '*.sh' | xargs -0 shellcheck
 
 # Architecture-rule + doc checks.

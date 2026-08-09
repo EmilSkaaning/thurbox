@@ -95,6 +95,13 @@ repos:
         types: [markdown]
         pass_filenames: false
 
+      - id: doc-links
+        name: Markdown cross-reference check
+        entry: scripts/dev/check-doc-links.sh
+        language: system
+        types: [markdown]
+        pass_filenames: false
+
       # Website linting (pre-commit stage)
       # Page .html files carry YAML front matter and are partial templates, so
       # Prettier/HTMLHint run on the CSS/JS sources and on the *built* _site
