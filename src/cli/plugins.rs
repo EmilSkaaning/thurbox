@@ -274,6 +274,72 @@ fn render_doctor(report: &crate::plugin::PluginReport) -> CommandOutput {
     CommandOutput::new(json, human)
 }
 
+/// Run a plugin-owned `thurbox-cli <verb>`, if the first argument is one.
+///
+/// Returns the process exit code when a plugin claimed the verb, or `None` to
+/// let clap parse normally. Matching is against **declared** verbs only, so an
+/// ordinary typo still produces clap's unknown-subcommand error rather than a
+/// confusing plugin failure.
+pub fn dispatch_plugin_verb(mut args: std::env::Args) -> Option<i32> {
+    let _program = args.next()?;
+    let verb = args.next()?;
+    if verb.starts_with('-') {
+        return None;
+    }
+    let rest: Vec<String> = args.collect();
+
+    let outcome = crate::plugin::discovery::discover();
+    let owner = outcome
+        .loadable
+        .iter()
+        .find(|p| p.manifest.cli.iter().any(|c| c.name == verb))?;
+
+    Some(match run_plugin_verb(owner, &verb, &rest) {
+        Ok(output) => {
+            if !output.is_empty() {
+                println!("{output}");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    })
+}
+
+/// Start the owning plugin's service, hand it the verb, and stop it.
+///
+/// Dispatched to the **service** half because a plugin verb must work with no
+/// TUI running — which is the whole reason a plugin would own one.
+fn run_plugin_verb(
+    plugin: &crate::plugin::DiscoveredPlugin,
+    verb: &str,
+    args: &[String],
+) -> Result<String, String> {
+    if !plugin.manifest.has_service() {
+        return Err(format!(
+            "plugin `{}` declares the verb `{verb}` but has no service half to run it",
+            plugin.name()
+        ));
+    }
+
+    let path = crate::paths::database_file().ok_or("cannot resolve the database path")?;
+    let lock_db = crate::storage::Database::open(&path).map_err(|e| e.to_string())?;
+    let lock = crate::storage::plugins::DbServiceLock::new(lock_db, "cli");
+    let store: crate::session::plugin_store::PluginStoreFactory = std::sync::Arc::new(|| {
+        crate::storage::plugins::DbPluginStore::open()
+            .map(|s| Box::new(s) as Box<dyn crate::session::plugin_store::PluginStore>)
+    });
+
+    let mut host = crate::plugin::ServiceHost::new(crate::plugin::ExecutionBounds::default());
+    host.start(plugin, &lock, Some(store))
+        .map_err(|e| e.to_string())?;
+    let result = host.run_verb(plugin.name(), verb, args);
+    host.stop_all(&lock);
+    result.map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

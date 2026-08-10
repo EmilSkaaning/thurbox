@@ -178,6 +178,20 @@ impl ServiceHost {
             .call_named("tick")
     }
 
+    /// Run a plugin-owned CLI verb against its service.
+    pub fn run_verb(
+        &self,
+        plugin: &str,
+        verb: &str,
+        args: &[String],
+    ) -> Result<String, RuntimeError> {
+        self.running
+            .get(plugin)
+            .ok_or(RuntimeError::ThreadGone)?
+            .thread
+            .run_verb(verb, args)
+    }
+
     /// Evaluate a chunk inside a running service's VM (host-side diagnostic).
     pub fn eval(&self, plugin: &str, source: &str) -> Result<String, RuntimeError> {
         self.running

@@ -12,6 +12,16 @@ fn main() {
         )
         .init();
 
+    // A plugin-owned verb is not in clap's grammar, so it would be rejected as
+    // an unknown subcommand before anything could dispatch it. Intercept
+    // *before* parsing, and only for a verb some installed plugin actually
+    // declares — anything else still gets clap's ordinary error, so a typo
+    // reads as a typo rather than as a missing plugin.
+    #[cfg(feature = "plugins")]
+    if let Some(code) = thurbox::cli::plugins::dispatch_plugin_verb(std::env::args()) {
+        std::process::exit(code);
+    }
+
     let cli = thurbox::cli::Cli::parse();
 
     // Publish settings before Database::open (audit pruning reads retention).

@@ -381,6 +381,39 @@ impl PluginVm {
         Ok(matches!(consumed, Value::Boolean(true)))
     }
 
+    /// Run a plugin-owned CLI verb, returning whatever it printed.
+    fn run_verb(&self, verb: &str, args: &[String]) -> Result<String, RuntimeError> {
+        let module: Table = self
+            .lua
+            .named_registry_value(MODULE_REGISTRY_KEY)
+            .map_err(|e| classify(&e))?;
+
+        let handler: Value = module.get("run").map_err(|e| classify(&e))?;
+        let func = match handler {
+            Value::Function(f) => f,
+            _ => {
+                return Err(RuntimeError::Runtime(
+                    "plugin declares a cli verb but its service exports no `run`".to_string(),
+                ))
+            }
+        };
+
+        let lua_args = self.lua.create_table().map_err(|e| classify(&e))?;
+        for (i, arg) in args.iter().enumerate() {
+            lua_args.set(i + 1, arg.clone()).map_err(|e| classify(&e))?;
+        }
+
+        self.arm();
+        let out: Value = func
+            .call((verb.to_string(), lua_args))
+            .map_err(|e| classify(&e))?;
+        Ok(match out {
+            Value::String(s) => s.to_string_lossy().to_string(),
+            Value::Nil => String::new(),
+            other => render(&other),
+        })
+    }
+
     /// Evaluate a chunk and render its result.
     ///
     /// A host-side diagnostic: it is how the lifecycle's tests observe a VM's
@@ -451,6 +484,7 @@ enum Request {
     Render(String, Sender<Result<ViewNode, RuntimeError>>),
     Key(String, String, Sender<Result<bool, RuntimeError>>),
     Named(String, Sender<Result<bool, RuntimeError>>),
+    Verb(String, Vec<String>, Sender<Result<String, RuntimeError>>),
     Stop(Sender<()>),
 }
 
@@ -573,6 +607,13 @@ impl PluginThread {
         }
     }
 
+    /// Run a plugin-owned CLI verb.
+    pub fn run_verb(&self, verb: &str, args: &[String]) -> Result<String, RuntimeError> {
+        let owned_verb = verb.to_string();
+        let owned_args = args.to_vec();
+        self.round_trip(move |reply| Request::Verb(owned_verb, owned_args, reply))
+    }
+
     /// Call a named no-argument function on the plugin's module.
     pub fn call_named(&self, name: &str) -> Result<bool, RuntimeError> {
         let owned = name.to_string();
@@ -687,6 +728,16 @@ fn serve(vm: PluginVm, requests: Receiver<Request>) {
             Request::Named(name, reply) => {
                 let result = match vm.as_ref() {
                     Some(v) => v.call_named(&name),
+                    None => Err(RuntimeError::Terminated),
+                };
+                if result.as_ref().err().is_some_and(RuntimeError::is_fatal) {
+                    vm = None;
+                }
+                let _ = reply.send(result);
+            }
+            Request::Verb(verb, args, reply) => {
+                let result = match vm.as_ref() {
+                    Some(v) => v.run_verb(&verb, &args),
                     None => Err(RuntimeError::Terminated),
                 };
                 if result.as_ref().err().is_some_and(RuntimeError::is_fatal) {

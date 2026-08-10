@@ -910,6 +910,22 @@ plugin code — so a wedged plugin costs a dropped key, not a freeze. Plugin
 source is **watched**: editing a loaded plugin's `init.luau` reloads it in
 place with a fresh VM, keeping its pane and visibility;
 `thurbox-cli plugin reload [<name>]` does the same on demand.
+
+A plugin may also ship a **headless half**, `service.luau`, in its own VM with
+its own capability grant (`[service] capabilities = [...]`; the top-level
+`capabilities` apply to both halves). The halves fault independently. Services
+are hosted **start-tick-stop** by `automation tick` — which the tmux heartbeat
+keeper already loops every 60 s — so a service-only plugin keeps working with
+the TUI closed, inheriting v1's headless-automation guarantee rather than
+revoking it. A machine-wide advisory lock (`plugin_service_locks`) means a TUI
+and a tick never both drive one plugin's loop; it names its holder and expires,
+so a killed host cannot wedge a service. Durable per-plugin state lives in
+`plugin_kv`, namespaced by a **column** the host fills from the plugin's
+identity — a plugin never names its own namespace — and bounded on key length,
+value size and key count. A plugin may own a `thurbox-cli` verb
+(`[[cli]] name = "…"`), dispatched to its service half so it works with no TUI;
+verbs matching a kernel subcommand are refused at manifest validation, and a
+word matching neither still gets clap's ordinary unknown-subcommand error.
 Output is
 **human-readable by default** and switches to JSON automatically when stdout is
 piped (so `… | jq` keeps working); force a format with `--json` (compact),

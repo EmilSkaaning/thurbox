@@ -157,6 +157,20 @@ pub struct CommandDecl {
     pub title: Option<String>,
 }
 
+/// A `thurbox-cli` verb a plugin contributes.
+///
+/// The verb is dispatched to the plugin's **service** half, since it must work
+/// with no TUI running — that is the whole point of a plugin owning a command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CliVerbDecl {
+    /// The verb as typed: `thurbox-cli <name>`.
+    pub name: String,
+    /// One-line description for help output.
+    #[serde(default)]
+    pub about: Option<String>,
+}
+
 /// A keybinding a plugin contributes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -216,7 +230,35 @@ pub struct PluginManifest {
     /// The headless half, if this plugin has one.
     #[serde(default)]
     pub service: Option<ServiceDecl>,
+    /// `thurbox-cli` verbs this plugin owns.
+    #[serde(default)]
+    pub cli: Vec<CliVerbDecl>,
 }
+
+/// `thurbox-cli` subcommands the kernel owns.
+///
+/// A plugin verb colliding with one of these would shadow a built-in command
+/// depending on dispatch order, so the collision is refused at manifest
+/// validation instead — the kernel's surface is not negotiable.
+pub const RESERVED_CLI_VERBS: &[&str] = &[
+    "editor",
+    "session",
+    "automation",
+    "auto",
+    "task",
+    "todo",
+    "message",
+    "msg",
+    "config",
+    "extension",
+    "ext",
+    "version",
+    "update",
+    "notify",
+    "perf",
+    "plugin",
+    "help",
+];
 
 impl PluginManifest {
     /// The capabilities one half is granted: the shared set plus that half's.
@@ -263,6 +305,11 @@ pub enum ManifestErrorKind {
         kind: &'static str,
         /// The id declared twice.
         id: String,
+    },
+    /// A CLI verb would shadow a kernel subcommand.
+    ReservedCliVerb {
+        /// The offending verb.
+        verb: String,
     },
     /// A pane is declared without the capability that would let it render.
     PaneWithoutRender {
@@ -331,6 +378,9 @@ impl fmt::Display for ManifestError {
             } => write!(f, "invalid {field} `{value}`: {reason}"),
             ManifestErrorKind::DuplicateId { kind, id } => {
                 write!(f, "duplicate {kind} id `{id}`")
+            }
+            ManifestErrorKind::ReservedCliVerb { verb } => {
+                write!(f, "cli verb `{verb}` is reserved by thurbox itself")
             }
             ManifestErrorKind::PaneWithoutRender { pane } => write!(
                 f,
@@ -419,6 +469,22 @@ impl PluginManifest {
             });
         }
 
+        // A verb is typed by a user, so it follows the same alphabet as every
+        // other identifier, and it may not shadow a kernel subcommand.
+        for verb in &self.cli {
+            validate_identifier(&verb.name).map_err(|reason| ManifestErrorKind::Identifier {
+                field: "cli verb",
+                value: verb.name.clone(),
+                reason,
+            })?;
+            if RESERVED_CLI_VERBS.contains(&verb.name.as_str()) {
+                return Err(ManifestErrorKind::ReservedCliVerb {
+                    verb: verb.name.clone(),
+                });
+            }
+        }
+        check_ids("cli verb", self.cli.iter().map(|c| c.name.as_str()))?;
+
         check_ids("pane", self.panes.iter().map(|p| p.id.as_str()))?;
         check_ids("command", self.commands.iter().map(|c| c.id.as_str()))?;
         check_ids("keybinding", self.keybindings.iter().map(|k| k.id.as_str()))?;
@@ -440,6 +506,7 @@ fn check_ids<'a>(
     let field: &'static str = match kind {
         "pane" => "pane id",
         "command" => "command id",
+        "cli verb" => "cli verb",
         _ => "keybinding id",
     };
     let mut seen: BTreeSet<&str> = BTreeSet::new();
@@ -707,6 +774,87 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_cli_verb_parses() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            [service]
+            [[cli]]
+            name = "sync"
+            about = "Sync everything"
+        "#;
+        let m = parse(text).expect("valid");
+        assert_eq!(m.cli[0].name, "sync");
+        assert_eq!(m.cli[0].about.as_deref(), Some("Sync everything"));
+    }
+
+    #[test]
+    fn a_cli_verb_may_not_shadow_a_kernel_subcommand() {
+        for reserved in ["session", "task", "plugin", "config"] {
+            let text = format!(
+                "name = \"demo\"\napi_version = 1\n[service]\n[[cli]]\nname = \"{reserved}\"\n"
+            );
+            let e = parse(&text).expect_err("{reserved} must be refused");
+            assert_eq!(
+                e.kind,
+                ManifestErrorKind::ReservedCliVerb {
+                    verb: reserved.to_string()
+                },
+                "{reserved}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cli_verb_follows_the_identifier_rules() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            [service]
+            [[cli]]
+            name = "Sync"
+        "#;
+        let e = parse(text).expect_err("verbs are typed, so same alphabet");
+        assert!(matches!(
+            e.kind,
+            ManifestErrorKind::Identifier {
+                field: "cli verb",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn two_cli_verbs_may_not_share_a_name() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            [service]
+            [[cli]]
+            name = "sync"
+            [[cli]]
+            name = "sync"
+        "#;
+        let e = parse(text).expect_err("duplicate");
+        assert_eq!(
+            e.kind,
+            ManifestErrorKind::DuplicateId {
+                kind: "cli verb",
+                id: "sync".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn every_reserved_verb_matches_a_real_subcommand_name() {
+        // The list is hand-maintained; if a kernel subcommand is renamed and
+        // this is not updated, a plugin could quietly shadow it.
+        assert!(RESERVED_CLI_VERBS.contains(&"plugin"));
+        assert!(RESERVED_CLI_VERBS.contains(&"session"));
+        assert!(!RESERVED_CLI_VERBS.contains(&"sync"));
     }
 
     #[test]
