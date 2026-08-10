@@ -926,6 +926,31 @@ value size and key count. A plugin may own a `thurbox-cli` verb
 (`[[cli]] name = "…"`), dispatched to its service half so it works with no TUI;
 verbs matching a kernel subcommand are refused at manifest validation, and a
 word matching neither still gets clap's ordinary unknown-subcommand error.
+
+A plugin may add **environment to every agent session thurbox spawns** — v2's
+bounded replacement for v1's `[[agent_patches]]`. It is **manifest data**
+(`[spawn.env]`, requiring the `spawn` capability; declaring one without the
+other is a manifest error), not a Luau callback,
+because the spawn environment is finalized on the UI thread and a per-spawn VM
+call would put plugin code on the render loop. `plugin::spawn::registry_for`
+turns discovery into a `session::spawn_contribution::Registry`, published once
+per process by each binary; `session_ops::inject_thurbox_env` — the one
+function every spawn path funnels through — applies
+`Registry::resolve` after writing the kernel's own vars, passing them as
+**reserved**, so a plugin can never overwrite the `THURBOX_*` identity a
+session proves itself with (the reserved set is *derived* by running the kernel
+injection, never restated). Policy is
+`session/spawn_contribution.rs`: a denylist of code-execution variables
+(`LD_PRELOAD`, `BASH_ENV`, `GIT_SSH_COMMAND`, `NODE_OPTIONS`, …, case-
+insensitive), `PATH` refused outright, and append-only conflicts resolved in
+plugin-name order. `PATH` **prepends** have no manifest surface even though the
+policy layer implements their confinement rule: tmux replaces a pane's `PATH`
+with the server's own and ignores `-e PATH=`/`set-environment PATH` (measured,
+3.5a), so delivering one needs an argv-level change — the same seam argument
+contributions need. Nothing here can fail a spawn: every refusal is a
+`Rejection`, logged at the spawn and re-derived from the manifests by
+`thurbox-cli plugin doctor`'s spawn section (which still starts no VM).
+
 Output is
 **human-readable by default** and switches to JSON automatically when stdout is
 piped (so `… | jq` keeps working); force a format with `--json` (compact),

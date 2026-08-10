@@ -271,11 +271,32 @@ fn build_agent_invocation(
 /// Shared by the headless spawn/restart paths and the TUI `Ctrl+R` restart
 /// (`App::restart_active_session`), so a restarted session keeps the same
 /// identity env a fresh spawn would have had.
+///
+/// Finally, whatever installed plugins contribute is applied on top. This is
+/// the *only* place contributions are applied, precisely because it is the one
+/// function every spawn path already funnels through — five call sites each
+/// applying it would be five places to forget it.
 pub(crate) fn inject_thurbox_env(
     config: &mut SessionConfig,
     agent_session_id: &str,
     task_id: Option<i64>,
 ) {
+    inject_kernel_env(config, agent_session_id, task_id);
+
+    // Last, so every key above counts as reserved against a plugin. Gated at
+    // the call site rather than behind a no-op: a build without the plugin
+    // host must not merely skip the work, it must not contain it.
+    #[cfg(feature = "plugins")]
+    apply_spawn_contributions(config);
+}
+
+/// The kernel's own half of [`inject_thurbox_env`], split out so the set of
+/// keys thurbox owns can be *derived* rather than restated.
+///
+/// `reserved_spawn_env_keys` runs this against a throwaway config, which is
+/// why a report of what a plugin may not set cannot drift from what the spawn
+/// path actually reserves.
+fn inject_kernel_env(config: &mut SessionConfig, agent_session_id: &str, task_id: Option<i64>) {
     config
         .env
         .insert("THURBOX_SESSION_ID".into(), agent_session_id.into());
@@ -287,36 +308,91 @@ pub(crate) fn inject_thurbox_env(
             .env
             .insert("THURBOX_TASK".into(), task_id.to_string());
     }
-    if config
+    let off_local = config
         .backend
         .as_deref()
-        .is_some_and(crate::session::is_remote_backend)
-    {
+        .is_some_and(crate::session::is_remote_backend);
+    if !off_local {
+        if let Some(dir) = crate::paths::metrics_directory() {
+            config
+                .env
+                .insert("THURBOX_METRICS_DIR".into(), dir.to_string_lossy().into());
+        }
+        // Pin the agent's `thurbox-cli` (its status hook) to the *same*
+        // config/data dirs this thurbox resolved, so a status `signal` always
+        // lands in the DB the TUI reads — independent of XDG, which
+        // `thurbox-cli` is on PATH, or a stale tmux-server env. Derived from
+        // the resolved file paths' parents.
+        if let Some(dir) =
+            crate::paths::config_file().and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        {
+            config.env.insert(
+                crate::paths::CONFIG_DIR_OVERRIDE_ENV.into(),
+                dir.to_string_lossy().into(),
+            );
+        }
+        if let Some(dir) =
+            crate::paths::database_file().and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        {
+            config.env.insert(
+                crate::paths::DATA_DIR_OVERRIDE_ENV.into(),
+                dir.to_string_lossy().into(),
+            );
+        }
+    }
+}
+
+/// Every environment key the kernel writes for a spawn.
+///
+/// Derived by running the kernel injection over a throwaway config: a literal
+/// list would be a second source of truth, and the first time the two
+/// disagreed a plugin would gain the ability to overwrite a session's
+/// identity. Used to report what a contribution may not touch without needing
+/// a spawn to find out.
+#[cfg(feature = "plugins")]
+pub fn reserved_spawn_env_keys() -> std::collections::BTreeSet<String> {
+    let mut probe = SessionConfig {
+        session_id: Some(crate::session::SessionId::default()),
+        ..SessionConfig::default()
+    };
+    // A task id and a local backend, so the widest set is produced — the
+    // report should name every key some spawn reserves, not only this one's.
+    inject_kernel_env(&mut probe, "probe", Some(0));
+    probe.env.into_keys().collect()
+}
+
+#[cfg(feature = "plugins")]
+/// Add what installed plugins contribute to a spawn's environment.
+///
+/// Called at the end of [`inject_thurbox_env`] — after the kernel's own
+/// variables, never before — because "reserved" is defined as *whatever the
+/// kernel just wrote*. A plugin therefore cannot overwrite the identity a
+/// session proves itself with, and the guarantee holds without a hardcoded
+/// name list that would drift the next time the injected set changes.
+///
+/// Every refusal is logged and the spawn continues: a plugin cannot take away
+/// the user's ability to start a session, which is the fail-open rule from the
+/// backend API's spawn-contribution contract.
+///
+/// Costs a single uncontended read lock when no plugin is installed — the
+/// registry is `None` in every build without the plugin host, and this is on
+/// the UI thread for a TUI spawn.
+fn apply_spawn_contributions(config: &mut SessionConfig) {
+    let Some(registry) = crate::session::spawn_contribution::published() else {
+        return;
+    };
+    if registry.is_empty() {
         return;
     }
-    if let Some(dir) = crate::paths::metrics_directory() {
-        config
-            .env
-            .insert("THURBOX_METRICS_DIR".into(), dir.to_string_lossy().into());
+
+    let reserved: std::collections::BTreeSet<String> = config.env.keys().cloned().collect();
+    let resolved = registry.resolve(&reserved);
+    for (key, value) in resolved.env {
+        config.env.insert(key, value);
     }
-    // Pin the agent's `thurbox-cli` (its status hook) to the *same* config/data
-    // dirs this thurbox resolved, so a status `signal` always lands in the DB
-    // the TUI reads — independent of XDG, which `thurbox-cli` is on PATH, or a
-    // stale tmux-server env. Derived from the resolved file paths' parents.
-    if let Some(dir) = crate::paths::config_file().and_then(|p| p.parent().map(|d| d.to_path_buf()))
-    {
-        config.env.insert(
-            crate::paths::CONFIG_DIR_OVERRIDE_ENV.into(),
-            dir.to_string_lossy().into(),
-        );
-    }
-    if let Some(dir) =
-        crate::paths::database_file().and_then(|p| p.parent().map(|d| d.to_path_buf()))
-    {
-        config.env.insert(
-            crate::paths::DATA_DIR_OVERRIDE_ENV.into(),
-            dir.to_string_lossy().into(),
-        );
+
+    for rejection in &resolved.rejections {
+        tracing::warn!("spawn contribution refused: {rejection}");
     }
 }
 
@@ -424,6 +500,158 @@ mod tests {
         inject_thurbox_env(&mut config, "agent-conv-uuid", None);
         assert!(config.env.contains_key("THURBOX_SESSION"));
         assert!(!config.env.contains_key("THURBOX_TASK"));
+    }
+
+    /// A registry holding one plugin's contribution, rooted at `dir`.
+    #[cfg(feature = "plugins")]
+    fn registry_with(
+        plugin: &str,
+        dir: &std::path::Path,
+        env: &[(&str, &str)],
+    ) -> crate::session::spawn_contribution::Registry {
+        use crate::session::spawn_contribution::{Registry, SpawnContribution};
+        let mut registry = Registry::default();
+        registry.insert(
+            dir.to_path_buf(),
+            SpawnContribution {
+                plugin: plugin.to_string(),
+                env: env
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                path_prepends: Vec::new(),
+            },
+        );
+        registry
+    }
+
+    #[cfg(feature = "plugins")]
+    fn spawn_config() -> SessionConfig {
+        SessionConfig {
+            session_id: Some(SessionId::default()),
+            ..SessionConfig::default()
+        }
+    }
+
+    #[cfg(feature = "plugins")]
+    #[test]
+    fn a_contributed_variable_reaches_the_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _paths = crate::paths::TestPathGuard::new(tmp.path());
+        let _registry = crate::session::spawn_contribution::TestRegistryGuard::new(registry_with(
+            "ci",
+            tmp.path(),
+            &[("CI_TOKEN_FILE", "/run/secrets/ci")],
+        ));
+
+        let mut config = spawn_config();
+        inject_thurbox_env(&mut config, "agent-conv-uuid", None);
+        assert_eq!(
+            config.env.get("CI_TOKEN_FILE"),
+            Some(&"/run/secrets/ci".to_string())
+        );
+    }
+
+    #[cfg(feature = "plugins")]
+    #[test]
+    fn a_contribution_cannot_take_over_the_session_identity() {
+        // Overwriting THURBOX_SESSION would make `thurbox-cli` calls inside the
+        // session act as a *different* session.
+        let tmp = tempfile::tempdir().unwrap();
+        let _paths = crate::paths::TestPathGuard::new(tmp.path());
+        let sid = SessionId::default();
+        let _registry = crate::session::spawn_contribution::TestRegistryGuard::new(registry_with(
+            "impostor",
+            tmp.path(),
+            &[
+                ("THURBOX_SESSION", "someone-else"),
+                ("THURBOX_SESSION_ID", "someone-else"),
+                (crate::paths::DATA_DIR_OVERRIDE_ENV, "/tmp/elsewhere"),
+            ],
+        ));
+
+        let mut config = SessionConfig {
+            session_id: Some(sid),
+            ..SessionConfig::default()
+        };
+        inject_thurbox_env(&mut config, "agent-conv-uuid", None);
+
+        assert_eq!(config.env.get("THURBOX_SESSION"), Some(&sid.to_string()));
+        assert_eq!(
+            config.env.get("THURBOX_SESSION_ID"),
+            Some(&"agent-conv-uuid".to_string())
+        );
+        assert_ne!(
+            config.env.get(crate::paths::DATA_DIR_OVERRIDE_ENV),
+            Some(&"/tmp/elsewhere".to_string())
+        );
+    }
+
+    #[cfg(feature = "plugins")]
+    #[test]
+    fn a_code_execution_variable_never_reaches_the_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _paths = crate::paths::TestPathGuard::new(tmp.path());
+        let _registry = crate::session::spawn_contribution::TestRegistryGuard::new(registry_with(
+            "evil",
+            tmp.path(),
+            &[("LD_PRELOAD", "/tmp/pwn.so"), ("PATH", "/tmp/evil")],
+        ));
+
+        let mut config = spawn_config();
+        inject_thurbox_env(&mut config, "agent-conv-uuid", None);
+        assert!(!config.env.contains_key("LD_PRELOAD"));
+        assert!(!config.env.contains_key("PATH"));
+    }
+
+    #[cfg(feature = "plugins")]
+    #[test]
+    fn an_off_local_session_still_takes_a_plain_variable() {
+        // The local-path vars the kernel injects are skipped for a remote
+        // session; a contributed variable is opaque, so it travels.
+        let tmp = tempfile::tempdir().unwrap();
+        let _paths = crate::paths::TestPathGuard::new(tmp.path());
+        let _registry = crate::session::spawn_contribution::TestRegistryGuard::new(registry_with(
+            "ci",
+            tmp.path(),
+            &[("CI_TOKEN_FILE", "/run/secrets/ci")],
+        ));
+
+        let mut config = SessionConfig {
+            session_id: Some(SessionId::default()),
+            backend: Some("ssh:devbox".into()),
+            ..SessionConfig::default()
+        };
+        inject_thurbox_env(&mut config, "agent-conv-uuid", None);
+        assert_eq!(
+            config.env.get("CI_TOKEN_FILE"),
+            Some(&"/run/secrets/ci".to_string())
+        );
+    }
+
+    #[cfg(feature = "plugins")]
+    #[test]
+    fn with_nothing_published_the_environment_is_the_kernels_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _paths = crate::paths::TestPathGuard::new(tmp.path());
+        let _registry = crate::session::spawn_contribution::TestRegistryGuard::new(
+            crate::session::spawn_contribution::Registry::default(),
+        );
+
+        let mut config = spawn_config();
+        inject_thurbox_env(&mut config, "agent-conv-uuid", None);
+        let mut keys: Vec<&str> = config.env.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "THURBOX_CONFIG_DIR",
+                "THURBOX_DATA_DIR",
+                "THURBOX_METRICS_DIR",
+                "THURBOX_SESSION",
+                "THURBOX_SESSION_ID",
+            ]
+        );
     }
 
     #[test]

@@ -339,6 +339,14 @@ async fn main() -> Result<()> {
     arm_automation_heartbeat();
     startup.heartbeat_ms = t_phase.elapsed().as_millis();
 
+    // Read what plugins add to a spawned agent's environment, before anything
+    // can spawn. Synchronous, unlike the host below, because it starts no VM —
+    // it is a directory listing and a TOML parse per plugin, and publishing it
+    // late would mean a session created in the first moments of a run got a
+    // different environment from the next one.
+    #[cfg(feature = "plugins")]
+    thurbox::plugin::spawn::publish_from_discovery();
+
     // v2 plugin host. Started detached and never awaited here: loading a plugin
     // runs its `init`, which may consume its whole interrupt budget, and the
     // first frame must not wait behind arbitrary plugin code. `App` holds no

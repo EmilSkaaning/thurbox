@@ -22,6 +22,12 @@ fn main() {
         std::process::exit(code);
     }
 
+    // Read what plugins add to a spawned agent's environment. A filesystem
+    // walk, so it happens once here rather than on the spawn path — and it
+    // starts nothing: the contribution is manifest data.
+    #[cfg(feature = "plugins")]
+    thurbox::plugin::spawn::publish_from_discovery();
+
     let cli = thurbox::cli::Cli::parse();
 
     // Publish settings before Database::open (audit pruning reads retention).

@@ -43,7 +43,14 @@ pub fn run(action: Action) -> Result<CommandOutput, String> {
     match action {
         Action::List => Ok(render_list(&started_report(bounds))),
         Action::Status { name } => status(&started_report(bounds), name.as_deref()),
-        Action::Doctor => Ok(render_doctor(&discovered_report(bounds))),
+        Action::Doctor => {
+            // Discovery is walked once and used twice: the registry needs the
+            // manifests, which the report does not carry.
+            let outcome = crate::plugin::discovery::discover();
+            let registry = crate::plugin::spawn::registry_for(outcome.loadable.iter());
+            let report = crate::plugin::PluginHost::from_discovery(outcome, bounds).report();
+            Ok(render_doctor(&report, &registry))
+        }
         Action::Reload { name } => reload(bounds, name.as_deref()),
     }
 }
@@ -99,11 +106,6 @@ fn started_report(bounds: crate::plugin::ExecutionBounds) -> crate::plugin::Plug
     let mut host = crate::plugin::PluginHost::discover(bounds);
     host.start_all();
     host.report()
-}
-
-/// Discover and report without starting anything.
-fn discovered_report(bounds: crate::plugin::ExecutionBounds) -> crate::plugin::PluginReport {
-    crate::plugin::PluginHost::discover(bounds).report()
 }
 
 /// One plugin status as JSON.
@@ -252,13 +254,30 @@ fn human_status(status: &crate::plugin::PluginStatus) -> String {
 }
 
 /// `plugin doctor`.
-fn render_doctor(report: &crate::plugin::PluginReport) -> CommandOutput {
+///
+/// `spawn` re-derives every contribution verdict from the manifests rather
+/// than reading a log of past spawns. That is what makes "why is my variable
+/// not in the session" answerable without spawning one — and it is why the
+/// section costs nothing in VM terms, keeping doctor's rule that it starts
+/// nothing.
+fn render_doctor(
+    report: &crate::plugin::PluginReport,
+    registry: &crate::session::spawn_contribution::Registry,
+) -> CommandOutput {
+    let spawn = resolve_for_report(registry);
+    let accepted: Vec<String> = spawn.env.keys().cloned().collect();
+    let refused: Vec<String> = spawn.rejections.iter().map(|r| r.to_string()).collect();
+
     let json = json!({
         "problems": report.problems,
         "healthy": report.plugins.len(),
+        "spawn": {
+            "env": accepted,
+            "refused": refused,
+        },
     });
 
-    let human = if report.problems.is_empty() {
+    let mut human = if report.problems.is_empty() {
         format!(
             "No problems found ({} plugin(s) discovered).",
             report.plugins.len()
@@ -271,7 +290,27 @@ fn render_doctor(report: &crate::plugin::PluginReport) -> CommandOutput {
         s.trim_end().to_string()
     };
 
+    if !registry.is_empty() {
+        human.push_str("\n\nSpawn contributions:");
+        for key in &accepted {
+            human.push_str(&format!("\n  + {key}"));
+        }
+        for reason in &refused {
+            human.push_str(&format!("\n  ! {reason}"));
+        }
+        if accepted.is_empty() && refused.is_empty() {
+            human.push_str("\n  none");
+        }
+    }
+
     CommandOutput::new(json, human)
+}
+
+/// Resolve the published contributions the way a spawn would.
+fn resolve_for_report(
+    registry: &crate::session::spawn_contribution::Registry,
+) -> crate::session::spawn_contribution::ResolvedContributions {
+    registry.resolve(&crate::session_ops::reserved_spawn_env_keys())
 }
 
 /// Run a plugin-owned `thurbox-cli <verb>`, if the first argument is one.
@@ -380,12 +419,12 @@ mod tests {
         host.report()
     }
 
-    fn discovered_over(root: &Path) -> crate::plugin::PluginReport {
-        crate::plugin::PluginHost::from_discovery(
-            crate::plugin::discovery::discover_in(&[], Some(root)),
-            bounds(),
-        )
-        .report()
+    /// Run doctor over an explicit root, mirroring what `Action::Doctor` does.
+    fn doctor_over(root: &Path) -> CommandOutput {
+        let outcome = crate::plugin::discovery::discover_in(&[], Some(root));
+        let registry = crate::plugin::spawn::registry_for(outcome.loadable.iter());
+        let report = crate::plugin::PluginHost::from_discovery(outcome, bounds()).report();
+        render_doctor(&report, &registry)
     }
 
     #[test]
@@ -485,7 +524,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("plugin.toml"), "name = \"Bad\"\napi_version = 1").unwrap();
 
-        let out = render_doctor(&discovered_over(tmp.path()));
+        let out = doctor_over(tmp.path());
         let problems = out.json["problems"].as_array().unwrap();
 
         assert_eq!(problems.len(), 1);
@@ -507,7 +546,10 @@ mod tests {
             crate::plugin::discovery::discover_in(&[bundled_root.join("tasks")], Some(&user_root)),
             bounds(),
         );
-        let out = render_doctor(&host.report());
+        let out = render_doctor(
+            &host.report(),
+            &crate::session::spawn_contribution::Registry::default(),
+        );
 
         let problems = out.json["problems"].as_array().unwrap();
         assert_eq!(problems.len(), 1);
@@ -528,7 +570,7 @@ mod tests {
             .unwrap();
         }
 
-        let out = render_doctor(&discovered_over(tmp.path()));
+        let out = doctor_over(tmp.path());
         let problems = out.json["problems"].as_array().unwrap();
         assert_eq!(problems.len(), 1);
         assert!(problems[0]
@@ -542,7 +584,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_plugin(tmp.path(), "fine", "", "return {}");
 
-        let out = render_doctor(&discovered_over(tmp.path()));
+        let out = doctor_over(tmp.path());
         assert!(out.json["problems"].as_array().unwrap().is_empty());
         assert_eq!(out.json["healthy"], 1);
         assert!(out.human.contains("No problems"));
@@ -584,12 +626,62 @@ mod tests {
     }
 
     #[test]
+    fn doctor_lists_what_a_contribution_adds_and_what_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(
+            tmp.path(),
+            "ci",
+            "capabilities = [\"spawn\"]\n[spawn.env]\nCI_TOKEN_FILE = \"/run/secrets/ci\"\nLD_PRELOAD = \"/tmp/pwn.so\"\n",
+            "return {}",
+        );
+
+        let out = doctor_over(tmp.path());
+        let env = out.json["spawn"]["env"].as_array().unwrap();
+        assert_eq!(env, &[serde_json::json!("CI_TOKEN_FILE")]);
+
+        let refused = out.json["spawn"]["refused"].as_array().unwrap();
+        assert_eq!(refused.len(), 1);
+        let reason = refused[0].as_str().unwrap();
+        assert!(reason.contains("ci"), "{reason}");
+        assert!(reason.contains("LD_PRELOAD"), "{reason}");
+        assert!(out.human.contains("Spawn contributions"), "{}", out.human);
+    }
+
+    #[test]
+    fn doctor_refuses_a_contribution_aimed_at_the_session_identity() {
+        // The reserved set is derived from the kernel injection itself, so
+        // this stays true if the injected set ever changes.
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(
+            tmp.path(),
+            "impostor",
+            "capabilities = [\"spawn\"]\n[spawn.env]\nTHURBOX_SESSION = \"someone-else\"\n",
+            "return {}",
+        );
+
+        let out = doctor_over(tmp.path());
+        assert!(out.json["spawn"]["env"].as_array().unwrap().is_empty());
+        let reason = out.json["spawn"]["refused"][0].as_str().unwrap();
+        assert!(reason.contains("THURBOX_SESSION"), "{reason}");
+    }
+
+    #[test]
+    fn doctor_says_nothing_about_spawns_when_nothing_contributes() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(tmp.path(), "quiet", "", "return {}");
+
+        let out = doctor_over(tmp.path());
+        assert!(out.json["spawn"]["env"].as_array().unwrap().is_empty());
+        assert!(!out.human.contains("Spawn contributions"), "{}", out.human);
+    }
+
+    #[test]
     fn doctor_does_not_start_plugins() {
         let tmp = tempfile::tempdir().unwrap();
         // An entry chunk that would fail loudly if it were ever run.
         write_plugin(tmp.path(), "never-run", "", "error('must not run')");
 
-        let out = render_doctor(&discovered_over(tmp.path()));
+        let out = doctor_over(tmp.path());
         assert!(
             out.json["problems"].as_array().unwrap().is_empty(),
             "doctor must not execute plugin code"

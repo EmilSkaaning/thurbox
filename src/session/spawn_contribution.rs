@@ -18,7 +18,7 @@
 //! rather than dropped — a contribution silently discarded is a plugin that
 //! looks installed and does nothing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// Environment variables a contribution may never set.
@@ -77,6 +77,13 @@ pub enum Rejection {
         /// The offending entry.
         entry: String,
     },
+    /// The kernel had already set this key for the spawn.
+    Reserved {
+        /// The plugin that tried.
+        plugin: String,
+        /// The key it tried to overwrite.
+        key: String,
+    },
     /// Another plugin already set this key, and contributions are append-only.
     AlreadySet {
         /// The plugin that lost.
@@ -98,6 +105,10 @@ impl std::fmt::Display for Rejection {
             Rejection::PathEscape { plugin, entry } => write!(
                 f,
                 "plugin `{plugin}` may only prepend PATH entries under its own data directory, not `{entry}`"
+            ),
+            Rejection::Reserved { plugin, key } => write!(
+                f,
+                "plugin `{plugin}` may not set `{key}`: thurbox sets it to identify the session"
             ),
             Rejection::AlreadySet {
                 plugin,
@@ -149,12 +160,35 @@ pub fn resolve<'a>(
     contributions: impl IntoIterator<Item = &'a SpawnContribution>,
     data_dir_for: impl Fn(&str) -> Option<std::path::PathBuf>,
 ) -> ResolvedContributions {
+    resolve_over(&BTreeSet::new(), contributions, data_dir_for)
+}
+
+/// Apply the contribution policy over an environment the caller already owns.
+///
+/// `reserved` names keys the kernel has already written for this spawn. They
+/// are passed in rather than hardcoded so the reservation is mechanically
+/// whatever the kernel actually set — a literal list here would drift the first
+/// time the injected set changed, and the consequence of drift is a plugin
+/// overwriting `THURBOX_SESSION`, which is a session claiming another session's
+/// identity rather than a cosmetic clash.
+pub fn resolve_over<'a>(
+    reserved: &BTreeSet<String>,
+    contributions: impl IntoIterator<Item = &'a SpawnContribution>,
+    data_dir_for: impl Fn(&str) -> Option<std::path::PathBuf>,
+) -> ResolvedContributions {
     let mut out = ResolvedContributions::default();
     // Who set each key, so a later contributor can be told who beat it.
     let mut owner: BTreeMap<String, String> = BTreeMap::new();
 
     for contribution in contributions {
         for (key, value) in &contribution.env {
+            if reserved.contains(key) {
+                out.rejections.push(Rejection::Reserved {
+                    plugin: contribution.plugin.clone(),
+                    key: key.clone(),
+                });
+                continue;
+            }
             if is_denied(key) {
                 out.rejections.push(Rejection::DeniedKey {
                     plugin: contribution.plugin.clone(),
@@ -238,6 +272,111 @@ fn normalize(path: &Path) -> std::path::PathBuf {
         }
     }
     out
+}
+
+/// Every plugin's published contribution, and where each plugin lives.
+///
+/// Ordered by plugin name so the append-only rule picks the same winner on
+/// every run — discovery order depends on directory listings, and a conflict
+/// resolved differently on two machines would be an unreproducible spawn
+/// environment.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Registry {
+    contributions: BTreeMap<String, SpawnContribution>,
+    dirs: BTreeMap<String, std::path::PathBuf>,
+}
+
+impl Registry {
+    /// Add one plugin's contribution, replacing any previous one for that
+    /// plugin (a reload re-publishes rather than accumulating).
+    pub fn insert(&mut self, dir: std::path::PathBuf, contribution: SpawnContribution) {
+        self.dirs.insert(contribution.plugin.clone(), dir);
+        self.contributions
+            .insert(contribution.plugin.clone(), contribution);
+    }
+
+    /// Whether anything is published.
+    pub fn is_empty(&self) -> bool {
+        self.contributions.is_empty()
+    }
+
+    /// The contributions, in plugin-name order.
+    pub fn contributions(&self) -> impl Iterator<Item = &SpawnContribution> {
+        self.contributions.values()
+    }
+
+    /// The directory bounding a plugin's `PATH` prepends.
+    pub fn dir_of(&self, plugin: &str) -> Option<std::path::PathBuf> {
+        self.dirs.get(plugin).cloned()
+    }
+
+    /// Apply the policy to everything published, over an environment whose
+    /// `reserved` keys the caller already owns.
+    pub fn resolve(&self, reserved: &BTreeSet<String>) -> ResolvedContributions {
+        resolve_over(reserved, self.contributions(), |p| self.dir_of(p))
+    }
+}
+
+/// The process-wide registry.
+///
+/// Written once per process, after plugin discovery, by whichever binary hosts
+/// plugins; read on every spawn. A `RwLock` rather than a channel because the
+/// spawn path is a reader that must not block on anything, and one of its
+/// callers runs on the UI thread.
+///
+/// It lives here, in pure data, rather than in the plugin host: `session_ops`
+/// must be able to read it, and routing that through `plugin` would put a
+/// filesystem walk on the spawn path of a build that has no plugins at all.
+static REGISTRY: std::sync::RwLock<Option<Registry>> = std::sync::RwLock::new(None);
+
+/// Publish the contributions for this process.
+///
+/// Replaces whatever was published before, so a re-discovery is idempotent.
+pub fn publish(registry: Registry) {
+    if let Ok(mut slot) = REGISTRY.write() {
+        *slot = Some(registry);
+    }
+}
+
+/// What is published, or `None` when nothing is — the normal state of a build
+/// without the plugin host, and the fast path the spawn env relies on.
+pub fn published() -> Option<Registry> {
+    REGISTRY.read().ok().and_then(|slot| slot.clone())
+}
+
+/// Publishes a registry for one test and clears it on drop.
+///
+/// The registry is process-global, and `cargo test` runs a suite in threads.
+/// Holding a mutex for the guard's lifetime makes every test that depends on
+/// the published set run one at a time, so a stale registry cannot leak into a
+/// test asserting that a spawn's environment is untouched.
+#[cfg(test)]
+pub(crate) struct TestRegistryGuard(
+    // Held for the guard's lifetime; never read. Dropping it is the whole
+    // point — that is what lets the next test publish.
+    #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
+);
+
+#[cfg(test)]
+impl TestRegistryGuard {
+    /// Publish `registry` for the duration of the guard.
+    pub(crate) fn new(registry: Registry) -> Self {
+        static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // A test that panicked poisoned the lock but left nothing corrupt:
+        // the guard's own drop restores the registry regardless.
+        let held = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
+        publish(registry);
+        Self(held)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestRegistryGuard {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = REGISTRY.write() {
+            *slot = None;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -384,5 +523,100 @@ mod tests {
         assert!(out.env.is_empty());
         assert!(out.path_prepends.is_empty());
         assert!(out.rejections.is_empty());
+    }
+
+    #[test]
+    fn a_key_the_kernel_already_set_is_refused() {
+        // Overwriting THURBOX_SESSION would make `thurbox-cli` calls inside
+        // the session act as a different session — an authorization bug, not
+        // a configuration one.
+        let reserved: BTreeSet<String> = ["THURBOX_SESSION".to_string()].into_iter().collect();
+        let c = contribution(
+            "impostor",
+            &[("THURBOX_SESSION", "someone-else"), ("MY_TOKEN", "abc")],
+            &[],
+        );
+        let out = resolve_over(&reserved, [&c], homes);
+
+        assert!(!out.env.contains_key("THURBOX_SESSION"));
+        assert_eq!(out.env.get("MY_TOKEN"), Some(&"abc".to_string()));
+        assert_eq!(
+            out.rejections,
+            vec![Rejection::Reserved {
+                plugin: "impostor".to_string(),
+                key: "THURBOX_SESSION".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn resolve_reserves_nothing_by_default() {
+        let c = contribution("demo", &[("THURBOX_SESSION", "x")], &[]);
+        // Plain `resolve` has no kernel environment to protect; the guard is
+        // the caller's own keys, not a hardcoded name.
+        assert_eq!(resolve([&c], homes).env.len(), 1);
+    }
+
+    #[test]
+    fn a_registry_resolves_in_plugin_name_order() {
+        // Directory listings are unordered, so the append-only winner has to
+        // come from the name, not from discovery.
+        let mut registry = Registry::default();
+        registry.insert(
+            PathBuf::from("/data/zulu"),
+            contribution("zulu", &[("SHARED", "z")], &[]),
+        );
+        registry.insert(
+            PathBuf::from("/data/alpha"),
+            contribution("alpha", &[("SHARED", "a")], &[]),
+        );
+
+        let out = registry.resolve(&BTreeSet::new());
+        assert_eq!(out.env.get("SHARED"), Some(&"a".to_string()));
+        assert_eq!(
+            out.rejections,
+            vec![Rejection::AlreadySet {
+                plugin: "zulu".to_string(),
+                key: "SHARED".to_string(),
+                winner: "alpha".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_registry_bounds_each_plugin_by_its_own_directory() {
+        let mut registry = Registry::default();
+        registry.insert(
+            PathBuf::from("/data/demo"),
+            contribution("demo", &[], &["/data/demo/bin", "/data/other/bin"]),
+        );
+
+        let out = registry.resolve(&BTreeSet::new());
+        assert_eq!(out.path_prepends, vec!["/data/demo/bin".to_string()]);
+        assert!(matches!(out.rejections[0], Rejection::PathEscape { .. }));
+    }
+
+    #[test]
+    fn republishing_a_plugin_replaces_its_contribution() {
+        // A reload re-publishes; accumulating would leave a withdrawn variable
+        // in every session spawned afterwards.
+        let mut registry = Registry::default();
+        registry.insert(
+            PathBuf::from("/data/demo"),
+            contribution("demo", &[("OLD", "1")], &[]),
+        );
+        registry.insert(
+            PathBuf::from("/data/demo"),
+            contribution("demo", &[("NEW", "2")], &[]),
+        );
+
+        let out = registry.resolve(&BTreeSet::new());
+        assert!(!out.env.contains_key("OLD"));
+        assert_eq!(out.env.get("NEW"), Some(&"2".to_string()));
+    }
+
+    #[test]
+    fn an_empty_registry_is_reported_as_empty() {
+        assert!(Registry::default().is_empty());
     }
 }

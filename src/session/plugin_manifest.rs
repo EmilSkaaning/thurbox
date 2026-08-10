@@ -10,7 +10,7 @@
 //! `session/` architecture rule. Discovery, the runtime, and capability
 //! enforcement live in `crate::plugin`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -53,6 +53,13 @@ pub enum Capability {
     Render,
     /// Receive key events while one of this plugin's panes is focused.
     Input,
+    /// Add environment to the agent sessions thurbox spawns.
+    ///
+    /// Unlike the others this grants no VM binding — the contribution is
+    /// static manifest data. It is still a capability because it is the only
+    /// thing that makes the reach visible in the capability list, which is
+    /// where an install prompt reads a plugin's powers from.
+    Spawn,
 }
 
 impl Capability {
@@ -64,6 +71,7 @@ impl Capability {
             Capability::StateWrite => "state-write",
             Capability::Render => "render",
             Capability::Input => "input",
+            Capability::Spawn => "spawn",
         }
     }
 
@@ -75,6 +83,7 @@ impl Capability {
             Capability::StateWrite,
             Capability::Render,
             Capability::Input,
+            Capability::Spawn,
         ]
     }
 }
@@ -206,6 +215,35 @@ pub struct ServiceDecl {
     pub capabilities: BTreeSet<Capability>,
 }
 
+/// What a plugin adds to the environment of every agent session thurbox
+/// spawns.
+///
+/// Static data rather than a callback: the contribution is then known at
+/// discovery time, so the spawn path reads a snapshot instead of entering a VM
+/// — which matters because one of the spawn paths finalizes its environment on
+/// the UI thread. It is also the shape v1's `[[agent_patches]]` had, so a
+/// migrating extension is translating data rather than writing code.
+///
+/// Declaring this without [`Capability::Spawn`] is a manifest error: the reach
+/// has to be readable from the capability list, not only from the table's
+/// contents.
+///
+/// Environment only. `PATH` prepends are specified by the policy layer but have
+/// no manifest surface, because the session backend cannot deliver one: tmux
+/// replaces a pane's `PATH` with the server's own, ignoring both `new-window
+/// -e PATH=…` and `set-environment PATH`. Exposing the field would ship a
+/// declaration that silently does nothing, which is the exact failure the
+/// rejection machinery exists to prevent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpawnDecl {
+    /// Variables to add. Subject to the denylist and the append-only rule in
+    /// [`crate::session::spawn_contribution`] — declaring one is a request,
+    /// not a guarantee.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
 /// One plugin's manifest, as parsed and validated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -233,6 +271,9 @@ pub struct PluginManifest {
     /// `thurbox-cli` verbs this plugin owns.
     #[serde(default)]
     pub cli: Vec<CliVerbDecl>,
+    /// What this plugin adds to spawned agent sessions.
+    #[serde(default)]
+    pub spawn: Option<SpawnDecl>,
 }
 
 /// `thurbox-cli` subcommands the kernel owns.
@@ -276,6 +317,19 @@ impl PluginManifest {
     pub fn has_service(&self) -> bool {
         self.service.is_some()
     }
+
+    /// Whether either half was granted `capability`.
+    ///
+    /// For grants that are not per-half — a spawn contribution belongs to the
+    /// plugin, not to one of its VMs — asking "did this plugin request it at
+    /// all" is the question that matters.
+    pub fn grants(&self, capability: Capability) -> bool {
+        self.capabilities.contains(&capability)
+            || self
+                .service
+                .as_ref()
+                .is_some_and(|s| s.capabilities.contains(&capability))
+    }
 }
 
 /// Why a manifest could not be turned into a [`PluginManifest`].
@@ -316,6 +370,9 @@ pub enum ManifestErrorKind {
         /// The first pane declared without it.
         pane: String,
     },
+    /// A spawn contribution is declared without the capability that permits
+    /// it.
+    SpawnWithoutCapability,
     /// The plugin targets an API version this build does not implement.
     ApiVersion {
         /// What the manifest asked for.
@@ -385,6 +442,10 @@ impl fmt::Display for ManifestError {
             ManifestErrorKind::PaneWithoutRender { pane } => write!(
                 f,
                 "pane `{pane}` is declared without the `render` capability, so it could never draw"
+            ),
+            ManifestErrorKind::SpawnWithoutCapability => write!(
+                f,
+                "a `[spawn]` contribution is declared without the `spawn` capability, so it would never be applied"
             ),
             ManifestErrorKind::ApiVersion {
                 declared,
@@ -467,6 +528,17 @@ impl PluginManifest {
             return Err(ManifestErrorKind::PaneWithoutRender {
                 pane: self.panes[0].id.clone(),
             });
+        }
+
+        // Same rule as a pane without `render`: a declaration the host would
+        // never act on is caught here, where the error names its own fix,
+        // rather than at a spawn nobody is watching.
+        // Accepted from either the shared set or the service half's: a
+        // contribution is background-shaped, so an author who put every
+        // headless grant under `[service]` should not be told the capability
+        // is missing when it is right there.
+        if self.spawn.is_some() && !self.grants(Capability::Spawn) {
+            return Err(ManifestErrorKind::SpawnWithoutCapability);
         }
 
         // A verb is typed by a user, so it follows the same alphabet as every
@@ -968,6 +1040,79 @@ mod tests {
         "#;
         let m = parse(text).expect("valid");
         assert_eq!(PluginManifest::pane_title(&m.panes[0]), "board");
+    }
+
+    #[test]
+    fn a_spawn_contribution_needs_the_spawn_capability() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            [spawn.env]
+            CI_TOKEN_FILE = "/run/secrets/ci"
+        "#;
+        let e = parse(text).expect_err("a contribution that could never apply");
+        assert!(matches!(e.kind, ManifestErrorKind::SpawnWithoutCapability));
+        assert!(e.to_string().contains("spawn"));
+    }
+
+    #[test]
+    fn a_declared_spawn_contribution_is_readable_from_the_manifest() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            capabilities = ["spawn"]
+            [spawn.env]
+            CI_TOKEN_FILE = "/run/secrets/ci"
+        "#;
+        let m = parse(text).expect("valid");
+        let spawn = m.spawn.expect("declared");
+        assert_eq!(
+            spawn.env.get("CI_TOKEN_FILE"),
+            Some(&"/run/secrets/ci".to_string())
+        );
+    }
+
+    #[test]
+    fn the_spawn_capability_may_come_from_the_service_half() {
+        // A headless-shaped grant declared where the rest of the headless
+        // grants live still counts — the contribution belongs to the plugin,
+        // not to one of its VMs.
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            [service]
+            capabilities = ["spawn"]
+            [spawn.env]
+            CI_TOKEN_FILE = "/run/secrets/ci"
+        "#;
+        let m = parse(text).expect("valid");
+        assert!(m.grants(Capability::Spawn));
+    }
+
+    #[test]
+    fn the_spawn_capability_without_a_contribution_is_fine() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            capabilities = ["spawn"]
+        "#;
+        let m = parse(text).expect("a plugin may hold the grant and contribute nothing");
+        assert!(m.spawn.is_none());
+    }
+
+    #[test]
+    fn an_unknown_key_inside_the_spawn_table_is_rejected() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            capabilities = ["spawn"]
+            [spawn]
+            path = ["bin"]
+        "#;
+        // `path` is policy the backend cannot honour, so it is not a manifest
+        // key: an author gets an error rather than a line that does nothing.
+        let e = parse(text).expect_err("path is not a spawn key");
+        assert!(matches!(e.kind, ManifestErrorKind::Syntax(ref m) if m.contains("path")));
     }
 
     #[test]

@@ -19,6 +19,9 @@
 //!   that plugin execution stays off the render loop.
 //! - [`lifecycle`] sequences the two: discovered → loaded → running → stopped,
 //!   with every failure recorded against the plugin that caused it.
+//! - [`spawn`] turns manifests into the spawn-contribution registry the kernel
+//!   reads when it launches an agent — the one plugin surface that involves no
+//!   VM at all, because the spawn path must not enter one.
 //!
 //! Nothing in this module is compiled unless the `plugins` feature is on.
 
@@ -28,6 +31,7 @@ pub mod lifecycle;
 pub mod pane;
 pub mod runtime;
 pub mod service;
+pub mod spawn;
 pub mod view;
 
 pub use capabilities::GrantedCapabilities;
