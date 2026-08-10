@@ -64,6 +64,7 @@ Describe 'install.ps1 source' {
     It 'defines the <Name> function' -ForEach @(
         @{ Name = 'Get-Target' }
         @{ Name = 'Get-LatestVersion' }
+        @{ Name = 'Get-StableTag' }
         @{ Name = 'Get-ExpectedChecksum' }
         @{ Name = 'Add-ToUserPath' }
         @{ Name = 'Invoke-Install' }
@@ -101,6 +102,58 @@ Describe 'Get-Target' {
     It 'rejects an unknown architecture' {
         $env:PROCESSOR_ARCHITECTURE = 'SPARC'
         { Get-Target } | Should -Throw '*Unsupported architecture*'
+    }
+}
+
+# Nightlies ship as GitHub prereleases and the releases page lists them. The old
+# scrape pattern accepted a whole tag, so a Windows user whose API call failed
+# would have installed a v2 nightly believing it to be stable. These pin that the
+# scrape resolves only a stable release.
+Describe 'Get-StableTag' {
+    BeforeAll {
+        # Shaped like GitHub's markup so the selector is exercised as it is in
+        # production, where every tag arrives inside an href.
+        function New-ReleasesPage {
+            param([string[]]$Tags)
+            ($Tags | ForEach-Object {
+                "<a href=`"/Thurbeen/thurbox/releases/tag/$_`">$_</a>"
+            }) -join "`n"
+        }
+    }
+
+    It 'skips a prerelease listed above a stable release' {
+        $page = New-ReleasesPage -Tags @('v2.0.0-nightly.20260808', 'v1.4.12')
+        Get-StableTag -PageContent $page | Should -Be 'v1.4.12'
+    }
+
+    It 'skips several prereleases' {
+        $page = New-ReleasesPage -Tags @(
+            'v2.0.0-nightly.20260809', 'v2.0.0-nightly.20260808', 'v2.0.0-rc.1', 'v1.4.12')
+        Get-StableTag -PageContent $page | Should -Be 'v1.4.12'
+    }
+
+    It 'takes the newest tag when it is stable' {
+        $page = New-ReleasesPage -Tags @('v1.5.0', 'v1.4.12')
+        Get-StableTag -PageContent $page | Should -Be 'v1.5.0'
+    }
+
+    It 'returns nothing for a prerelease-only page' {
+        $page = New-ReleasesPage -Tags @('v2.0.0-nightly.20260808', 'v2.0.0-rc.1')
+        Get-StableTag -PageContent $page | Should -BeNullOrEmpty
+    }
+
+    It 'returns nothing for a page with no release links' {
+        Get-StableTag -PageContent '<html><body>no releases here</body></html>' |
+            Should -BeNullOrEmpty
+    }
+
+    It 'refuses the near-miss shape <Tag>' -ForEach @(
+        @{ Tag = 'v1.2' }
+        @{ Tag = 'v1.2.3.4' }
+        @{ Tag = 'v1.2.3+build5' }
+        @{ Tag = 'v1.2.3-rc.1' }
+    ) {
+        Get-StableTag -PageContent "releases/tag/$Tag" | Should -BeNullOrEmpty
     }
 }
 

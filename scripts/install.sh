@@ -104,18 +104,38 @@ download() {
   fi
 }
 
+# A stable release tag and nothing else. Nightlies ship as GitHub prereleases
+# and the releases page lists them, so a guessed version must be filtered or a
+# user asking for stable gets a v2 nightly. Stated once, applied to every guess.
+STABLE_TAG_RE='^v[0-9]\{1,\}\.[0-9]\{1,\}\.[0-9]\{1,\}$'
+
+is_stable_version() {
+  echo "$1" | grep -q "$STABLE_TAG_RE"
+}
+
+# Newest stable tag linked on a releases page (stdin). Candidates are extracted
+# permissively then filtered by the rule above, so a prerelease is skipped
+# rather than truncated to a version that has no release. Page order is
+# GitHub's newest-first, as before.
+select_stable_tag() {
+  grep -o 'releases/tag/v[0-9A-Za-z.+-]\{1,\}' | sed 's|releases/tag/||' |
+    grep "$STABLE_TAG_RE" | head -1
+}
+
 # Get latest version from GitHub API or scrape releases page
 get_version() {
+  # An explicit pin is an instruction, not a guess, so it is never filtered:
+  # installing a nightly on purpose has to stay possible.
   [ -n "$VERSION" ] && { echo "$VERSION"; return 0; }
 
   # Try API
   local response="$(fetch_url "https://api.github.com/repos/${REPO}/releases/latest")"
   local v="$(echo "$response" | grep -o '"tag_name": *"[^"]*' | head -1 | cut -d'"' -f4)"
-  [ -n "$v" ] && { echo "$v"; return 0; }
+  if [ -n "$v" ] && is_stable_version "$v"; then echo "$v"; return 0; fi
 
   # Fallback: scrape releases page
   response=$(fetch_url "https://github.com/${REPO}/releases" 2>/dev/null)
-  v=$(echo "$response" | grep -o 'releases/tag/v[0-9.]*' | head -1 | sed 's|releases/tag/||')
+  v=$(printf '%s' "$response" | select_stable_tag)
   [ -n "$v" ] && { echo "$v"; return 0; }
 
   error "Could not fetch version. Try: VERSION=v0.1.0 $0"

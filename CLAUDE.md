@@ -261,6 +261,21 @@ platforms it installs onto; it errors cleanly on any other);
 `cd.yml`) and extracts it with the built-in `Expand-Archive` (no tar needed).
 ARM64 Windows installs the x86_64 build (runs under x64 emulation).
 
+**Version resolution accepts only `v<major>.<minor>.<patch>` when nothing is
+pinned.** The API path (`releases/latest`) excludes prereleases, but the scrape
+fallback reads the releases page, which lists them — so both paths filter
+through one stated rule per installer (`STABLE_TAG_RE`/`is_stable_version` +
+`select_stable_tag` in `install.sh`, `$StableTagPattern` + `Get-StableTag` in
+`install.ps1`), and the scrape takes the first *stable* tag in page order rather
+than the first tag. Without it a nightly published as a prerelease resolves as a
+stable install: `install.sh`'s old `[0-9.]` class truncated
+`v2.0.0-nightly.20260808` to a nonexistent `v2.0.0` (404 at asset download),
+and `install.ps1` accepted the whole tag and installed the nightly. An
+explicitly pinned `VERSION`/`-Version` is passed through **unfiltered** — that
+is the supported way to install a nightly on purpose. Regression-tested with
+releases-page fixtures in `scripts/install.bats` and
+`scripts/install.Tests.ps1`.
+
 **`install.sh` (POSIX `sh`) specifics:**
 
 - Colorized output (auto-disabled when stderr is not a TTY, `NO_COLOR` is set,
