@@ -16,6 +16,8 @@ pub mod theme_config;
 // The plugin view tree is v2 surface: pure data, but it exists only to
 // describe what a plugin draws, so stable builds do not carry it.
 #[cfg(feature = "plugins")]
+pub mod motion;
+#[cfg(feature = "plugins")]
 pub mod view_tree;
 
 pub use agent_def::{AgentDef, AgentRegistry};

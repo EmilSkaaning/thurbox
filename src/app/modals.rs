@@ -1671,6 +1671,8 @@ pub enum SettingsField {
     NotifSuppressForActive,
     NotifSound,
     NotifMinInterval,
+    // ── [motion] ────────────────────────────────────────────────────────
+    MotionReduce,
     // ── top-level scalars ───────────────────────────────────────────────
     ScrollbackLines,
     TwoPanelMinCols,
@@ -1681,7 +1683,7 @@ pub enum SettingsField {
 impl SettingsField {
     /// Field nav order — also the render order (headers are interleaved by the
     /// renderer). Used by [`cycle_field`] and the scroll-windowing logic.
-    pub const ORDER: [SettingsField; 21] = [
+    pub const ORDER: [SettingsField; 22] = [
         SettingsField::FeatTasks,
         SettingsField::FeatAutomations,
         SettingsField::FeatFileViewer,
@@ -1699,6 +1701,7 @@ impl SettingsField {
         SettingsField::NotifSuppressForActive,
         SettingsField::NotifSound,
         SettingsField::NotifMinInterval,
+        SettingsField::MotionReduce,
         SettingsField::ScrollbackLines,
         SettingsField::TwoPanelMinCols,
         SettingsField::ThreePanelMinCols,
@@ -1769,6 +1772,11 @@ impl SettingsField {
                 "min_interval_secs",
                 "Min interval",
                 "Min seconds between notifications per session",
+            ),
+            MotionReduce => (
+                "reduce_motion",
+                "Reduce motion",
+                "Freeze every animation on its first frame",
             ),
             ScrollbackLines => (
                 "scrollback_lines",
@@ -1895,6 +1903,10 @@ impl SettingsModal {
             NotifAlsoOnWaiting => n.also_on_waiting = !n.also_on_waiting,
             NotifSuppressForActive => n.suppress_for_active = !n.suppress_for_active,
             NotifSound => n.sound = !n.sound,
+            MotionReduce => {
+                let m = &mut self.draft.motion;
+                m.reduce_motion = !m.reduce_motion;
+            }
             NotifMinInterval | ScrollbackLines | TwoPanelMinCols | ThreePanelMinCols
             | AuditRetentionDays => {}
         }
@@ -1953,6 +1965,7 @@ impl SettingsModal {
             NotifAlsoOnWaiting => on(n.also_on_waiting),
             NotifSuppressForActive => on(n.suppress_for_active),
             NotifSound => on(n.sound),
+            MotionReduce => on(self.draft.motion.reduce_motion),
             NotifMinInterval => n.min_interval_secs.to_string(),
             ScrollbackLines => self.draft.scrollback_lines.to_string(),
             TwoPanelMinCols => self.draft.two_panel_min_cols.to_string(),
@@ -3362,7 +3375,7 @@ mod tests {
 
     #[test]
     fn settings_order_lists_every_field_once() {
-        assert_eq!(SettingsField::ORDER.len(), 21);
+        assert_eq!(SettingsField::ORDER.len(), 22);
         for f in SettingsField::ORDER {
             assert_eq!(
                 SettingsField::ORDER.iter().filter(|x| **x == f).count(),

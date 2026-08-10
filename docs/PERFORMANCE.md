@@ -80,6 +80,8 @@ wall-clock-free `u64` counters bumped at the render/tick hot paths:
 | `restore_seed_prefetches` | restore history captures prefetched in parallel, one per matched pane (ADR-P9) |
 | `agent_meta_syncs` | a session's OSC title/notification actually re-read (gated on the reader thread's meta generation, ADR-P10) |
 | `data_version_checks` | the status refresh actually ran its `PRAGMA data_version` read (throttled ~10×/s, ADR-P10) |
+| `motion_leases` / `motion_frames` | animation leases granted to a plugin pane / repaints declared motion caused (one per tick where a resolved frame moved) — `plugins` builds only |
+| `motion_denied` / `motion_frozen` | declared motions the kernel declined (reduced motion, or a hidden pane) / leases frozen by the aggregate rate budget — `plugins` builds only |
 
 `hook_state_loads` is the regression gate for ADR-P6: it climbs once at startup
 and then only when an external `session signal` commits, instead of ~1 per tick.
@@ -106,6 +108,50 @@ skipped) rather than a wobbly proxy (it was fast today).
 - *Timing assertions in CI* (`assert!(elapsed < X)`) — flaky; deleted before
   they were written.
 - *criterion / divan micro-benches in the gate* — see ADR-P5.
+
+---
+
+## ADR-P2a: Declared motion animates from the tick, never from a plugin
+
+**Choice**: A plugin pane animates by **declaring** motion on a node
+(`ADR-V18`); the kernel resolves which frame is showing on each tick and marks
+the UI dirty **only when a resolved frame actually moved**
+(`App::tick_motion` → `app::motion_state::MotionState::sync`). A plugin has no
+API for requesting a frame.
+
+**Why**: The alternative is a plugin pushing a tree per frame, which costs a VM
+call, a tree rebuild, a conversion and a diff on top of the paint — and costs
+them *while the pane is hidden too*, because a plugin cannot tell whether it is
+on screen. One installed plugin with a spinner would have returned thurbox to
+painting every tick and undone ADR-P1 for everyone.
+
+Three properties keep it bounded:
+
+- **Evaluated, not pushed.** The frame table is derived from a tree the kernel
+  already holds; no plugin code runs to advance an animation.
+- **Change-gated.** The tick runs at ~100 Hz but an 8 fps cycle resolves to the
+  same frame for ~12 consecutive ticks, so eleven of twelve syncs mark nothing.
+- **Off-screen is free.** A hidden pane is not evaluated at all, holds no lease,
+  and leaves the idle paint rate byte-identical to having no plugin installed.
+
+Rate is capped at 30 fps per pane and 30 fps aggregate, degraded by freezing the
+greediest leases (`session::motion::allocate_rates`, pure and unit-tested), so
+N animated panes can never cost N × 30 fps. `[motion] reduce_motion` denies
+every lease outright.
+
+**How it is gated**: the four `motion_*` counters above, asserted in
+`src/app/acceptance.rs` (`motion_repaints_at_its_declared_rate_not_the_tick_rate`,
+`a_hidden_animated_pane_leaves_the_idle_loop_untouched`) — deterministic
+counters over a fast-forwarded `app::clock`, per ADR-P2.
+
+**Rejected**:
+
+- *Teaching `should_redraw` a motion deadline* — it moves the paint decision
+  into the paint check, where `tick_core`'s counters cannot observe it and where
+  it re-fires before the frame table has moved.
+- *A timer thread per animated pane* — a wakeup the loop must poll, for
+  behaviour the existing ~100 Hz tick already covers at ten times the fastest
+  grantable rate.
 
 ---
 
@@ -832,6 +878,7 @@ worktree/spawn offload should ride with that branch or follow it.
 | Watch perf live in the TUI | Press `F12` (perf HUD overlay; `[features] perf_hud`) |
 | Inspect a running TUI from outside | `thurbox-cli perf` (needs THURBOX_PERF_LOG or an open HUD in that TUI) |
 | Verify the status-hook cache (ADR-P6) | `cargo nextest run -E 'test(perf_hook_states)'`; `hook_state_loads` stays flat while idle, +1 per external `session signal` |
+| Verify plugin motion stays off the frame path | `cargo nextest run --features plugins -E 'test(motion)'`; an 8 fps animation bumps `motion_frames` ~8×/simulated second (not once per tick), and a hidden animated pane leaves it at 0 |
 | See binary size | Check the `Binary Size` CI job summary, or `cargo bloat --release --crates` |
 | Profile CPU | `cargo flamegraph --profile release-with-debug --bin thurbox` |
 | Verify no perf regression | `cargo nextest run -E 'test(perf_)'` |

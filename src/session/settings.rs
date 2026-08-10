@@ -46,6 +46,9 @@ pub struct Settings {
     /// Clipboard transport settings (`[clipboard]` table). Absent = `auto`.
     #[serde(default)]
     pub clipboard: ClipboardSettings,
+    /// Animation settings (`[motion]` table). Absent = motion runs.
+    #[serde(default)]
+    pub motion: MotionSettings,
 }
 
 /// Whole-feature switches (`[features]` in settings.toml). Each flag hides the
@@ -169,6 +172,22 @@ pub struct ClipboardSettings {
     /// Transport selection. See [`ClipboardProvider`].
     #[serde(default)]
     pub provider: ClipboardProvider,
+}
+
+/// Animation settings (`[motion]` in settings.toml).
+///
+/// Deliberately not a `[features]` flag: a feature flag hides a surface and
+/// the user loses the feature, whereas reduced motion loses nothing — every
+/// pane still renders, at its first frame. It is also whole-app rather than
+/// per-plugin, because a user who needs reduced motion needs it from thurbox,
+/// not from seven plugins individually.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MotionSettings {
+    /// Suppress every animation: plugin-declared motion renders its first
+    /// frame and takes no animation lease, and thurbox's own working spinner
+    /// holds a single glyph.
+    #[serde(default)]
+    pub reduce_motion: bool,
 }
 
 /// How `Ctrl+O` launches the editor (the DB `editor_mode` key, set via
@@ -334,6 +353,7 @@ impl Default for Settings {
             features: FeatureFlags::default(),
             notifications: NotificationSettings::default(),
             clipboard: ClipboardSettings::default(),
+            motion: MotionSettings::default(),
         }
     }
 }

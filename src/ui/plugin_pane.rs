@@ -13,6 +13,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
+use crate::session::motion::FrameTable;
 use crate::session::theme_config::ThemePalette;
 use crate::session::view_tree::{StyleToken, TextStyle, ViewNode};
 
@@ -49,6 +50,11 @@ fn text_style(style: TextStyle, palette: &ThemePalette) -> Style {
 /// Text is one line and does not wrap — a plugin splits lines by returning
 /// separate nodes — so height is independent of width. When wrapping arrives
 /// this grows a width parameter; until then taking one would be a lie.
+///
+/// A motion takes the **tallest** of its frames rather than the height of the
+/// frame currently showing: a height that changed per frame would shove every
+/// sibling up and down as the animation ran, which is a worse artifact than
+/// the blank row a short frame leaves.
 fn height_of(node: &ViewNode) -> u16 {
     match node {
         ViewNode::Text { .. } | ViewNode::Divider => 1,
@@ -57,14 +63,21 @@ fn height_of(node: &ViewNode) -> u16 {
         ViewNode::Column(children) | ViewNode::List(children) => {
             children.iter().map(height_of).sum::<u16>()
         }
+        ViewNode::Motion { motion, .. } => motion.frames().iter().map(height_of).max().unwrap_or(0),
     }
 }
 
 /// Draw a view tree into `area`.
+///
+/// `frames` says which frame each animated node is showing. It is plain data
+/// the caller resolved from the kernel clock — the renderer has no clock, no
+/// state, and no way to reach a plugin, so painting stays a pure function of
+/// (tree, frame table, palette).
 pub fn render_tree(
     node: &ViewNode,
     area: Rect,
     palette: &ThemePalette,
+    frames: &FrameTable,
     buf: &mut ratatui::buffer::Buffer,
 ) {
     if area.width == 0 || area.height == 0 {
@@ -101,7 +114,7 @@ pub fn render_tree(
                 .constraints(constraints)
                 .split(area);
             for (child, cell) in children.iter().zip(cells.iter()) {
-                render_tree(child, *cell, palette, buf);
+                render_tree(child, *cell, palette, frames, buf);
             }
         }
         ViewNode::Column(children) | ViewNode::List(children) => {
@@ -125,9 +138,21 @@ pub fn render_tree(
                         height,
                     },
                     palette,
+                    frames,
                     buf,
                 );
                 y = y.saturating_add(height);
+            }
+        }
+        ViewNode::Motion { key, motion, .. } => {
+            // Frame 0 is the answer for a motion the kernel is not animating
+            // (reduced motion, a frozen lease, a paint that raced a push), so
+            // it has to be a correct rendering on its own.
+            let index = frames
+                .frame(key)
+                .min(motion.frames().len().saturating_sub(1));
+            if let Some(frame) = motion.frames().get(index) {
+                render_tree(frame, area, palette, frames, buf);
             }
         }
     }
@@ -156,7 +181,7 @@ mod tests {
     fn draw(node: &ViewNode, w: u16, h: u16) -> Vec<String> {
         let rect = area(w, h);
         let mut buf = Buffer::empty(rect);
-        render_tree(node, rect, &palette(), &mut buf);
+        render_tree(node, rect, &palette(), &FrameTable::default(), &mut buf);
         (0..h)
             .map(|y| {
                 (0..w)
@@ -221,7 +246,13 @@ mod tests {
         let rect = area(0, 0);
         let mut buf = Buffer::empty(rect);
         // Must not panic or index out of bounds.
-        render_tree(&ViewNode::text("x"), rect, &palette(), &mut buf);
+        render_tree(
+            &ViewNode::text("x"),
+            rect,
+            &palette(),
+            &FrameTable::default(),
+            &mut buf,
+        );
     }
 
     #[test]

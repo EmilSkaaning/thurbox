@@ -3664,6 +3664,218 @@ fn plugin_pane_renders_its_tree_in_a_real_frame() {
     assert!(stale.contains("error"), "the failure is surfaced:\n{stale}");
 }
 
+/// Reduced motion is whole-app, not plugin-only: thurbox's own working spinner
+/// holds a single glyph too. This is what makes the setting honest in a build
+/// with no plugin host at all.
+#[test]
+fn reduced_motion_freezes_thurboxs_own_spinner() {
+    let mut h = Harness::standard(1);
+    for _ in 0..40 {
+        h.tick();
+    }
+    assert_ne!(h.app.spinner_frame(), 0, "the spinner advances by default");
+
+    let mut h = Harness::standard(1);
+    h.app.motion_settings.reduce_motion = true;
+    for _ in 0..40 {
+        h.tick();
+    }
+    assert_eq!(
+        h.app.spinner_frame(),
+        0,
+        "reduced motion holds a single glyph"
+    );
+}
+
+/// Turning reduced motion on mid-spin must land on the same glyph as having had
+/// it on since boot — the setting promises the *first* frame, so a spinner that
+/// froze wherever it happened to be would contradict the row that toggles it.
+#[test]
+fn reduced_motion_settles_a_spinning_glyph_onto_its_first_frame() {
+    let mut h = Harness::standard(1);
+    for _ in 0..40 {
+        h.tick();
+    }
+    assert_ne!(h.app.spinner_frame(), 0);
+
+    let mut settings = crate::session::settings::Settings::default();
+    settings.motion.reduce_motion = true;
+    h.app.apply_live_settings(&settings);
+    h.tick();
+    assert_eq!(h.app.spinner_frame(), 0, "it settles on the first frame");
+
+    // And then stays there without asking for further repaints.
+    let before = h.app.perf_counters().redraws_requested;
+    for _ in 0..40 {
+        h.tick();
+    }
+    assert_eq!(h.app.spinner_frame(), 0);
+    assert_eq!(
+        h.app.perf_counters().redraws_requested,
+        before,
+        "a frozen spinner requests no repaints"
+    );
+}
+
+/// `docs/CONFIG.md` promises reduced motion applies live, with no restart. That
+/// promise is a wiring detail — `apply_live_settings` mirroring `[motion]` onto
+/// the app — and the two reduced-motion tests here poke `motion_settings`
+/// directly, so they would still pass if the wiring were dropped. This is the
+/// test that would not.
+#[test]
+fn reduced_motion_applies_live_without_a_restart() {
+    let mut h = Harness::standard(1);
+    assert!(!h.app.motion_settings.reduce_motion, "off by default");
+
+    let mut settings = crate::session::settings::Settings::default();
+    settings.motion.reduce_motion = true;
+    h.app.apply_live_settings(&settings);
+    assert!(h.app.motion_settings.reduce_motion);
+
+    // And it is a live setting, not one the panel must report as restart-only.
+    assert!(
+        !crate::session::settings::Settings::default().restart_only_differs(&settings),
+        "a motion change must not be reported as needing a restart"
+    );
+}
+
+/// Build a pane whose tree animates `frames` frames at `fps`, under a stable id.
+#[cfg(feature = "plugins")]
+fn animated_pane(visible: bool, fps: u8, frames: usize) -> crate::plugin::PluginPane {
+    use crate::session::motion::Motion;
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::view_tree::ViewNode;
+
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, visible);
+    pane.apply(Ok(ViewNode::Motion {
+        key: "spinner".to_string(),
+        keyed_by_id: true,
+        motion: Motion::cycle(
+            (0..frames)
+                .map(|i| ViewNode::text(format!("frame-{i}")))
+                .collect(),
+            fps,
+            true,
+        ),
+    }));
+    pane
+}
+
+/// The exit criterion for declared motion: an animated pane repaints at the
+/// rate it declared, not at the tick loop's. The tick loop runs ~100×/s; an
+/// 8 fps cycle must cost ~8 paints per simulated second, not ~100.
+///
+/// Asserted on `motion_frames` — a wall-clock-free counter — so this measures
+/// the property rather than the machine (ADR-P2).
+#[cfg(feature = "plugins")]
+#[test]
+fn motion_repaints_at_its_declared_rate_not_the_tick_rate() {
+    let mut h = Harness::new(160, 40, 1);
+    h.app.set_plugin_panes(vec![animated_pane(true, 8, 4)]);
+
+    // One simulated second of a 10 ms tick loop.
+    for _ in 0..100 {
+        h.advance(std::time::Duration::from_millis(10));
+        h.tick();
+    }
+
+    let frames = h.app.perf_counters().motion_frames;
+    assert!(
+        (7..=10).contains(&frames),
+        "an 8 fps animation must cost ~8 paints per second, not one per tick: {frames}"
+    );
+    assert_eq!(
+        h.app.perf_counters().motion_leases,
+        1,
+        "one pane, one lease"
+    );
+}
+
+/// A hidden animated pane must cost exactly nothing — the case a plugin cannot
+/// detect for itself, and the reason motion is declared rather than pushed.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_hidden_animated_pane_leaves_the_idle_loop_untouched() {
+    let mut h = Harness::new(160, 40, 1);
+
+    // Baseline: an idle app with no plugin at all.
+    for _ in 0..100 {
+        h.advance(std::time::Duration::from_millis(10));
+        h.tick();
+    }
+    let idle_redraws = h.app.perf_counters().redraws_requested;
+
+    let mut h = Harness::new(160, 40, 1);
+    h.app.set_plugin_panes(vec![animated_pane(false, 30, 8)]);
+    for _ in 0..100 {
+        h.advance(std::time::Duration::from_millis(10));
+        h.tick();
+    }
+
+    assert_eq!(
+        h.app.perf_counters().motion_frames,
+        0,
+        "a hidden pane never animates"
+    );
+    assert_eq!(h.app.perf_counters().motion_leases, 0, "and holds no lease");
+    assert!(
+        h.app.perf_counters().motion_denied > 0,
+        "and the counters say why"
+    );
+    assert_eq!(
+        h.app.perf_counters().redraws_requested,
+        idle_redraws,
+        "the idle paint rate is identical to having no animation at all"
+    );
+}
+
+/// The rule that would otherwise pin every plugin's spinner to frame 0: a
+/// plugin re-rendering on unrelated state must not restart its animation.
+#[cfg(feature = "plugins")]
+#[test]
+fn an_identical_re_push_continues_the_animation() {
+    let mut h = Harness::new(160, 40, 1);
+    h.app.set_plugin_panes(vec![animated_pane(true, 8, 4)]);
+    h.tick();
+    assert!(h.render().contains("frame-0"));
+
+    h.advance(std::time::Duration::from_millis(250));
+    // Exactly the tree that was already there, pushed again.
+    h.app.set_plugin_panes(vec![animated_pane(true, 8, 4)]);
+    h.tick();
+
+    let drawn = h.render();
+    assert!(
+        drawn.contains("frame-2"),
+        "the animation must continue, not restart:\n{drawn}"
+    );
+}
+
+/// Reduced motion is the accessibility switch, and it is whole-app: a declared
+/// animation renders its first frame and stops costing repaints entirely.
+#[cfg(feature = "plugins")]
+#[test]
+fn reduced_motion_pins_every_animation_to_its_first_frame() {
+    let mut h = Harness::new(160, 40, 1);
+    h.app.motion_settings.reduce_motion = true;
+    h.app.set_plugin_panes(vec![animated_pane(true, 8, 4)]);
+
+    for _ in 0..100 {
+        h.advance(std::time::Duration::from_millis(10));
+        h.tick();
+    }
+
+    let drawn = h.render();
+    assert!(
+        drawn.contains("frame-0"),
+        "frame 0 is the only frame a reduced-motion user sees:\n{drawn}"
+    );
+    assert_eq!(h.app.perf_counters().motion_frames, 0);
+    assert_eq!(h.app.perf_counters().motion_leases, 0);
+    assert!(h.app.perf_counters().motion_denied > 0);
+}
+
 /// With no plugin panes the layout must be byte-identical to a build that has
 /// no plugin host at all — the guarantee that installing nothing costs nothing.
 #[cfg(feature = "plugins")]

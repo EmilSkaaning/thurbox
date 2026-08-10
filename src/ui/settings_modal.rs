@@ -65,7 +65,7 @@ pub struct SettingsModalState<'a> {
 }
 
 /// Sections, in render order: a header label and the fields under it.
-const SECTIONS: [(&str, &[SettingsField]); 3] = [
+const SECTIONS: [(&str, &[SettingsField]); 4] = [
     (
         "Features",
         &[
@@ -93,6 +93,7 @@ const SECTIONS: [(&str, &[SettingsField]); 3] = [
             SettingsField::NotifMinInterval,
         ],
     ),
+    ("Motion", &[SettingsField::MotionReduce]),
     (
         "Scalars",
         &[

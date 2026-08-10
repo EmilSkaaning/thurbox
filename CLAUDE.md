@@ -951,6 +951,40 @@ contributions need. Nothing here can fail a spawn: every refusal is a
 `Rejection`, logged at the spawn and re-derived from the manifests by
 `thurbox-cli plugin doctor`'s spawn section (which still starts no VM).
 
+A node may declare **motion** — an animation the *kernel* drives (ADR-V18). The
+plugin pushes once (`motion = { kind = "cycle", fps = 8, frames = { … } }` on
+any node, 2–64 frames, rate clamped to `[1, 30]`); there is no API by which a
+plugin can ask for a frame, because a push-per-frame model costs a VM call, a
+tree rebuild, a conversion and a diff for what the kernel evaluates for free —
+and costs them whether or not the pane is visible. `cycle` is the only kind
+implemented; `marquee`/`pulse`/`blink`/`tween` need a resolved rect or layout
+props the tree does not carry, so an unknown kind is a conversion error naming
+the ones that exist. Frames are the node's children, so they pay the same depth
+and node bounds as any tree, and declaring motion on a node that also has
+`children`/`content` is refused rather than silently dropping one.
+
+Identity is `(pane, node key, signature)`, where the key is derived **once at
+conversion** (the node's `id`, else its structural path `@0.2`) and stored in
+the node — so `app`'s epoch table and `ui`'s renderer cannot disagree about it.
+An identical re-push **keeps its epoch**: without that rule any plugin that
+re-renders on unrelated state would pin its spinner to frame 0 forever. State
+lives in `App::motion` (`app/motion_state.rs`) and every key absent from the
+current trees is dropped each pass — the single rule behind "a hidden pane
+drops its lease", "a tree without motion drops its lease", and "motion state
+cannot leak". A pane holds **one** lease however many nodes it animates; rate
+is capped per pane (30 fps) and in aggregate (30 fps), degraded by *freezing*
+the greediest leases rather than stuttering everyone
+(`session::motion::allocate_rates`, pure).
+
+`MotionState::sync` runs on the tick and marks the UI dirty **only when a
+resolved frame actually moved**, so an 8 fps animation costs ~8 paints/s
+against a ~100 Hz tick loop and a hidden one costs zero — asserted on the
+`motion_leases`/`motion_frames`/`motion_denied`/`motion_frozen` perf counters,
+not on wall-clock timing. `[motion] reduce_motion` (settings.toml, live,
+default `false`) suppresses **every** animation app-wide: plugin motion renders
+frame 0 and takes no lease, and thurbox's own working spinner holds one glyph —
+which is why frame 0 must be a correct rendering on its own.
+
 Output is
 **human-readable by default** and switches to JSON automatically when stdout is
 piped (so `… | jq` keeps working); force a format with `--json` (compact),

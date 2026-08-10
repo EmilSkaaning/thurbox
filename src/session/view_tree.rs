@@ -86,8 +86,10 @@ pub struct TextStyle {
 /// One node in a plugin's view tree.
 ///
 /// Text is the only content node; everything else arranges children. A tree is
-/// static — it changes only when the plugin returns a different one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// static in content — it changes only when the plugin returns a different one
+/// — but a [`ViewNode::Motion`] node lets the *kernel* choose which of several
+/// supplied subtrees to draw, from its own clock.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ViewNode {
     /// A run of text. Already sanitized and truncated by [`sanitize_text`].
     Text {
@@ -110,6 +112,25 @@ pub enum ViewNode {
         /// How many lines to leave empty.
         lines: u16,
     },
+    /// One of several supplied subtrees, chosen by the kernel's clock.
+    ///
+    /// The plugin declares this as a `motion` field on any node; the host
+    /// lifts it into its own node so a motion's frames are ordinary children
+    /// and pay the same depth and node-count bounds as everything else.
+    Motion {
+        /// Identity for the kernel's phase bookkeeping, derived once at
+        /// conversion: the node's declared `id`, or its structural path when
+        /// it has none. Deriving it here rather than at each use is what keeps
+        /// the epoch table and the renderer from disagreeing about which node
+        /// they are talking about.
+        key: String,
+        /// Whether `key` came from a declared id. A structural key is correct
+        /// only while the tree shape is stable, so the host reports when one
+        /// is in use.
+        keyed_by_id: bool,
+        /// What it does and how fast.
+        motion: super::motion::Motion,
+    },
 }
 
 impl ViewNode {
@@ -117,6 +138,9 @@ impl ViewNode {
     pub fn children(&self) -> &[ViewNode] {
         match self {
             ViewNode::Row(c) | ViewNode::Column(c) | ViewNode::List(c) => c,
+            // A motion's frames are its children: that is what makes them
+            // count against the tree budget rather than escaping it.
+            ViewNode::Motion { motion, .. } => motion.frames(),
             ViewNode::Text { .. } | ViewNode::Divider | ViewNode::Spacer { .. } => &[],
         }
     }
@@ -186,6 +210,37 @@ pub fn sanitize_text(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A motion's frames are reachable as its children, which is the whole
+    /// mechanism that makes them pay the tree bounds: were `children()` to hide
+    /// them, a plugin could smuggle arbitrarily many nodes past the budget by
+    /// declaring them as frames.
+    #[test]
+    fn a_motions_frames_count_toward_the_tree_bounds() {
+        let motion = ViewNode::Motion {
+            key: "spinner".to_string(),
+            keyed_by_id: true,
+            motion: super::super::motion::Motion::cycle(
+                vec![
+                    ViewNode::text("."),
+                    ViewNode::Row(vec![ViewNode::text(".."), ViewNode::text("...")]),
+                ],
+                8,
+                true,
+            ),
+        };
+
+        assert_eq!(motion.children().len(), 2, "frames are the children");
+        // 1 motion + frame one + (frame two + its two texts).
+        assert_eq!(motion.node_count(), 5);
+        assert_eq!(motion.depth(), 3, "the deepest frame drives the depth");
+
+        // And nesting it inherits both, so a motion cannot escape an ancestor's
+        // accounting either.
+        let wrapped = ViewNode::Column(vec![motion]);
+        assert_eq!(wrapped.node_count(), 6);
+        assert_eq!(wrapped.depth(), 4);
+    }
 
     #[test]
     fn nesting_is_preserved() {

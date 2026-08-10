@@ -67,6 +67,25 @@ pub(crate) struct PerfCounters {
     /// ticks (~100 ms) unless the cache was explicitly invalidated
     /// (ADR-P10), so it climbs ~10×/s, not ~100×/s.
     pub(crate) data_version_checks: u64,
+    #[cfg(feature = "plugins")]
+    /// Animation leases granted to a plugin pane (a retained lease is not
+    /// re-counted). A pane with six animated nodes takes one lease, so this
+    /// counts panes that started animating, not nodes.
+    pub(crate) motion_leases: u64,
+    #[cfg(feature = "plugins")]
+    /// Repaints caused by declared motion: one per tick where the resolved
+    /// frame of some animated node actually moved. The whole cost animation
+    /// adds to the demand-driven loop, and flat while nothing animates.
+    pub(crate) motion_frames: u64,
+    #[cfg(feature = "plugins")]
+    /// Declared motions the kernel declined to animate — reduced motion, or a
+    /// pane that is not on screen. Answers "why is my animation not moving"
+    /// without a log.
+    pub(crate) motion_denied: u64,
+    #[cfg(feature = "plugins")]
+    /// Leases frozen because the aggregate frame-rate budget could not serve
+    /// them above the readable floor.
+    pub(crate) motion_frozen: u64,
 }
 
 impl PerfCounters {
@@ -108,6 +127,14 @@ impl PerfCounters {
             data_version_checks: self
                 .data_version_checks
                 .wrapping_sub(prev.data_version_checks),
+            #[cfg(feature = "plugins")]
+            motion_leases: self.motion_leases.wrapping_sub(prev.motion_leases),
+            #[cfg(feature = "plugins")]
+            motion_frames: self.motion_frames.wrapping_sub(prev.motion_frames),
+            #[cfg(feature = "plugins")]
+            motion_denied: self.motion_denied.wrapping_sub(prev.motion_denied),
+            #[cfg(feature = "plugins")]
+            motion_frozen: self.motion_frozen.wrapping_sub(prev.motion_frozen),
         }
     }
 }

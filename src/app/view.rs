@@ -553,10 +553,21 @@ impl App {
         frame.render_widget(block, area);
 
         let palette = crate::ui::theme::current();
+        // Which frame each animated node is showing was resolved on the tick,
+        // from the kernel clock; the paint only reads it.
+        let frames = self
+            .motion
+            .table_for(&pane.plugin, &pane.id)
+            .cloned()
+            .unwrap_or_default();
         match pane.tree() {
-            Some(tree) => {
-                crate::ui::plugin_pane::render_tree(tree, inner, &palette, frame.buffer_mut())
-            }
+            Some(tree) => crate::ui::plugin_pane::render_tree(
+                tree,
+                inner,
+                &palette,
+                &frames,
+                frame.buffer_mut(),
+            ),
             None => {
                 // Never rendered: say which, rather than showing an empty box
                 // the user cannot tell from a working-but-quiet plugin.
@@ -576,7 +587,13 @@ impl App {
                         },
                     ),
                 };
-                crate::ui::plugin_pane::render_tree(&msg, inner, &palette, frame.buffer_mut());
+                crate::ui::plugin_pane::render_tree(
+                    &msg,
+                    inner,
+                    &palette,
+                    &frames,
+                    frame.buffer_mut(),
+                );
             }
         }
     }

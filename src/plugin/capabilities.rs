@@ -194,6 +194,35 @@ fn build_ui_table(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // `ui.cycle(id, frames, fps?, loop?)` — declared motion (ADR-V18).
+    //
+    // A constructor rather than a `motion` field on every other constructor:
+    // the frames *are* the node's content, so a cycle has nothing else to
+    // carry, and one function keeps a plugin from spelling the declaration by
+    // hand. The kernel drives it; there is deliberately no call by which a
+    // plugin advances or requests a frame.
+    ui.set(
+        "cycle",
+        lua.create_function(
+            |lua, (id, frames, fps, repeat_): (String, Table, Option<u16>, Option<bool>)| {
+                let motion = lua.create_table()?;
+                motion.set("kind", "cycle")?;
+                motion.set("frames", frames)?;
+                if let Some(fps) = fps {
+                    motion.set("fps", fps)?;
+                }
+                if let Some(false) = repeat_ {
+                    motion.set("loop", false)?;
+                }
+                let node = lua.create_table()?;
+                node.set("kind", "motion")?;
+                node.set("id", id)?;
+                node.set("motion", motion)?;
+                Ok(node)
+            },
+        )?,
+    )?;
+
     ui.set(
         "spacer",
         lua.create_function(|lua, lines: Option<u16>| {
@@ -322,7 +351,9 @@ mod tests {
         let lua = Lua::new();
         let module = build_module_table(&lua, "demo", &GrantedCapabilities::none(), None).unwrap();
         let ui: Table = module.get("ui").expect("ui table present");
-        for name in ["text", "row", "column", "list", "divider", "spacer"] {
+        for name in [
+            "text", "row", "column", "list", "divider", "spacer", "cycle",
+        ] {
             assert!(ui.contains_key(name).unwrap(), "missing ui.{name}");
         }
     }

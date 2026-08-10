@@ -13,9 +13,16 @@ use std::fmt;
 
 use mlua::{Table, Value};
 
+use crate::session::motion::{Motion, DEFAULT_FPS, MAX_FPS, MAX_FRAMES, MIN_FPS, MIN_FRAMES};
 use crate::session::view_tree::{
     sanitize_text, StyleToken, TextStyle, ViewNode, MAX_DEPTH, MAX_NODES,
 };
+
+/// The motion kinds this host evaluates, for the error a plugin gets when it
+/// names another one. `docs/v2/FEATURES-Animation.md` §2 specifies more; a
+/// named rejection is how a plugin author learns which ones exist here rather
+/// than watching a declaration render as a still image.
+const KNOWN_MOTION_KINDS: &[&str] = &["cycle"];
 
 /// Why a render result could not become a view tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +57,22 @@ pub enum ViewError {
     TooDeep,
     /// The tree carries more nodes than the host allows.
     TooManyNodes,
+    /// The motion's `kind` is not one this host evaluates.
+    UnknownMotionKind(String),
+    /// The motion declared too few or too many frames. Out of range is an
+    /// error rather than a clamp: a plugin that meant to animate should learn
+    /// its declaration was malformed, not silently get a different animation.
+    MotionFrameCount {
+        /// How many frames arrived.
+        got: usize,
+    },
+    /// The node declaring motion also declared its own content. The frames
+    /// *are* the node's content, so keeping both would mean silently dropping
+    /// one of them.
+    MotionOverContent {
+        /// The node kind that carried both.
+        kind: String,
+    },
 }
 
 impl fmt::Display for ViewError {
@@ -74,6 +97,21 @@ impl fmt::Display for ViewError {
             ViewError::TooManyNodes => {
                 write!(f, "view tree has more than {MAX_NODES} nodes")
             }
+            ViewError::UnknownMotionKind(k) => write!(
+                f,
+                "unknown motion kind `{k}`; this host evaluates {}",
+                KNOWN_MOTION_KINDS.join(", ")
+            ),
+            ViewError::MotionFrameCount { got } => write!(
+                f,
+                "motion declared {got} frames; it must declare between \
+                 {MIN_FRAMES} and {MAX_FRAMES}"
+            ),
+            ViewError::MotionOverContent { kind } => write!(
+                f,
+                "view node `{kind}` declares motion and its own content; the \
+                 motion's frames are the content"
+            ),
         }
     }
 }
@@ -83,7 +121,8 @@ impl std::error::Error for ViewError {}
 /// Convert a plugin's render result into a view tree.
 pub fn from_lua(value: &Value) -> Result<ViewNode, ViewError> {
     let mut budget = MAX_NODES;
-    convert(value, 1, &mut budget)
+    let mut path = Vec::new();
+    convert(value, 1, &mut budget, &mut path)
 }
 
 /// Walk one node.
@@ -91,7 +130,14 @@ pub fn from_lua(value: &Value) -> Result<ViewNode, ViewError> {
 /// `depth` starts at 1 for the root. `budget` counts down the remaining node
 /// allowance across the whole tree, so breadth is bounded as well as depth —
 /// a flat table of a million children would otherwise pass a depth check.
-fn convert(value: &Value, depth: usize, budget: &mut usize) -> Result<ViewNode, ViewError> {
+/// `path` is the node's child-index path from the root, which is the fallback
+/// identity for a motion on a node that declared no `id`.
+fn convert(
+    value: &Value,
+    depth: usize,
+    budget: &mut usize,
+    path: &mut Vec<usize>,
+) -> Result<ViewNode, ViewError> {
     // Checked before touching the table: a cycle reaches this and stops,
     // rather than recursing until the stack gives out.
     if depth > MAX_DEPTH {
@@ -134,16 +180,22 @@ fn convert(value: &Value, depth: usize, budget: &mut usize) -> Result<ViewNode, 
         }
     };
 
+    // A node declaring motion becomes a motion node whatever its kind: the
+    // frames are what gets drawn, so the kind's own layout never applies.
+    if let Ok(Value::Table(decl)) = table.get::<Value>("motion") {
+        return convert_motion(table, &decl, &kind, depth, budget, path);
+    }
+
     match kind.as_str() {
         "text" => convert_text(table, &kind),
         "row" => Ok(ViewNode::Row(convert_children(
-            table, &kind, depth, budget,
+            table, &kind, depth, budget, path,
         )?)),
         "column" => Ok(ViewNode::Column(convert_children(
-            table, &kind, depth, budget,
+            table, &kind, depth, budget, path,
         )?)),
         "list" => Ok(ViewNode::List(convert_children(
-            table, &kind, depth, budget,
+            table, &kind, depth, budget, path,
         )?)),
         "divider" => Ok(ViewNode::Divider),
         "spacer" => {
@@ -211,12 +263,145 @@ fn convert_text(table: &Table, kind: &str) -> Result<ViewNode, ViewError> {
     })
 }
 
+/// Convert a node's `motion` declaration into a [`ViewNode::Motion`].
+///
+/// The node's identity is resolved here, once, and stored in the node: the
+/// kernel's epoch table and the renderer both read it, and deriving it twice
+/// from two different tree walks is how they would come to disagree.
+fn convert_motion(
+    node: &Table,
+    decl: &Table,
+    kind: &str,
+    depth: usize,
+    budget: &mut usize,
+    path: &mut Vec<usize>,
+) -> Result<ViewNode, ViewError> {
+    // The frames are the node's content; carrying both would mean silently
+    // dropping one.
+    if !matches!(node.get::<Value>("children"), Ok(Value::Nil) | Err(_))
+        || !matches!(node.get::<Value>("content"), Ok(Value::Nil) | Err(_))
+    {
+        return Err(ViewError::MotionOverContent {
+            kind: kind.to_string(),
+        });
+    }
+
+    let motion_kind = match decl.get::<Value>("kind") {
+        Ok(Value::String(s)) => s.to_string_lossy().to_string(),
+        Ok(Value::Nil) | Err(_) => {
+            return Err(ViewError::MissingField {
+                kind: "motion".to_string(),
+                field: "kind",
+            })
+        }
+        Ok(_) => {
+            return Err(ViewError::BadField {
+                kind: "motion".to_string(),
+                field: "kind",
+                expected: "a string",
+            })
+        }
+    };
+    if motion_kind != "cycle" {
+        return Err(ViewError::UnknownMotionKind(motion_kind));
+    }
+
+    let frames_table = match decl.get::<Value>("frames") {
+        Ok(Value::Table(t)) => t,
+        Ok(Value::Nil) | Err(_) => {
+            return Err(ViewError::MissingField {
+                kind: "motion".to_string(),
+                field: "frames",
+            })
+        }
+        Ok(_) => {
+            return Err(ViewError::BadField {
+                kind: "motion".to_string(),
+                field: "frames",
+                expected: "an array",
+            })
+        }
+    };
+
+    let mut frames = Vec::new();
+    for (i, pair) in frames_table.sequence_values::<Value>().enumerate() {
+        let value = pair.map_err(|_| ViewError::BadField {
+            kind: "motion".to_string(),
+            field: "frames",
+            expected: "an array",
+        })?;
+        // A frame is an ordinary subtree, walked under the same depth and node
+        // budget as any child — which is what makes a motion's cost knowable
+        // at push time.
+        path.push(i);
+        let converted = convert(&value, depth + 1, budget, path);
+        path.pop();
+        frames.push(converted?);
+    }
+    if !(MIN_FRAMES..=MAX_FRAMES).contains(&frames.len()) {
+        return Err(ViewError::MotionFrameCount { got: frames.len() });
+    }
+
+    // A declared rate is clamped rather than rejected: unlike a malformed
+    // frame list, an out-of-range rate has an obviously correct reading, and
+    // the cap exists to bound the kernel regardless of what was asked for.
+    let fps = match decl.get::<Value>("fps") {
+        Ok(Value::Integer(n)) => n.clamp(i64::from(MIN_FPS), i64::from(MAX_FPS)) as u8,
+        Ok(Value::Number(n)) => n.clamp(f64::from(MIN_FPS), f64::from(MAX_FPS)) as u8,
+        Ok(Value::Nil) | Err(_) => DEFAULT_FPS,
+        Ok(_) => {
+            return Err(ViewError::BadField {
+                kind: "motion".to_string(),
+                field: "fps",
+                expected: "a number",
+            })
+        }
+    };
+
+    // Defaults the way an author who omitted it would expect: an animation
+    // loops until its node goes away.
+    let repeat = !matches!(decl.get::<Value>("loop"), Ok(Value::Boolean(false)));
+
+    let declared_id = match node.get::<Value>("id") {
+        Ok(Value::String(s)) => Some(sanitize_text(&s.to_string_lossy())),
+        _ => None,
+    };
+    let (key, keyed_by_id) = match declared_id {
+        Some(id) if !id.is_empty() => (id, true),
+        // Structural fallback: correct only while the tree shape is stable,
+        // which is why the host reports it rather than quietly restarting the
+        // animation the first time a sibling appears.
+        _ => (structural_key(path), false),
+    };
+
+    Ok(ViewNode::Motion {
+        key,
+        keyed_by_id,
+        motion: Motion::cycle(frames, fps, repeat),
+    })
+}
+
+/// The identity a motion gets when its node declared no `id`: its child-index
+/// path from the root. `@` prefixes it so it can never collide with a declared
+/// id, which is sanitized text.
+fn structural_key(path: &[usize]) -> String {
+    let mut key = String::from("@");
+    for (i, step) in path.iter().enumerate() {
+        if i > 0 {
+            key.push('.');
+        }
+        key.push_str(&step.to_string());
+    }
+    key
+}
+
 /// Convert a container's `children` array.
 fn convert_children(
     table: &Table,
     kind: &str,
     depth: usize,
     budget: &mut usize,
+    path: &mut Vec<usize>,
 ) -> Result<Vec<ViewNode>, ViewError> {
     let children = match table.get::<Value>("children") {
         Ok(Value::Table(t)) => t,
@@ -232,13 +417,16 @@ fn convert_children(
     };
 
     let mut out = Vec::new();
-    for pair in children.sequence_values::<Value>() {
+    for (i, pair) in children.sequence_values::<Value>().enumerate() {
         let value = pair.map_err(|_| ViewError::BadField {
             kind: kind.to_string(),
             field: "children",
             expected: "an array",
         })?;
-        out.push(convert(&value, depth + 1, budget)?);
+        path.push(i);
+        let converted = convert(&value, depth + 1, budget, path);
+        path.pop();
+        out.push(converted?);
     }
     Ok(out)
 }
@@ -484,5 +672,245 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A cycle: two frames of text under a declared id.
+    const CYCLE: &str = r#"return {
+        kind = "column",
+        id = "thinking",
+        motion = {
+            kind = "cycle",
+            fps = 8,
+            frames = {
+                { kind = "text", content = "one" },
+                { kind = "text", content = "two" },
+            },
+        },
+    }"#;
+
+    #[test]
+    fn a_cycle_converts_and_keys_on_the_declared_id() {
+        let node = convert_src(CYCLE).unwrap();
+        match node {
+            ViewNode::Motion {
+                key,
+                keyed_by_id,
+                motion,
+            } => {
+                assert_eq!(key, "thinking");
+                assert!(keyed_by_id);
+                assert_eq!(motion.fps, 8);
+                assert_eq!(motion.frames().len(), 2);
+                assert!(motion.repeats(), "loops unless told otherwise");
+            }
+            other => panic!("expected a motion node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_id_less_motion_falls_back_to_its_position() {
+        let node = convert_src(
+            r#"return { kind = "column", children = {
+                { kind = "text", content = "first" },
+                { kind = "column", motion = { kind = "cycle", frames = {
+                    { kind = "text", content = "a" },
+                    { kind = "text", content = "b" },
+                }}},
+            }}"#,
+        )
+        .unwrap();
+        let ViewNode::Column(children) = &node else {
+            panic!("expected a column, got {node:?}");
+        };
+        match &children[1] {
+            ViewNode::Motion {
+                key, keyed_by_id, ..
+            } => {
+                assert_eq!(key, "@1", "the second child of the root");
+                assert!(!keyed_by_id);
+            }
+            other => panic!("expected a motion node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_motion_kind_names_the_ones_that_exist() {
+        let err = convert_src(
+            r#"return { kind = "column", motion = { kind = "marquee", frames = {
+                { kind = "text", content = "a" },
+                { kind = "text", content = "b" },
+            }}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(err, ViewError::UnknownMotionKind("marquee".to_string()));
+        assert!(err.to_string().contains("cycle"), "{err}");
+    }
+
+    #[test]
+    fn too_few_frames_is_rejected_rather_than_rendered_static() {
+        let err = convert_src(
+            r#"return { kind = "column", motion = { kind = "cycle", frames = {
+                { kind = "text", content = "only" },
+            }}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(err, ViewError::MotionFrameCount { got: 1 });
+    }
+
+    #[test]
+    fn too_many_frames_is_rejected_rather_than_truncated() {
+        let src = format!(
+            r#"
+            local frames = {{}}
+            for i = 1, {} do
+                frames[i] = {{ kind = "text", content = "x" }}
+            end
+            return {{ kind = "column", motion = {{ kind = "cycle", frames = frames }} }}
+            "#,
+            MAX_FRAMES + 1
+        );
+        assert_eq!(
+            convert_src(&src).unwrap_err(),
+            ViewError::MotionFrameCount {
+                got: MAX_FRAMES + 1
+            }
+        );
+    }
+
+    #[test]
+    fn a_declared_rate_is_clamped_to_the_per_pane_cap() {
+        let fast = convert_src(
+            r#"return { kind = "column", motion = { kind = "cycle", fps = 240, frames = {
+                { kind = "text", content = "a" }, { kind = "text", content = "b" },
+            }}}"#,
+        )
+        .unwrap();
+        let slow = convert_src(
+            r#"return { kind = "column", motion = { kind = "cycle", fps = 0, frames = {
+                { kind = "text", content = "a" }, { kind = "text", content = "b" },
+            }}}"#,
+        )
+        .unwrap();
+        let fps = |n: &ViewNode| match n {
+            ViewNode::Motion { motion, .. } => motion.fps,
+            other => panic!("expected a motion node, got {other:?}"),
+        };
+        assert_eq!(fps(&fast), MAX_FPS);
+        assert_eq!(fps(&slow), MIN_FPS);
+    }
+
+    #[test]
+    fn an_omitted_rate_takes_the_default() {
+        let node = convert_src(
+            r#"return { kind = "column", motion = { kind = "cycle", frames = {
+                { kind = "text", content = "a" }, { kind = "text", content = "b" },
+            }}}"#,
+        )
+        .unwrap();
+        match node {
+            ViewNode::Motion { motion, .. } => assert_eq!(motion.fps, DEFAULT_FPS),
+            other => panic!("expected a motion node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_motion_node_may_not_also_carry_its_own_content() {
+        // The frames are the content; keeping both would silently drop one.
+        let err = convert_src(
+            r#"return { kind = "column", children = { { kind = "text", content = "x" } },
+               motion = { kind = "cycle", frames = {
+                   { kind = "text", content = "a" }, { kind = "text", content = "b" },
+               }}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ViewError::MotionOverContent { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn frames_count_against_the_tree_budget() {
+        let src = format!(
+            r#"
+            local frames = {{}}
+            for i = 1, 2 do
+                local kids = {{}}
+                for j = 1, {} do
+                    kids[j] = {{ kind = "text", content = "x" }}
+                end
+                frames[i] = {{ kind = "list", children = kids }}
+            end
+            return {{ kind = "column", motion = {{ kind = "cycle", frames = frames }} }}
+            "#,
+            MAX_NODES
+        );
+        assert_eq!(convert_src(&src).unwrap_err(), ViewError::TooManyNodes);
+    }
+
+    #[test]
+    fn a_motion_missing_its_frames_is_named() {
+        let err =
+            convert_src(r#"return { kind = "column", motion = { kind = "cycle" } }"#).unwrap_err();
+        assert_eq!(
+            err,
+            ViewError::MissingField {
+                kind: "motion".to_string(),
+                field: "frames",
+            }
+        );
+    }
+
+    /// `ui.cycle` is the constructor a plugin actually calls; it must build a
+    /// table the converter accepts, so the two cannot drift.
+    #[test]
+    fn the_ui_cycle_constructor_produces_a_convertible_node() {
+        let lua = Lua::new();
+        let module = crate::plugin::capabilities::build_module_table(
+            &lua,
+            "demo",
+            &crate::plugin::capabilities::GrantedCapabilities::from_manifest(
+                &std::collections::BTreeSet::new(),
+            ),
+            None,
+        )
+        .expect("module builds");
+        lua.globals().set("thurbox", module).unwrap();
+
+        let value: Value = lua
+            .load(
+                r#"return thurbox.ui.cycle("spinner", {
+                    thurbox.ui.text("a"), thurbox.ui.text("b"),
+                }, 12)"#,
+            )
+            .eval()
+            .expect("chunk evaluates");
+        match from_lua(&value).unwrap() {
+            ViewNode::Motion {
+                key,
+                keyed_by_id,
+                motion,
+            } => {
+                assert_eq!(key, "spinner");
+                assert!(keyed_by_id);
+                assert_eq!(motion.fps, 12);
+                assert_eq!(motion.frames().len(), 2);
+            }
+            other => panic!("expected a motion node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_repeating_cycle_is_declared_with_loop_false() {
+        let node = convert_src(
+            r#"return { kind = "column", motion = { kind = "cycle", loop = false, frames = {
+                { kind = "text", content = "a" }, { kind = "text", content = "b" },
+            }}}"#,
+        )
+        .unwrap();
+        match node {
+            ViewNode::Motion { motion, .. } => assert!(!motion.repeats()),
+            other => panic!("expected a motion node, got {other:?}"),
+        }
     }
 }

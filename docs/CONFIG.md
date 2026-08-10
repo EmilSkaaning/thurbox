@@ -246,6 +246,9 @@ also_on_waiting     = false    # also fire when a session finishes (Working → 
 suppress_for_active = true     # skip the session you're currently viewing
 sound               = true     # play the OS default notification sound
 min_interval_secs   = 5        # per-session floor between notifications
+
+[motion]
+reduce_motion       = false    # freeze every animation on its first frame
 ```
 
 ### `[features]` — whole-feature switches
@@ -402,6 +405,24 @@ thurbox-cli notify --test   # fire a sample notification to confirm it works
 Notifications fire on the hooks-driven status transitions (see
 [Session status](#session-status)): always on `→ Blocked` (the agent needs
 you), and with `also_on_waiting = true` also on `Working → Done`.
+
+### `[motion]` — animation
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `reduce_motion` | `false` | suppress every animation thurbox draws |
+
+With `reduce_motion = true` the working-session spinner holds a single
+glyph instead of cycling, and a plugin's declared motion renders its
+**first frame** and takes no animation lease — so an animated pane stops
+costing repaints altogether. It applies **live** (no restart) and is
+whole-app on purpose: a user who needs reduced motion needs it from
+thurbox, not from each plugin separately. It is deliberately not a
+`[features]` flag — a feature flag removes a feature, whereas this one
+removes only the movement; every pane still renders.
+
+Terminals do not report a reduced-motion preference, so there is nothing
+to detect automatically: this setting is the whole mechanism.
 
 ## Session status
 

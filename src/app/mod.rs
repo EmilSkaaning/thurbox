@@ -8,6 +8,8 @@ mod helpers;
 mod key_handlers;
 pub(crate) mod metrics_state;
 pub(crate) mod modals;
+#[cfg(feature = "plugins")]
+pub(crate) mod motion_state;
 mod new_session_state;
 mod notify_state;
 mod repo_picker;
@@ -967,6 +969,10 @@ pub struct App {
     /// the process-wide settings at construction so tests can flip flags
     /// without touching the first-writer-wins global.
     pub(crate) features: crate::session::settings::FeatureFlags,
+    /// Animation settings (`[motion]`), copied out of the process-wide settings
+    /// like `features` and re-applied on a live reload — the render path reads
+    /// it every frame, so it cannot come from the write-once global.
+    pub(crate) motion_settings: crate::session::settings::MotionSettings,
     pub(crate) show_info_panel: bool,
     /// Whether the tasks panel column is shown (toggled like the file viewer).
     pub(crate) show_tasks_panel: bool,
@@ -983,6 +989,10 @@ pub struct App {
     /// Outbound key requests to the plugin render worker.
     #[cfg(feature = "plugins")]
     pub(crate) plugin_keys: Option<std::sync::mpsc::Sender<PluginKeyRequest>>,
+    /// Epochs and leases for motion a plugin declared. The kernel drives every
+    /// animation from here; a plugin has no way to ask for a frame.
+    #[cfg(feature = "plugins")]
+    pub(crate) motion: motion_state::MotionState,
     pub(crate) show_file_viewer: bool,
     /// Whether the session-list pane (the left column: sessions + automations)
     /// is shown. Inverse of the other `show_*` flags — defaults to `true` since
@@ -1368,6 +1378,7 @@ impl App {
             terminal_cols: cols,
             session_counter,
             features: crate::session::settings::global().features,
+            motion_settings: crate::session::settings::global().motion,
             show_info_panel: false,
             show_tasks_panel: false,
             #[cfg(feature = "plugins")]
@@ -1376,6 +1387,8 @@ impl App {
             plugin_events: None,
             #[cfg(feature = "plugins")]
             plugin_keys: None,
+            #[cfg(feature = "plugins")]
+            motion: motion_state::MotionState::default(),
             show_file_viewer: false,
             show_session_list: true,
             file_viewer: crate::ui::file_viewer::FileViewerState::new(),
@@ -1556,6 +1569,7 @@ impl App {
     /// the settings panel's save path and the live-reload poll.
     pub(crate) fn apply_live_settings(&mut self, settings: &crate::session::settings::Settings) {
         self.features = settings.features;
+        self.motion_settings = settings.motion;
         self.enforce_feature_visibility();
         self.resize_sessions_to_content_area();
     }
@@ -4668,6 +4682,11 @@ impl App {
         #[cfg(feature = "plugins")]
         self.poll_plugin_renders();
 
+        // Advance declared motion. Runs after the renders so a tree that just
+        // arrived is animated on the same tick it landed.
+        #[cfg(feature = "plugins")]
+        self.tick_motion();
+
         // Adopt remote-backed sessions whose host discovery (started at
         // restore) has since completed.
         self.poll_remote_restore();
@@ -4787,6 +4806,16 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        // Motion counters only exist where the plugin host does; a stable
+        // build's snapshot is byte-identical to before this change.
+        #[cfg(feature = "plugins")]
+        let motion = serde_json::json!({
+            "motion_leases": p.motion_leases,
+            "motion_frames": p.motion_frames,
+            "motion_denied": p.motion_denied,
+            "motion_frozen": p.motion_frozen,
+        });
+
         let snapshot = serde_json::json!({
             "pid": std::process::id(),
             "captured_at": captured_at,
@@ -4809,6 +4838,17 @@ impl App {
             "slow_ops": slow_ops,
             "startup": self.startup_phases,
         });
+        #[cfg(feature = "plugins")]
+        let snapshot = {
+            let mut snapshot = snapshot;
+            if let (Some(counters), Some(motion)) =
+                (snapshot["counters"].as_object_mut(), motion.as_object())
+            {
+                counters.extend(motion.clone());
+            }
+            snapshot
+        };
+
         if let Err(e) = self.db.set_perf_snapshot(&snapshot.to_string()) {
             warn!("failed to publish perf snapshot: {e}");
         }
@@ -5283,6 +5323,19 @@ impl App {
     /// (whose placeholder row + status badge spin too). So an idle TUI still
     /// rests at ~4 fps but either animates smoothly.
     fn advance_spinner_frame(&mut self) -> bool {
+        // Reduced motion is whole-app, not plugin-only: thurbox's own spinner
+        // stops asking for repaints to advance. It lands on the *first* frame
+        // rather than freezing wherever it happened to be, because that is what
+        // the setting promises everywhere else (a plugin's motion renders frame
+        // 0, and the panel row says so) — and because toggling the setting on
+        // mid-spin should not leave a different glyph than enabling it at boot.
+        // Reporting the one move to frame 0 is a real content change; every
+        // later tick reports none.
+        if self.motion_settings.reduce_motion {
+            let settled = self.spinner_frame != 0;
+            self.spinner_frame = 0;
+            return settled;
+        }
         let new_frame = (self.metrics.tick_count / SPINNER_TICKS_PER_FRAME) as usize
             % crate::ui::SPINNER_FRAMES.len();
         let spinner_advanced = new_frame != self.spinner_frame;
@@ -7226,6 +7279,51 @@ impl App {
         }
         if changed {
             self.needs_redraw = true;
+        }
+    }
+
+    /// Advance declared motion one tick.
+    ///
+    /// The kernel drives every animation from here: it resolves which frame
+    /// each animated node is showing from its own clock and marks the UI dirty
+    /// **only** when a resolved frame actually moved. That is what keeps an
+    /// animated pane costing repaints at its declared rate (8 fps by default)
+    /// rather than at the tick loop's ~100 Hz — and a hidden animated pane
+    /// costing nothing at all.
+    #[cfg(feature = "plugins")]
+    fn tick_motion(&mut self) {
+        // Only a pane the user is actually focused on wins the rate budget.
+        let focused = (self.focus == InputFocus::PluginPane)
+            .then(|| self.focusable_plugin_pane())
+            .flatten()
+            .map(|p| motion_state::PaneKey {
+                plugin: p.plugin.clone(),
+                pane: p.id.clone(),
+            });
+
+        let before = self.motion.counters();
+        let advanced = self.motion.sync(
+            &self.plugin_panes,
+            focused.as_ref(),
+            self.motion_settings.reduce_motion,
+        );
+        let after = self.motion.counters();
+        let perf = &mut self.metrics.perf;
+        perf.motion_leases = perf
+            .motion_leases
+            .wrapping_add(after.granted - before.granted);
+        perf.motion_frames = perf
+            .motion_frames
+            .wrapping_add(after.frames - before.frames);
+        perf.motion_denied = perf
+            .motion_denied
+            .wrapping_add(after.denied - before.denied);
+        perf.motion_frozen = perf
+            .motion_frozen
+            .wrapping_add(after.frozen - before.frozen);
+
+        if advanced {
+            self.request_redraw();
         }
     }
 

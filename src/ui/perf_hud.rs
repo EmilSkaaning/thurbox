@@ -89,6 +89,16 @@ pub(crate) fn render_perf_hud(frame: &mut Frame, area: Rect, view: &PerfHudView<
         ),
         row("order builds", p.ordered_sessions_rebuilds.to_string()),
         row("hook loads", p.hook_state_loads.to_string()),
+        // Motion is the one thing that makes an idle thurbox wake up, so its
+        // cost is a row of its own rather than folded into "frames".
+        #[cfg(feature = "plugins")]
+        row(
+            "motion",
+            format!(
+                "{} leases, {} frames ({} denied, {} frozen)",
+                p.motion_leases, p.motion_frames, p.motion_denied, p.motion_frozen
+            ),
+        ),
         row(
             "ext polls",
             format!(

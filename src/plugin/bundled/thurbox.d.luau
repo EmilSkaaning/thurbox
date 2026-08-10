@@ -9,11 +9,23 @@ export type StyleToken = "accent" | "muted" | "danger" | "success" | "warning"
 
 export type ViewNode = {
     kind: string,
+    id: string?,
     content: (string | number)?,
     style: StyleToken?,
     bold: boolean?,
     children: { ViewNode }?,
     lines: number?,
+    motion: Motion?,
+}
+
+-- Motion the *kernel* drives: the plugin supplies the frames once and never
+-- participates in a frame. `fps` is clamped to [1, 30]; `frames` must hold
+-- 2-64 subtrees; `loop = false` holds the last frame and stops animating.
+export type Motion = {
+    kind: "cycle",
+    frames: { ViewNode },
+    fps: number?,
+    loop: boolean?,
 }
 
 export type Ui = {
@@ -23,6 +35,15 @@ export type Ui = {
     list: (children: { ViewNode }?) -> ViewNode,
     divider: () -> ViewNode,
     spacer: (lines: number?) -> ViewNode,
+    -- An animation the kernel evaluates on its own clock. The `id` keys its
+    -- phase, so re-pushing the same cycle under the same id continues it
+    -- rather than restarting it.
+    cycle: (
+        id: string,
+        frames: { ViewNode },
+        fps: number?,
+        loop: boolean?
+    ) -> ViewNode,
 }
 
 export type Thurbox = {

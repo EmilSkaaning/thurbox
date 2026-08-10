@@ -87,6 +87,13 @@ config_version = 1
 # [clipboard]
 # provider = "auto"             # auto | native | osc52 | none
 
+# Animation. `reduce_motion = true` suppresses every animation thurbox draws:
+# the working-session spinner holds a single glyph, and a plugin's declared
+# motion renders its first frame and takes no animation lease (so an animated
+# pane stops costing repaints entirely). Applies live — no restart.
+# [motion]
+# reduce_motion = false
+
 # ──────────────────────────────────────────────────────────────────────────
 # Common recipes (uncomment the lines under the recipe you want)
 # ──────────────────────────────────────────────────────────────────────────
@@ -269,6 +276,13 @@ pub fn save_settings(settings: &Settings) -> std::io::Result<()> {
         notifications["backend"] = value(backend);
     }
 
+    if !doc.contains_key("motion") {
+        doc["motion"] = toml_edit::table();
+    }
+    if let Some(motion) = doc["motion"].as_table_mut() {
+        set_table_bool(motion, "reduce_motion", settings.motion.reduce_motion);
+    }
+
     std::fs::write(&path, doc.to_string())
 }
 
@@ -314,6 +328,8 @@ mod tests {
             "sound",
             "min_interval_secs",
             "backend",
+            "[motion]",
+            "reduce_motion",
         ] {
             assert!(
                 SEED_SETTINGS_TOML.contains(field),
@@ -401,6 +417,7 @@ mod tests {
         // full-Settings equality below would silently pass on the `Auto`
         // default even if `backend` were dropped.
         s.notifications.backend = NotificationBackend::Off;
+        s.motion.reduce_motion = true;
 
         save_settings(&s).unwrap();
 
