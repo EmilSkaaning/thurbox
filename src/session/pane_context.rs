@@ -260,6 +260,89 @@ pub struct TasksSnapshot {
 /// costs nothing that is visible.
 pub const MAX_TASK_ROWS: usize = 200;
 
+/// One row of the file tree, as a pane draws it.
+///
+/// The section it belongs to is the narrowest state channel in the snapshot, and
+/// deliberately so: see [`FilesSnapshot`] for what reading it does **not**
+/// confer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileNodeSnapshot {
+    /// The node's **basename** — never a path.
+    ///
+    /// A path is not needed to draw the pane (the native one shows basenames
+    /// too), and a plugin holding absolute worktree paths would be a materially
+    /// larger disclosure than one holding names. Depth plus name lets a plugin
+    /// reconstruct the tree's *shape*, which is inherent to drawing a tree, and
+    /// reveals nothing about where on disk the tree is.
+    pub name: String,
+    /// How deep in the tree it sits; a root is 0. Drives indentation.
+    pub depth: usize,
+    /// Whether it is a directory.
+    pub is_dir: bool,
+    /// Whether it is expanded — the user's navigation, which is why the kernel
+    /// resolves it and why a plugin listing directories itself could not draw
+    /// this pane.
+    pub expanded: bool,
+    /// Whether a running search matched this row's name.
+    ///
+    /// `true` when no search is running, so an unsearched tree draws in its
+    /// ordinary colours without the pane having to know whether a search
+    /// exists. The *verdict* crosses and the query does not: the plugin needs no
+    /// matcher, so its case folding cannot drift from the kernel's.
+    pub matched: bool,
+}
+
+/// The file tree a pane draws — the rows thurbox's file viewer currently has
+/// open.
+///
+/// **This is not a filesystem capability.** Reading it lets a plugin list no
+/// directory, read no file, stat no path, and cause no I/O whatsoever: the
+/// section is built from a tree the kernel already holds, whose shape is a record
+/// of what the *user* expanded. A directory the user has not opened is not in it,
+/// a dotfile never entered it, and nothing outside the active session's own
+/// directories can appear.
+///
+/// That is a narrower grant than "read a file tree" suggests, and it is narrower
+/// on purpose. Of the five facts a row carries only its name comes from disk;
+/// depth and expansion are the user's navigation, the match verdict is a search
+/// the kernel runs, and the cursor is the keyboard's. A plugin holding `read_dir`
+/// could draw *a* tree but not *this pane*, so the wider power would buy strictly
+/// less result.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FilesSnapshot {
+    /// One entry per visible row, in the order the pane lists them.
+    pub nodes: Vec<FileNodeSnapshot>,
+    /// Which row the cursor is on, as a zero-based index into `nodes`.
+    ///
+    /// One index rather than a flag per row, because that is the form
+    /// [`super::view_tree::ViewNode::List`]'s selected row takes — the pane hands
+    /// it straight back and the kernel scrolls to it. `None` when there are no
+    /// rows, or when the cursor is on a row past [`MAX_FILE_ROWS`]: an index into
+    /// rows that were not published would make that windowing meaningless.
+    pub selected: Option<usize>,
+    /// Whether nerd-font glyphs are enabled, so the pane can pick between its two
+    /// marker sets.
+    ///
+    /// A display *setting*, not a filesystem fact, and it rides here because the
+    /// file tree's markers are its only consumer in thurbox. The kernel publishes
+    /// the fact rather than the glyph — the rule being that a rendering is
+    /// published only when two panes must agree about it, and this mapping has one
+    /// consumer. A second consumer should lift this to its own section under its
+    /// own capability rather than a copy appearing.
+    pub nerd_font: bool,
+}
+
+/// Most file rows a publication carries.
+///
+/// A bound on the *section*, like [`MAX_TASK_ROWS`], and for the same reason: a
+/// view tree is capped at [`super::view_tree::MAX_NODES`] nodes and a row costs
+/// three, so a tree with a large directory expanded in it would make every render
+/// of a file pane **fail** rather than merely scroll. Unlike a task list this can
+/// plausibly be exceeded — one `node_modules` does it — so the cost is real and
+/// named: past the bound the section carries the first rows and no cursor, and the
+/// pane stops scrolling rather than scrolling to a row it does not have.
+pub const MAX_FILE_ROWS: usize = 1_000;
+
 /// Everything a plugin may read about the kernel's current state.
 ///
 /// One value rather than three published separately: every section describes the
@@ -275,6 +358,9 @@ pub struct PaneContext {
     pub automations: Vec<AutomationSnapshot>,
     /// The task list, empty when there are no tasks or the feature is off.
     pub tasks: TasksSnapshot,
+    /// The file tree the file viewer has open, empty when it has none or the
+    /// feature is off.
+    pub files: FilesSnapshot,
 }
 
 /// The process-wide snapshot slot.
@@ -364,6 +450,7 @@ mod tests {
             system: None,
             automations: Vec::new(),
             tasks: TasksSnapshot::default(),
+            files: FilesSnapshot::default(),
         }
     }
 
@@ -477,6 +564,53 @@ mod tests {
                 focused: true
             }
         );
+    }
+
+    fn file_row(name: &str, matched: bool) -> FileNodeSnapshot {
+        FileNodeSnapshot {
+            name: name.to_string(),
+            depth: 1,
+            is_dir: false,
+            expanded: false,
+            matched,
+        }
+    }
+
+    /// The file section takes part in the change gate too, so two equal trees
+    /// must compare equal — otherwise an idle file viewer would republish on
+    /// every tick.
+    #[test]
+    fn equal_file_sections_compare_equal() {
+        let section = |selected| FilesSnapshot {
+            nodes: vec![file_row("src", true), file_row("main.rs", true)],
+            selected,
+            nerd_font: false,
+        };
+        assert_eq!(section(Some(0)), section(Some(0)));
+        assert_ne!(section(Some(0)), section(Some(1)));
+        assert_ne!(section(Some(0)), section(None));
+    }
+
+    /// A row carries a basename and no path, which is the boundary the whole
+    /// capability rests on — asserted on the type so a `path` field cannot be
+    /// added without this failing.
+    #[test]
+    fn a_file_row_carries_a_name_and_never_a_path() {
+        let row = file_row("main.rs", true);
+        assert!(
+            !row.name.contains(std::path::MAIN_SEPARATOR),
+            "a row's name is a basename: {:?}",
+            row.name
+        );
+        // The fields a row has, spelled out: adding one that reveals a location
+        // has to be a deliberate edit here as well as to the struct.
+        let FileNodeSnapshot {
+            name: _,
+            depth: _,
+            is_dir: _,
+            expanded: _,
+            matched: _,
+        } = row;
     }
 
     /// Two different statuses must not describe themselves identically, or a

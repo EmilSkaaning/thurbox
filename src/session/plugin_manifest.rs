@@ -75,6 +75,16 @@ pub enum Capability {
     Automations,
     /// Read thurbox's task list — titles, status, and which row a user is on.
     Tasks,
+    /// Read the file tree thurbox's file viewer currently has open — the
+    /// basename, depth and expansion state of each visible row.
+    ///
+    /// Deliberately **not** a filesystem capability, and named `Files` rather
+    /// than `Fs` for that reason: it grants no directory listing, no file
+    /// contents, no path, and causes no I/O. It reads a tree the kernel already
+    /// holds, whose shape is a record of what the user expanded. A power that
+    /// reached the filesystem itself would be a different capability, asked for
+    /// in a different sentence.
+    Files,
 }
 
 impl Capability {
@@ -91,6 +101,7 @@ impl Capability {
             Capability::Metrics => "metrics",
             Capability::Automations => "automations",
             Capability::Tasks => "tasks",
+            Capability::Files => "files",
         }
     }
 
@@ -107,6 +118,7 @@ impl Capability {
             Capability::Metrics,
             Capability::Automations,
             Capability::Tasks,
+            Capability::Files,
         ]
     }
 
@@ -122,6 +134,7 @@ impl Capability {
                 | Capability::Metrics
                 | Capability::Automations
                 | Capability::Tasks
+                | Capability::Files
         )
     }
 }

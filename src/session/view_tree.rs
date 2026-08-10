@@ -153,6 +153,9 @@ impl StyleToken {
 /// search matched ([`TextStyle::underline`]). Without them a list with a search
 /// in it cannot be described by this catalog at all, which is most of the panes
 /// thurbox has.
+///
+/// [`TextStyle::selected`] is the one field that is **not** an emphasis, and it
+/// is documented on itself.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct TextStyle {
     /// Colour role; `None` renders in the theme's default foreground.
@@ -163,6 +166,25 @@ pub struct TextStyle {
     pub dim: bool,
     /// Render underlined.
     pub underline: bool,
+    /// The run belongs to the row the user's cursor is on.
+    ///
+    /// A **role**, not a colour and not an attribute: the host resolves it to
+    /// the theme's selection foreground on its selection background, so a
+    /// plugin naming it still names none of the two colours involved. It
+    /// exists because thurbox's file viewer draws its cursor's row as a
+    /// background, and nothing in this catalog could name one.
+    ///
+    /// It *replaces* the colour [`TextStyle::token`] would have resolved to,
+    /// where the three emphases layer over it — a selection is a whole
+    /// appearance rather than an attribute applied to one. It composes with
+    /// the emphases, so a selected run can also be bold.
+    ///
+    /// Deliberately separate from [`ViewNode::List`]'s selected row, which
+    /// says *which* row the cursor is on: thurbox's two list panes disagree
+    /// about what a selected row looks like (the tasks pane draws it accent and
+    /// bold, the file viewer in the selection pair), so an appearance inferred
+    /// from the list's cursor would make one of them unreproducible.
+    pub selected: bool,
 }
 
 /// A gauge's fill, as a percentage.
@@ -254,7 +276,29 @@ pub enum ViewNode {
     Column(Vec<ViewNode>),
     /// Children laid out top to bottom, one per line — a column that reads as
     /// a list to a user, and the shape most panes actually want.
-    List(Vec<ViewNode>),
+    List {
+        /// One child per row.
+        children: Vec<ViewNode>,
+        /// Which child the user's cursor is on, if any.
+        ///
+        /// A **zero-based** index here; the plugin-facing form is one-based,
+        /// converted once at conversion, because every other array a plugin
+        /// touches is Lua's one-based kind.
+        ///
+        /// When it is present and the list has more children than the rows it
+        /// was given, the *kernel* chooses which slice to draw and keeps this
+        /// child visible — the same trade [`ViewNode::Gauge`] made for width,
+        /// applied to height. The alternative is reporting the resolved rect
+        /// back into a plugin, which would make rendering height-dependent (a
+        /// resize would have to re-enter a VM before the frame that needed it)
+        /// and would let a plugin that mis-windowed produce a broken pane
+        /// rather than a refused node.
+        ///
+        /// The window is chosen by child *index*, so a selected list is a list
+        /// of rows; a child taller than one row is clipped by the bottom as in
+        /// any list.
+        selected: Option<usize>,
+    },
     /// A horizontal rule filling the available width.
     Divider,
     /// A labelled progress bar, two rows tall, whose geometry the **kernel**
@@ -303,11 +347,10 @@ impl ViewNode {
     /// A node's children, or an empty slice for a leaf.
     pub fn children(&self) -> &[ViewNode] {
         match self {
-            ViewNode::Row(c)
-            | ViewNode::Line(c)
-            | ViewNode::Paragraph(c)
-            | ViewNode::Column(c)
-            | ViewNode::List(c) => c,
+            ViewNode::Row(c) | ViewNode::Line(c) | ViewNode::Paragraph(c) | ViewNode::Column(c) => {
+                c
+            }
+            ViewNode::List { children, .. } => children,
             // A motion's frames are its children: that is what makes them
             // count against the tree budget rather than escaping it.
             ViewNode::Motion { motion, .. } => motion.frames(),
@@ -376,7 +419,7 @@ impl ViewNode {
             ViewNode::Row(_)
             | ViewNode::Paragraph(_)
             | ViewNode::Column(_)
-            | ViewNode::List(_)
+            | ViewNode::List { .. }
             | ViewNode::Divider
             | ViewNode::Gauge { .. }
             | ViewNode::Spacer { .. } => Some(self.kind_name()),
@@ -391,7 +434,7 @@ impl ViewNode {
             ViewNode::Line(_) => "line",
             ViewNode::Paragraph(_) => "paragraph",
             ViewNode::Column(_) => "column",
-            ViewNode::List(_) => "list",
+            ViewNode::List { .. } => "list",
             ViewNode::Divider => "divider",
             ViewNode::Gauge { .. } => "gauge",
             ViewNode::Spacer { .. } => "spacer",
@@ -424,6 +467,23 @@ impl ViewNode {
                 ..TextStyle::default()
             },
         )
+    }
+
+    /// Build a list with no cursor in it — what most lists are.
+    ///
+    /// A constructor rather than a struct literal at every call site, so that
+    /// adding the cursor did not make the common case noisier than it was.
+    pub fn list(children: Vec<ViewNode>) -> ViewNode {
+        ViewNode::List {
+            children,
+            selected: None,
+        }
+    }
+
+    /// Build a list whose `selected` child (zero-based) the kernel keeps in
+    /// view.
+    pub fn selectable_list(children: Vec<ViewNode>, selected: Option<usize>) -> ViewNode {
+        ViewNode::List { children, selected }
     }
 
     /// Build a gauge, sanitizing its label and suffix like any other text.
@@ -525,7 +585,7 @@ mod tests {
         for node in [
             ViewNode::Row(vec![]),
             ViewNode::Column(vec![]),
-            ViewNode::List(vec![]),
+            ViewNode::list(vec![]),
             ViewNode::Divider,
             ViewNode::Spacer { lines: 1 },
         ] {
@@ -575,7 +635,7 @@ mod tests {
         assert_eq!(ViewNode::Line(vec![]).kind_name(), "line");
         assert_eq!(ViewNode::Row(vec![]).kind_name(), "row");
         assert_eq!(ViewNode::Column(vec![]).kind_name(), "column");
-        assert_eq!(ViewNode::List(vec![]).kind_name(), "list");
+        assert_eq!(ViewNode::list(vec![]).kind_name(), "list");
         assert_eq!(ViewNode::Divider.kind_name(), "divider");
         assert_eq!(ViewNode::Spacer { lines: 1 }.kind_name(), "spacer");
     }
@@ -687,9 +747,9 @@ mod tests {
 
     #[test]
     fn equality_is_structural_so_unchanged_trees_compare_equal() {
-        let a = ViewNode::List(vec![ViewNode::text("one"), ViewNode::Divider]);
-        let b = ViewNode::List(vec![ViewNode::text("one"), ViewNode::Divider]);
-        let c = ViewNode::List(vec![ViewNode::text("two"), ViewNode::Divider]);
+        let a = ViewNode::list(vec![ViewNode::text("one"), ViewNode::Divider]);
+        let b = ViewNode::list(vec![ViewNode::text("one"), ViewNode::Divider]);
+        let c = ViewNode::list(vec![ViewNode::text("two"), ViewNode::Divider]);
         assert_eq!(a, b, "an unchanged tree must not look changed");
         assert_ne!(a, c);
     }

@@ -7442,6 +7442,48 @@ impl App {
             system,
             automations,
             tasks: self.build_tasks_snapshot(),
+            files: self.build_files_snapshot(),
+        }
+    }
+
+    /// The open file tree as the published snapshot carries it.
+    ///
+    /// Built from the tree **the file viewer has open**, which is the honest
+    /// scope: `FileViewerState` is filled lazily by the pane that owns it (on
+    /// toggle, on session change, on a global-search reveal), so before the pane
+    /// has been opened for a session the section is empty. Filling it here
+    /// instead would mean the presence of a plugin decided when thurbox reads
+    /// directories, which is a worse property than an empty pane.
+    ///
+    /// Bounded by
+    /// [`MAX_FILE_ROWS`](crate::session::pane_context::MAX_FILE_ROWS), and the
+    /// cursor is dropped when it falls outside what survived — an index into rows
+    /// that were not published would make the kernel's windowing meaningless.
+    /// Empty with the feature off, the filter the task and automation sections
+    /// already apply.
+    fn build_files_snapshot(&self) -> crate::session::pane_context::FilesSnapshot {
+        use crate::session::pane_context as pc;
+
+        if !self.features.file_viewer {
+            return pc::FilesSnapshot::default();
+        }
+        let rows = self.file_viewer.rows();
+        let published = rows.len().min(pc::MAX_FILE_ROWS);
+        let selected = Some(self.file_viewer.selected_index()).filter(|i| *i < published);
+        pc::FilesSnapshot {
+            nodes: rows
+                .into_iter()
+                .take(published)
+                .map(|row| pc::FileNodeSnapshot {
+                    name: row.name,
+                    depth: row.depth,
+                    is_dir: row.is_dir,
+                    expanded: row.expanded,
+                    matched: row.matched,
+                })
+                .collect(),
+            selected,
+            nerd_font: crate::ui::theme::Theme::nerd_font_enabled(),
         }
     }
 

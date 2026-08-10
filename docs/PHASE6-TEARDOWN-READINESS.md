@@ -67,26 +67,27 @@ it, not a refactor done in pieces.
 
 ## 3. Phase 4 has started, but no pane has been handed over
 
-`src/plugin/bundled/` contains `hello` and `info-panel`.
+`src/plugin/bundled/` contains `hello`, `info-panel`, `tasks` and `file-viewer`.
 
 | Pane | Native renderer | Bundled plugin | Drawn by |
 |---|---|---|---|
 | Info panel | `src/ui/info_panel.rs` | `info-panel` | the native pane |
-| Tasks | `src/ui/tasks_panel.rs` | absent | the native pane |
+| Tasks | `src/ui/tasks_panel.rs` | `tasks` | the native pane |
 | Automations | `src/ui/automations_panel.rs` | absent | the native pane |
-| File viewer | `src/ui/file_viewer.rs` | absent | the native pane |
+| File viewer | `src/ui/file_viewer.rs` | `file-viewer` | the native pane |
 | Global search | `src/ui/global_search.rs` | absent | the native pane |
 | Code review | `src/ui/code_review.rs` | absent | the native pane |
 | Session list | `src/ui/project_list.rs` | absent | the native pane |
 
 `docs/PHASE4-PANE-READINESS.md` is the audit of what the plugin API could not
-express for the *first* of those panes; four of its five gaps are now closed
-(ADR-26, ADR-27) and §5 is half open.
+express for the *first* of those panes; all five of its gaps are now closed
+(ADR-26, ADR-27, ADR-28), and §8 and §9 record what the second and third ports
+needed on top of them (ADR-29, ADR-30).
 
-**A pane's row is ready only on handover, not on existence.** The info panel
-shows why the distinction is load-bearing rather than pedantic: its plugin exists
-and reproduces the pane exactly, while the native renderer is still what the
-interface draws. Deleting `src/ui/info_panel.rs` today would remove the pane every
+**A pane's row is ready only on handover, not on existence.** Three panes now show
+why the distinction is load-bearing rather than pedantic: each plugin exists and
+reproduces its pane exactly, while the native renderer is still what the interface
+draws. Deleting `src/ui/info_panel.rs` today would remove the pane every
 user is looking at. So `tests/teardown_gate.rs`'s pane probe is a conjunction —
 the bundled plugin exists **and** `src/app/view.rs` no longer names the pane's
 native renderer module — and `a_reproduced_pane_is_not_a_replaced_one` pins that

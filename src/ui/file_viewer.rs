@@ -5,19 +5,45 @@
 //! at a time), and callers drive navigation through [`FileViewerState`]
 //! helpers. File I/O (reading directory entries) is performed lazily when a
 //! folder is expanded.
+//!
+//! Like [`super::info_panel`] and [`super::tasks_panel`], the tree renders
+//! through the **view tree**: [`file_tree`] describes the rows and
+//! [`super::plugin_pane::render_tree`] paints them. The split is sharper here
+//! than in the tasks pane, and that is the point of this port:
+//!
+//! - [`file_tree`] carries **no geometry at all** — not even a window. It takes
+//!   every row and the index of the one the cursor is on, and the *renderer*
+//!   scrolls the list to that row from the height it was given
+//!   ([`ViewNode::List`]'s selected child). So a plugin reproducing this pane
+//!   scrolls correctly without ever learning a dimension, which is what the
+//!   tasks port recorded as the gap blocking every remaining pane.
+//! - The pane still resolves that same window itself, for its click hitboxes and
+//!   its scrollbar. Both go through one shared windowing helper, so the rows the
+//!   user can click are the rows the renderer drew.
+//!
+//! The **search bar** below the tree is chrome, not tree, and is deliberately
+//! outside this split: it needs a bordered sub-block, a cursor cell, and a
+//! bottom-anchored region, none of which the view tree can describe. The
+//! search's *effect on the rows* is in [`FileRow::matched`].
 
 use std::path::{Path, PathBuf};
 
 use ratatui::{
     layout::Rect,
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
 };
+// Only the retained pre-port oracle (`legacy_line` and friends) still assembles
+// styled spans by hand.
+#[cfg(test)]
+use ratatui::style::{Modifier, Style as LegacyStyle};
 
 use super::scrollbar::{self, ScrollbarGeom};
 use super::{focus_block, theme::Theme, FocusLevel};
+use crate::session::motion::FrameTable;
+use crate::session::view_tree::{StyleToken, TextStyle, ViewNode};
 use crate::session::SessionInfo;
 
 /// One node in the tree. `children = None` means "not yet expanded"; an
@@ -75,6 +101,29 @@ struct FlatRow {
     label: String,
     is_dir: bool,
     expanded: bool,
+}
+
+/// One row as the pane's view tree describes it.
+///
+/// Distinct from the pane's internal flattened row because this is the
+/// *drawable* one: it has dropped the traversal path nothing visual needs and
+/// gained the running search's verdict, so building the tree from it needs no
+/// query, no matcher and no geometry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRow {
+    /// The node's basename — what the row displays.
+    pub name: String,
+    /// Nesting depth; a root is 0. Two spaces of indent per level.
+    pub depth: usize,
+    /// Whether it is a directory.
+    pub is_dir: bool,
+    /// Whether it is expanded.
+    pub expanded: bool,
+    /// Whether the running search matched this row's name.
+    ///
+    /// `true` when no search is running, so an unsearched tree draws in its
+    /// ordinary colours — the pane never has to ask whether a search exists.
+    pub matched: bool,
 }
 
 pub struct FileViewerState {
@@ -319,6 +368,41 @@ impl FileViewerState {
             .iter()
             .zip(expected.iter())
             .any(|(root, exp)| root.path != *exp)
+    }
+
+    /// The drawable rows of the tree, in the order the pane lists them.
+    ///
+    /// The one traversal of the tree that both the pane and the published
+    /// snapshot use, so the rows a plugin reads are the rows the pane draws.
+    /// Reads nothing from disk: the tree it walks is whatever the user has
+    /// already expanded.
+    pub fn rows(&self) -> Vec<FileRow> {
+        // A search that is not running, or has an empty query, matches every
+        // row — which is how an unsearched tree keeps its ordinary colours.
+        let query = (self.search_active && !self.search_query.is_empty())
+            .then(|| self.search_query.to_lowercase());
+        self.flatten()
+            .into_iter()
+            .map(|row| FileRow {
+                matched: query
+                    .as_deref()
+                    .map(|q| row.label.to_lowercase().contains(q))
+                    .unwrap_or(true),
+                name: row.label,
+                depth: row.depth,
+                is_dir: row.is_dir,
+                expanded: row.expanded,
+            })
+            .collect()
+    }
+
+    /// Which row the cursor is on.
+    ///
+    /// Not clamped to the row count: an index past the last row highlights
+    /// nothing and windows to the end of the list, which is what this pane has
+    /// always done.
+    pub fn selected_index(&self) -> usize {
+        self.selected
     }
 
     fn flatten(&self) -> Vec<FlatRow> {
@@ -623,15 +707,31 @@ pub fn render_file_viewer(
     }
 
     if state.roots.is_empty() {
-        let p = Paragraph::new(Line::from(Span::styled(
-            "No folders",
-            Style::default().fg(Theme::text_muted()),
-        )));
-        frame.render_widget(p, inner);
+        // The empty state is part of the pane's tree, so a plugin reproducing the
+        // pane reproduces this line too rather than only the populated case.
+        paint(
+            &file_tree(&[], None, Theme::nerd_font_enabled()),
+            inner,
+            frame,
+        );
         return (None, Vec::new());
     }
 
-    render_tree(frame, inner, state)
+    render_rows(frame, inner, state)
+}
+
+/// Paint a view tree into `area` through the shared renderer.
+///
+/// A fresh frame table every paint: nothing in this pane animates, and a motion
+/// the kernel is not driving draws frame 0 anyway.
+fn paint(tree: &ViewNode, area: Rect, frame: &mut Frame) {
+    super::plugin_pane::render_tree(
+        tree,
+        area,
+        &super::theme::current(),
+        &FrameTable::default(),
+        frame.buffer_mut(),
+    );
 }
 
 /// Lay out the viewer chrome — the bordered `Files` block plus the optional
@@ -675,36 +775,38 @@ fn render_chrome(
     inner
 }
 
-/// Render the flattened tree rows into `list_area` (with a scrollbar when they
-/// overflow). Returns the scrollbar geometry and one hitbox per visible row.
-fn render_tree(
+/// Render the tree rows into `list_area` (with a scrollbar when they overflow).
+/// Returns the scrollbar geometry and one hitbox per visible row.
+fn render_rows(
     frame: &mut Frame,
     list_area: Rect,
     state: &FileViewerState,
 ) -> (Option<ScrollbarGeom>, Vec<super::RowHitbox>) {
-    let rows = state.flatten();
+    let rows = state.rows();
     let height = list_area.height as usize;
     if height == 0 {
         return (None, Vec::new());
     }
 
-    let query_lc = if state.search_active && !state.search_query.is_empty() {
-        Some(state.search_query.to_lowercase())
-    } else {
-        None
-    };
-
     // Reserve the rightmost column for a scrollbar when the tree overflows.
     let (rows_area, track) = scrollbar::reserve_track(list_area, rows.len(), height);
 
-    let (start, end) = visible_window(rows.len(), state.selected, height);
+    // The tree carries *every* row plus the cursor's index, and the renderer
+    // resolves the window from `rows_area`. This second call is for the hitboxes
+    // and the scrollbar, which need the window as numbers rather than as a paint
+    // — the same function, so the rows a user can click cannot drift from the
+    // rows that were drawn.
+    let (start, end) = visible_window(rows.len(), state.selected, rows_area.height as usize);
 
-    let lines: Vec<Line> = rows[start..end]
-        .iter()
-        .enumerate()
-        .map(|(i, row)| build_row_line(row, start + i == state.selected, query_lc.as_deref()))
-        .collect();
-    frame.render_widget(Paragraph::new(lines), rows_area);
+    paint(
+        &file_tree(
+            &rows,
+            Some(state.selected),
+            super::theme::current().nerd_font_enabled,
+        ),
+        rows_area,
+        frame,
+    );
 
     // One hitbox per visible tree row; `rows_area` already excludes the
     // reserved scrollbar column, so row clicks never overlap the track.
@@ -715,9 +817,48 @@ fn render_tree(
     (geom, hitboxes)
 }
 
-fn row_marker(row: &FlatRow) -> &'static str {
-    let nerd = super::theme::current().nerd_font_enabled;
-    match (row.is_dir, row.expanded, nerd) {
+/// Build the pane's view tree from every row plus the cursor's index.
+///
+/// Carries no geometry: no row is fitted to a width and no row is windowed away,
+/// because the list node's selected child is what lets the *kernel* scroll it to
+/// the cursor from the height it has. `nerd_font` is a parameter rather than a
+/// global read so the tree is a pure function of what it is told — which is also
+/// what lets both glyph sets be tested without a theme switch.
+///
+/// `selected` is not required to be in range: an index past the last row
+/// highlights nothing and windows to the end, which is what this pane has always
+/// done with a stale cursor.
+pub fn file_tree(rows: &[FileRow], selected: Option<usize>, nerd_font: bool) -> ViewNode {
+    if rows.is_empty() {
+        return ViewNode::list(vec![ViewNode::token("No folders", StyleToken::Muted)]);
+    }
+    ViewNode::selectable_list(
+        rows.iter()
+            .enumerate()
+            .map(|(i, row)| row_node(row, Some(i) == selected, nerd_font))
+            .collect(),
+        selected,
+    )
+}
+
+/// One row: `<indent><marker><name>`, as two runs so the marker and the name can
+/// be styled apart.
+fn row_node(row: &FileRow, selected: bool, nerd_font: bool) -> ViewNode {
+    let indent = "  ".repeat(row.depth);
+    let prefix = format!(
+        "{indent}{}",
+        row_marker(row.is_dir, row.expanded, nerd_font)
+    );
+    ViewNode::Line(vec![
+        ViewNode::styled(prefix, prefix_style(selected)),
+        ViewNode::styled(&row.name, name_style(row, selected)),
+    ])
+}
+
+/// The glyph in front of a row: a disclosure triangle, or a nerd-font folder or
+/// file when the user has those enabled.
+fn row_marker(is_dir: bool, expanded: bool, nerd_font: bool) -> &'static str {
+    match (is_dir, expanded, nerd_font) {
         (true, true, false) => "▾ ",
         (true, false, false) => "▸ ",
         (false, _, false) => "  ",
@@ -727,47 +868,49 @@ fn row_marker(row: &FlatRow) -> &'static str {
     }
 }
 
-fn row_label_color(is_match: bool, is_dir: bool) -> ratatui::style::Color {
-    if !is_match {
-        Theme::text_muted()
-    } else if is_dir {
-        Theme::accent()
+/// The indent and marker: muted, or the selection's appearance — and unlike the
+/// name, never bold.
+fn prefix_style(selected: bool) -> TextStyle {
+    if selected {
+        TextStyle {
+            selected: true,
+            ..TextStyle::default()
+        }
     } else {
-        Theme::text_primary()
+        TextStyle {
+            token: Some(StyleToken::Muted),
+            ..TextStyle::default()
+        }
     }
 }
 
-fn build_row_line(row: &FlatRow, selected: bool, query_lc: Option<&str>) -> Line<'static> {
-    let indent = "  ".repeat(row.depth);
-    let marker = row_marker(row);
-    let is_match = query_lc
-        .map(|q| row.label.to_lowercase().contains(q))
-        .unwrap_or(true);
-
-    let label_style = if selected {
-        Style::default()
-            .bg(Theme::selection_bg())
-            .fg(Theme::selection_fg())
-            .add_modifier(Modifier::BOLD)
-    } else {
-        let mut s = Style::default().fg(row_label_color(is_match, row.is_dir));
-        if row.is_dir && is_match {
-            s = s.add_modifier(Modifier::BOLD);
-        }
-        s
-    };
-    let prefix_style = if selected {
-        Style::default()
-            .bg(Theme::selection_bg())
-            .fg(Theme::selection_fg())
-    } else {
-        Style::default().fg(Theme::text_muted())
-    };
-
-    Line::from(vec![
-        Span::styled(format!("{indent}{marker}"), prefix_style),
-        Span::styled(row.label.clone(), label_style),
-    ])
+/// The row's name. Selection wins over everything; otherwise a row a running
+/// search excluded recedes to muted, a matched directory takes the accent and
+/// bold, and a matched file is the theme's primary text.
+fn name_style(row: &FileRow, selected: bool) -> TextStyle {
+    if selected {
+        return TextStyle {
+            selected: true,
+            bold: true,
+            ..TextStyle::default()
+        };
+    }
+    if !row.matched {
+        return TextStyle {
+            token: Some(StyleToken::Muted),
+            ..TextStyle::default()
+        };
+    }
+    if row.is_dir {
+        return TextStyle {
+            token: Some(StyleToken::Accent),
+            bold: true,
+            ..TextStyle::default()
+        };
+    }
+    // No token: the theme's primary foreground, which is what a file has always
+    // been drawn in.
+    TextStyle::default()
 }
 
 fn render_search_bar(
@@ -889,6 +1032,8 @@ pub(crate) fn visible_window(total: usize, selected: usize, height: usize) -> (u
 
 #[cfg(test)]
 mod tests {
+    use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+
     use super::*;
     use crate::session::{SessionInfo, WorktreeInfo};
     use std::path::PathBuf;
@@ -1086,6 +1231,338 @@ mod tests {
         // Budget >= char count returns the whole string unchanged.
         assert_eq!(truncate_left(q, q.chars().count()), q);
         assert_eq!(truncate_left(q, 999), q);
+    }
+
+    // ── the pre-port renderer, retained as an oracle ────────────────────────
+    //
+    // The span-building row builder the pane used before it rendered through the
+    // view tree, including its windowing. Kept so the port is a *checked*
+    // refactor: the differential test below asserts the tree paints the same
+    // cells, which is the only way to know that moving a pane onto the tree — and
+    // moving its scroll window into the renderer — changed nothing a user sees.
+
+    fn legacy_marker(row: &FileRow, nerd: bool) -> &'static str {
+        match (row.is_dir, row.expanded, nerd) {
+            (true, true, false) => "▾ ",
+            (true, false, false) => "▸ ",
+            (false, _, false) => "  ",
+            (true, true, true) => "\u{f07c} ",
+            (true, false, true) => "\u{f07b} ",
+            (false, _, true) => "\u{f15b} ",
+        }
+    }
+
+    fn legacy_label_color(is_match: bool, is_dir: bool) -> ratatui::style::Color {
+        if !is_match {
+            Theme::text_muted()
+        } else if is_dir {
+            Theme::accent()
+        } else {
+            Theme::text_primary()
+        }
+    }
+
+    fn legacy_line(row: &FileRow, selected: bool, nerd: bool) -> Line<'static> {
+        let indent = "  ".repeat(row.depth);
+        let marker = legacy_marker(row, nerd);
+
+        let label_style = if selected {
+            LegacyStyle::default()
+                .bg(Theme::selection_bg())
+                .fg(Theme::selection_fg())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            let mut s = LegacyStyle::default().fg(legacy_label_color(row.matched, row.is_dir));
+            if row.is_dir && row.matched {
+                s = s.add_modifier(Modifier::BOLD);
+            }
+            s
+        };
+        let prefix_style = if selected {
+            LegacyStyle::default()
+                .bg(Theme::selection_bg())
+                .fg(Theme::selection_fg())
+        } else {
+            LegacyStyle::default().fg(Theme::text_muted())
+        };
+
+        Line::from(vec![
+            Span::styled(format!("{indent}{marker}"), prefix_style),
+            Span::styled(row.name.clone(), label_style),
+        ])
+    }
+
+    fn legacy_body(rows: &[FileRow], selected: usize, nerd: bool, height: usize) -> Paragraph<'_> {
+        if rows.is_empty() {
+            return Paragraph::new(Line::from(Span::styled(
+                "No folders",
+                LegacyStyle::default().fg(Theme::text_muted()),
+            )));
+        }
+        let (start, end) = visible_window(rows.len(), selected, height);
+        let lines: Vec<Line> = rows[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, row)| legacy_line(row, start + i == selected, nerd))
+            .collect();
+        Paragraph::new(lines)
+    }
+
+    fn frow(name: &str, depth: usize, is_dir: bool, expanded: bool, matched: bool) -> FileRow {
+        FileRow {
+            name: name.into(),
+            depth,
+            is_dir,
+            expanded,
+            matched,
+        }
+    }
+
+    /// The differential cases: every row appearance the pane has, plus the two
+    /// cases where geometry decides something.
+    fn differential_cases() -> Vec<(&'static str, Vec<FileRow>, usize, bool)> {
+        vec![
+            ("an empty tree", Vec::new(), 0, false),
+            (
+                "a root, a nested dir and files",
+                vec![
+                    frow("repo", 0, true, true, true),
+                    frow("src", 1, true, true, true),
+                    frow("main.rs", 2, false, false, true),
+                    frow("target", 1, true, false, true),
+                    frow("README.md", 1, false, false, true),
+                ],
+                0,
+                false,
+            ),
+            (
+                "the same tree with nerd glyphs",
+                vec![
+                    frow("repo", 0, true, true, true),
+                    frow("src", 1, true, false, true),
+                    frow("main.rs", 1, false, false, true),
+                ],
+                1,
+                true,
+            ),
+            (
+                "the cursor on a file, then on a directory",
+                vec![
+                    frow("repo", 0, true, true, true),
+                    frow("main.rs", 1, false, false, true),
+                ],
+                1,
+                false,
+            ),
+            (
+                "a running search: matched and excluded rows",
+                vec![
+                    frow("host", 0, true, true, true),
+                    frow("hosts.toml", 1, false, false, true),
+                    frow("unrelated.rs", 1, false, false, false),
+                    frow("also-out", 1, true, false, false),
+                ],
+                1,
+                false,
+            ),
+            (
+                "a selected row the search excluded",
+                vec![
+                    frow("repo", 0, true, true, true),
+                    frow("nope.rs", 1, false, false, false),
+                ],
+                1,
+                false,
+            ),
+            (
+                "multi-byte and wide names",
+                vec![
+                    frow("répertoire", 0, true, true, true),
+                    frow("日本語.md", 1, false, false, true),
+                ],
+                1,
+                false,
+            ),
+            (
+                "a cursor past the last row",
+                vec![frow("only", 0, true, true, true)],
+                7,
+                false,
+            ),
+        ]
+    }
+
+    fn render_both(
+        rows: &[FileRow],
+        selected: usize,
+        nerd: bool,
+        w: u16,
+        h: u16,
+    ) -> (Buffer, Buffer) {
+        let area = Rect::new(0, 0, w, h);
+        let mut tree_buf = Buffer::empty(area);
+        let tree = file_tree(rows, (!rows.is_empty()).then_some(selected), nerd);
+        super::super::plugin_pane::render_tree(
+            &tree,
+            area,
+            &super::super::theme::current(),
+            &FrameTable::default(),
+            &mut tree_buf,
+        );
+
+        let mut legacy_buf = Buffer::empty(area);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| f.render_widget(legacy_body(rows, selected, nerd, h as usize), area))
+            .unwrap();
+        legacy_buf.merge(terminal.backend().buffer());
+        (tree_buf, legacy_buf)
+    }
+
+    /// The port's own guarantee: the tree paints the pane the pre-port renderer
+    /// painted, cell for cell and style for style — at a height that fits and at
+    /// one that forces the window to scroll.
+    #[test]
+    fn the_view_tree_paints_what_the_span_renderer_painted() {
+        for (name, rows, selected, nerd) in differential_cases() {
+            for height in [8u16, 3, 2] {
+                let (tree, legacy) = render_both(&rows, selected, nerd, 28, height);
+                assert_eq!(
+                    tree, legacy,
+                    "the tree diverges from the span renderer for `{name}` at height {height}"
+                );
+            }
+        }
+    }
+
+    /// The window moved into the renderer, so the property that mattered is that
+    /// the *renderer's* window still keeps the cursor visible — asserted on the
+    /// painted cells rather than on the helper both sides call.
+    #[test]
+    fn the_renderer_scrolls_the_tree_to_its_cursor() {
+        let rows: Vec<FileRow> = (0..12)
+            .map(|i| frow(&format!("f{i}.rs"), 1, false, false, true))
+            .collect();
+        let area = Rect::new(0, 0, 12, 4);
+        let mut buf = Buffer::empty(area);
+        super::super::plugin_pane::render_tree(
+            &file_tree(&rows, Some(11), false),
+            area,
+            &super::super::theme::current(),
+            &FrameTable::default(),
+            &mut buf,
+        );
+        let text: String = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+        assert!(text.contains("f11.rs"), "the cursor's row must be drawn");
+        assert!(
+            !text.contains("f0.rs"),
+            "and the top must have scrolled off"
+        );
+    }
+
+    /// The window is resolved twice — once by the renderer to paint, once by the
+    /// pane for its hitboxes and scrollbar — so the two must agree. A drift here
+    /// is a click that selects a different row than the one under the pointer.
+    #[test]
+    fn the_click_hitboxes_cover_the_rows_the_renderer_drew() {
+        let mut info = SessionInfo::new("t".into());
+        for name in ["/tmp/a", "/tmp/b", "/tmp/c", "/tmp/d", "/tmp/e"] {
+            info.additional_dirs.push(PathBuf::from(name));
+        }
+        let mut st = FileViewerState::new();
+        st.rebuild_from_session(&info);
+        st.select_index(4);
+
+        // 5 rows into 3 inner lines: the window has to scroll, and the hitboxes
+        // must be the scrolled window's.
+        let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
+        let mut rows = Vec::new();
+        terminal
+            .draw(|f| {
+                rows = render_file_viewer(f, Rect::new(0, 0, 20, 5), &st, FocusLevel::Inactive).1;
+            })
+            .unwrap();
+
+        let indices: Vec<usize> = rows.iter().map(|r| r.index).collect();
+        let (start, end) = visible_window(5, 4, 3);
+        assert_eq!(indices, (start..end).collect::<Vec<_>>());
+        assert!(indices.contains(&4), "the cursor's row is clickable");
+    }
+
+    /// The tree must be a description of content only: nothing in it may depend
+    /// on a width, which shows up as a row padded to fill one.
+    #[test]
+    fn the_tree_carries_no_geometry() {
+        let (_, rows, selected, nerd) = differential_cases().remove(1);
+        fn assert_no_padding(node: &ViewNode) {
+            if let ViewNode::Text { content, .. } = node {
+                assert!(
+                    !content.ends_with("  ") || content.trim().is_empty(),
+                    "a padded run means the tree resolved a width: {content:?}"
+                );
+            }
+            node.children().iter().for_each(assert_no_padding);
+        }
+        assert_no_padding(&file_tree(&rows, Some(selected), nerd));
+    }
+
+    /// `rows` is the one traversal both the pane and the published snapshot use,
+    /// so the search's verdict has to be in it — the pane must not need the query.
+    #[test]
+    fn rows_carry_the_searchs_verdict_and_not_its_query() {
+        let mut info = SessionInfo::new("t".into());
+        info.additional_dirs.push(PathBuf::from("/tmp/alpha"));
+        info.additional_dirs.push(PathBuf::from("/tmp/beta"));
+        let mut st = FileViewerState::new();
+        st.rebuild_from_session(&info);
+
+        // No search: every row matches, which is what keeps an unsearched tree in
+        // its ordinary colours.
+        assert!(st.rows().iter().all(|r| r.matched));
+
+        st.start_search();
+        st.search_push('a');
+        st.search_push('l');
+        let rows = st.rows();
+        assert!(rows[0].matched, "alpha matches `al`");
+        assert!(!rows[1].matched, "beta does not");
+
+        // An empty query is not a running search.
+        st.search_pop();
+        st.search_pop();
+        assert!(st.rows().iter().all(|r| r.matched));
+    }
+
+    #[test]
+    fn rows_report_depth_and_kind() {
+        let mut info = SessionInfo::new("t".into());
+        info.additional_dirs.push(PathBuf::from("/tmp"));
+        let mut st = FileViewerState::new();
+        st.rebuild_from_session(&info);
+        let rows = st.rows();
+        assert_eq!(rows[0].depth, 0, "a root is depth zero");
+        assert!(rows[0].is_dir && rows[0].expanded);
+        assert!(rows.iter().skip(1).all(|r| r.depth == 1));
+    }
+
+    /// A row's name is a basename, never a path — the boundary the published
+    /// section rests on, checked at the source that fills it.
+    #[test]
+    fn a_rows_name_is_a_basename() {
+        let mut info = SessionInfo::new("t".into());
+        info.additional_dirs.push(PathBuf::from("/tmp/some-dir"));
+        let mut st = FileViewerState::new();
+        st.rebuild_from_session(&info);
+        for row in st.rows() {
+            assert!(
+                !row.name.contains(std::path::MAIN_SEPARATOR),
+                "{:?} is a path, not a basename",
+                row.name
+            );
+        }
     }
 
     #[test]

@@ -141,7 +141,7 @@ pub fn info_tree(
     }
     push_automation_rows(&mut rows, automations);
 
-    ViewNode::List(rows)
+    ViewNode::list(rows)
 }
 
 // ── row constructors ─────────────────────────────────────────────────────────

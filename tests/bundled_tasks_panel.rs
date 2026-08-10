@@ -387,7 +387,7 @@ fn the_compared_tree_is_a_whole_pane() {
         .expect("the search case");
     let tree = case.native_tree(WIDE, TALL);
     let rows = match &tree {
-        ViewNode::List(rows) => rows,
+        ViewNode::List { children: rows, .. } => rows,
         other => panic!("expected a list, got {}", other.kind_name()),
     };
     assert_eq!(rows.len(), 3);
@@ -483,7 +483,7 @@ fn a_list_longer_than_the_pane_is_windowed_by_the_kernel_only() {
 
     thurbox::session::pane_context::publish(case.context(WIDE, TALL));
     let plugin_rows = match render(&host) {
-        ViewNode::List(rows) => rows.len(),
+        ViewNode::List { children: rows, .. } => rows.len(),
         other => panic!("expected a list, got {}", other.kind_name()),
     };
     let native = case.native_rows(WIDE, SHORT);

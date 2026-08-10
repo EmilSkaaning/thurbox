@@ -1208,7 +1208,7 @@ mod tests {
 
         let tree = host.render_pane("renderer", "board").expect("renders");
         match &tree {
-            crate::session::view_tree::ViewNode::List(children) => {
+            crate::session::view_tree::ViewNode::List { children, .. } => {
                 assert_eq!(children.len(), 1);
                 // The pane id is passed in, so one plugin can serve several.
                 assert_eq!(

@@ -220,9 +220,9 @@ pub fn tasks_tree(rows: &[TaskRow], focused: bool) -> ViewNode {
         } else {
             "no tasks"
         };
-        return ViewNode::List(vec![ViewNode::token(text, StyleToken::Muted)]);
+        return ViewNode::list(vec![ViewNode::token(text, StyleToken::Muted)]);
     }
-    ViewNode::List(rows.iter().map(task_row_node).collect())
+    ViewNode::list(rows.iter().map(task_row_node).collect())
 }
 
 /// One task row: `<glyph> <title>` with global-search matches emphasised, plus a
@@ -276,6 +276,7 @@ const MATCHED_STYLE: TextStyle = TextStyle {
     bold: true,
     dim: false,
     underline: true,
+    selected: false,
 };
 
 /// A row's resting style, in the precedence the session list and automations

@@ -1,0 +1,29 @@
+# thurbox's file viewer, as a plugin.
+#
+# The third pane of Phase 4, and the one that could not accept the scrolling gap
+# the tasks port recorded: this pane's whole interaction is moving a cursor
+# through a tree taller than its column, so a copy that drew from the first row
+# would not be a reproduction of it. It scrolls by declaring which row its cursor
+# is on and letting the kernel window the list — it is told no height, and it
+# reads no directory.
+#
+# A *reproduction*, not a replacement — the native pane is still what thurbox
+# draws, and `tests/bundled_file_viewer.rs` asserts this plugin builds the
+# identical view tree and paints the identical frame.
+#
+# Two capabilities, and that is the whole reach: it renders, and it reads the
+# file tree the viewer already has open. `files` grants no filesystem access —
+# no directory listing, no file contents, no path.
+name = "file-viewer"
+api_version = 1
+
+capabilities = ["render", "files"]
+
+[[panes]]
+id = "files"
+title = "Files (plugin)"
+slot = "right"
+# Off by default. The native file viewer is still what F3 shows, so shipping this
+# visible would put two file trees side by side on every install. Turn it on to
+# compare them.
+default_visible = false

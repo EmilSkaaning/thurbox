@@ -19,7 +19,8 @@
 use mlua::{Lua, Table};
 
 use crate::session::pane_context::{
-    AutomationSnapshot, PaneContext, SessionSnapshot, SystemSnapshot, TaskSnapshot,
+    AutomationSnapshot, FileNodeSnapshot, PaneContext, SessionSnapshot, SystemSnapshot,
+    TaskSnapshot,
 };
 
 /// Set `key` to `value` only when there is one.
@@ -197,6 +198,41 @@ fn build_task(lua: &Lua, task: &TaskSnapshot) -> mlua::Result<Table> {
         matches.set(i + 1, *pos as u64)?;
     }
     t.set("matchPositions", matches)?;
+    Ok(t)
+}
+
+/// The open file tree: `{ nodes = { … }, selected = n?, nerdFont = bool }`.
+///
+/// Always a table, for the automations reason — "the viewer has no tree open" is
+/// knowledge the kernel has. `nodes` is a one-based array so
+/// `for _, node in ipairs(files.nodes)` works, and `selected` is a **one-based**
+/// index into it: it is the index a plugin hands straight back to `ui.list`, so
+/// the two must agree, and Lua's arrays are one-based.
+///
+/// `selected` is absent rather than `0` when there is no cursor, which is the same
+/// "absent means absent" rule the rest of the boundary uses — and the reason
+/// `ui.list` refuses a `0`.
+pub fn files_table(lua: &Lua, context: &PaneContext) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    let nodes = lua.create_table()?;
+    for (i, node) in context.files.nodes.iter().enumerate() {
+        nodes.set(i + 1, build_file_node(lua, node)?)?;
+    }
+    t.set("nodes", nodes)?;
+    set_opt(&t, "selected", context.files.selected.map(|i| i as u64 + 1))?;
+    t.set("nerdFont", context.files.nerd_font)?;
+    Ok(t)
+}
+
+fn build_file_node(lua: &Lua, node: &FileNodeSnapshot) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("name", node.name.clone())?;
+    t.set("depth", node.depth as u64)?;
+    // Booleans cross even when false: every row carries all three as facts, and
+    // a pane reads them unconditionally.
+    t.set("isDir", node.is_dir)?;
+    t.set("expanded", node.expanded)?;
+    t.set("matched", node.matched)?;
     Ok(t)
 }
 
@@ -433,6 +469,86 @@ mod tests {
         let entries: Table = t.get("entries").unwrap();
         assert_eq!(entries.raw_len(), 0);
         assert!(!t.get::<bool>("focused").unwrap());
+    }
+
+    // ── the open file tree ──
+
+    fn file_context(nodes: Vec<FileNodeSnapshot>, selected: Option<usize>) -> PaneContext {
+        PaneContext {
+            files: crate::session::pane_context::FilesSnapshot {
+                nodes,
+                selected,
+                nerd_font: true,
+            },
+            ..PaneContext::default()
+        }
+    }
+
+    fn node(name: &str, depth: usize, is_dir: bool) -> FileNodeSnapshot {
+        FileNodeSnapshot {
+            name: name.to_string(),
+            depth,
+            is_dir,
+            expanded: is_dir,
+            matched: true,
+        }
+    }
+
+    #[test]
+    fn a_file_row_crosses_with_its_view_facts_and_no_path() {
+        let lua = Lua::new();
+        let ctx = file_context(
+            vec![node("src", 0, true), node("main.rs", 1, false)],
+            Some(1),
+        );
+        let files = files_table(&lua, &ctx).unwrap();
+        let nodes: Table = files.get("nodes").unwrap();
+        assert_eq!(nodes.raw_len(), 2);
+
+        let root: Table = nodes.get(1).unwrap();
+        assert_eq!(root.get::<String>("name").unwrap(), "src");
+        assert_eq!(root.get::<u64>("depth").unwrap(), 0);
+        assert!(root.get::<bool>("isDir").unwrap());
+        assert!(root.get::<bool>("expanded").unwrap());
+        assert!(root.get::<bool>("matched").unwrap());
+        // Nothing that locates the row on disk, and no rendering of it.
+        for absent in ["path", "root", "glyph", "marker", "style"] {
+            assert!(
+                !root.contains_key(absent).unwrap(),
+                "a row must not carry `{absent}`"
+            );
+        }
+
+        // The cursor crosses one-based, because it is the index a plugin hands
+        // straight to `ui.list`.
+        assert_eq!(files.get::<u64>("selected").unwrap(), 2);
+        assert!(files.get::<bool>("nerdFont").unwrap());
+    }
+
+    #[test]
+    fn a_falsey_file_flag_still_crosses() {
+        let lua = Lua::new();
+        let mut row = node("hidden-by-search", 1, false);
+        row.matched = false;
+        let files = files_table(&lua, &file_context(vec![row], Some(0))).unwrap();
+        let first: Table = files.get::<Table>("nodes").unwrap().get(1).unwrap();
+        assert!(!first.get::<bool>("matched").unwrap());
+        assert!(!first.get::<bool>("isDir").unwrap());
+        assert!(!first.get::<bool>("expanded").unwrap());
+    }
+
+    /// No cursor is an **absent** key, not a `0`: the same rule the rest of the
+    /// boundary uses, and the reason `ui.list` refuses a zero index.
+    #[test]
+    fn an_empty_tree_is_an_empty_array_with_no_cursor() {
+        let lua = Lua::new();
+        let files = files_table(&lua, &PaneContext::default()).unwrap();
+        assert_eq!(files.get::<Table>("nodes").unwrap().raw_len(), 0);
+        assert!(matches!(
+            files.get::<mlua::Value>("selected").unwrap(),
+            mlua::Value::Nil
+        ));
+        assert!(!files.get::<bool>("nerdFont").unwrap());
     }
 
     #[test]

@@ -179,6 +179,14 @@ const BUNDLED: &[BundledPlugin] = &[
         manifest: include_str!("bundled/tasks/plugin.toml"),
         entry: include_str!("bundled/tasks/init.luau"),
     },
+    // The file viewer's tree, hidden by default too — the first pane that
+    // *scrolls*, which it does by declaring its cursor's row and letting the
+    // kernel window the list.
+    BundledPlugin {
+        name: "file-viewer",
+        manifest: include_str!("bundled/file-viewer/plugin.toml"),
+        entry: include_str!("bundled/file-viewer/init.luau"),
+    },
 ];
 
 /// Materialize the bundled plugins and return their directories.

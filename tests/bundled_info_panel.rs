@@ -149,9 +149,11 @@ impl Case {
 
         PaneContext {
             session: Some(session),
-            // The task section stays default here: this pane reads none of it,
-            // which is itself worth pinning — a pane sees only what it declares.
+            // The task and file sections stay default here: this pane reads
+            // neither, which is itself worth pinning — a pane sees only what it
+            // declares.
             tasks: Default::default(),
+            files: Default::default(),
             system: self.metrics.as_ref().map(|m| SystemSnapshot {
                 cpu_percent: m.cpu_percent,
                 memory_used: m.memory_used,
@@ -448,7 +450,7 @@ fn the_compared_tree_is_a_whole_pane() {
     let case = full_case();
     let tree = case.native_tree();
     let rows = match &tree {
-        ViewNode::List(rows) => rows.len(),
+        ViewNode::List { children: rows, .. } => rows.len(),
         other => panic!("expected a list, got {}", other.kind_name()),
     };
     assert!(
@@ -479,6 +481,7 @@ fn with_no_session_the_plugin_still_shows_what_it_knows() {
     thurbox::session::pane_context::publish(PaneContext {
         session: None,
         tasks: Default::default(),
+        files: Default::default(),
         system: Some(SystemSnapshot {
             cpu_percent: 5.0,
             memory_used: 1_073_741_824,
@@ -491,7 +494,7 @@ fn with_no_session_the_plugin_still_shows_what_it_knows() {
     });
     let tree = render(&host);
     let rows = match &tree {
-        ViewNode::List(rows) => rows,
+        ViewNode::List { children: rows, .. } => rows,
         other => panic!("expected a list, got {}", other.kind_name()),
     };
     // Divider, "System" heading, CPU gauge, RAM gauge — and nothing about a
@@ -509,7 +512,7 @@ fn the_first_render_before_any_publication_succeeds() {
     thurbox::session::pane_context::publish(PaneContext::default());
     let tree = render(&host);
     match tree {
-        ViewNode::List(rows) => assert!(rows.is_empty(), "{rows:#?}"),
+        ViewNode::List { children: rows, .. } => assert!(rows.is_empty(), "{rows:#?}"),
         other => panic!("expected a list, got {}", other.kind_name()),
     }
 }

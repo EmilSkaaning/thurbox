@@ -937,7 +937,7 @@ and granted capabilities, and everything discovery rejected with its cause.
 `list`/`status` **start** the plugins they report, since a compile or `init`
 failure is invisible until something runs them; `doctor` discovers only.
 Plugins live in `~/.config/thurbox/plugins/<name>/` as a `plugin.toml` plus an
-`init.luau`; the bundled `hello`, `info-panel` and `tasks` plugins are materialized to
+`init.luau`; the bundled `hello`, `info-panel`, `tasks` and `file-viewer` plugins are materialized to
 `~/.local/share/thurbox/builtin-plugins/`, and a user plugin of the same name
 overrides it) and **`command`** (list/describe/run: the typed, agent-callable
 plugin command registry — below; unlike `plugin list`, discovery here starts no
@@ -957,7 +957,29 @@ instead of it, so a pane still names no colour. All three exist because a
 selectable list row needs three appearances a colour cannot express: the selected
 row is bold, a row a running search filtered out is dim, and a matched run is
 underlined (ADR-29). Without them no plugin could draw a list with a search in
-it, which is most of thurbox's panes.
+it, which is most of thurbox's panes. A run may also declare **`selected`**,
+which is *not* an emphasis: the host resolves it to the theme's `selection_fg`
+on `selection_bg`, replacing the token's colour rather than layering over it, and
+it exists because the file viewer draws its cursor's row as a background
+(ADR-30). It stays separate from a **list's** selected row (below) because
+thurbox's two list panes disagree about what a selected row looks like — the
+tasks pane draws it accent+bold, the file viewer in the selection pair — so an
+appearance inferred from the cursor's position would make one of them
+unreproducible.
+
+A `list` may name **which row its cursor is on** (`ui.list(children,
+selectedRow)`, 1-based), and when it does the **kernel** windows the list to keep
+that row visible from the height it was given (ADR-30) — the `gauge` trade
+applied to height. That is the only way a plugin pane scrolls: there is
+deliberately no binding that reports a pane's resolved rect, since rendering
+would then be height-dependent (a resize would have to re-enter a VM before the
+frame that needed it) and a plugin that mis-windowed would produce a broken pane
+rather than a refused node. The window is
+`ui::file_viewer::visible_window`, the same helper thurbox's own panes use, so a
+native pane and a plugin reproducing it paint the *same frame* rather than merely
+build the same tree. An index outside the children is a named conversion error
+rather than a clamp — including `0`, so a zero-based index fails loudly instead
+of pinning the cursor to the first row.
 
 `row` and `line` differ in who
 owns the widths: a `row` splits its area into **equal shares** (a plugin cannot
@@ -1155,6 +1177,22 @@ socket, the palette, the loop guard (nothing a plugin can call spawns a session,
 so the counter would have nothing to increment), and plugin keys in the F1
 editor — which needs `KeyBindings` to resolve a chord to a command id as well as
 to the closed `Action` enum.
+
+A pane plugin reads kernel state through **capability-gated readers** over one
+published snapshot (`session::pane_context`, ADR-27): `sessions` →
+`thurbox.activeSession()`, `metrics` → `thurbox.systemMetrics()`, `automations` →
+`thurbox.upcomingAutomations()`, `tasks` → `thurbox.tasks()`, and `files` →
+`thurbox.files()`. Gated per *kind* rather than by one blanket grant because the
+capability list is what an install prompt is written from. **`files` is not a
+filesystem capability** (ADR-30): it reports the tree thurbox's *file viewer* has
+open — one **basename** per visible row with its depth, its expansion state and
+the running search's verdict, plus the cursor's row and whether nerd-font glyphs
+are enabled — and grants no directory listing, no file contents, no path, and no
+I/O at all. The pane needs none: of the five facts a row draws only its name comes
+from disk, the rest being the user's navigation, a search the kernel runs, and the
+keyboard. It is named `Files` and not `Fs` deliberately —
+`tests/teardown_gate.rs` reserves `Capability::Fs` for v1's agent-config-file
+power.
 
 A plugin may add **environment to every agent session thurbox spawns** — v2's
 bounded replacement for v1's `[[agent_patches]]`. It is **manifest data**

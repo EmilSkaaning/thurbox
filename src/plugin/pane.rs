@@ -127,7 +127,7 @@ mod tests {
     }
 
     fn tree(text: &str) -> ViewNode {
-        ViewNode::List(vec![ViewNode::text(text)])
+        ViewNode::list(vec![ViewNode::text(text)])
     }
 
     #[test]

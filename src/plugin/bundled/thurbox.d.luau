@@ -27,7 +27,19 @@ export type ViewNode = {
     bold: boolean?,
     underline: boolean?,
     dim: boolean?,
+    -- Not an emphasis: asks the host for the theme's selection foreground on its
+    -- selection background, which *replaces* whatever colour `style` resolves to
+    -- rather than layering over it. Use it for the runs of the row a cursor is
+    -- on; combine it with `bold` freely.
+    selected: boolean?,
     children: { ViewNode }?,
+    -- `list` only: which child (1-based) the cursor is on. Named apart from the
+    -- boolean `selected` above because they are different questions — one asks
+    -- *which row*, the other says *this run is on it*. When the list has more
+    -- children than rows, the host windows it to keep that child visible, which
+    -- is the only way a pane scrolls since a plugin is never told its height.
+    -- Must index an existing child; `0` is an error, not "none".
+    selectedRow: number?,
     lines: number?,
     motion: Motion?,
     -- `gauge` only.
@@ -55,7 +67,8 @@ export type Ui = {
         style: StyleToken?,
         bold: boolean?,
         underline: boolean?,
-        dim: boolean?
+        dim: boolean?,
+        selected: boolean?
     ) -> ViewNode,
     row: (children: { ViewNode }?) -> ViewNode,
     -- One row of runs, each at its own width — a `label: value` line. Unlike
@@ -65,7 +78,13 @@ export type Ui = {
     -- area rather than from its content. Overflow is clipped, not wrapped.
     line: (children: { ViewNode }?) -> ViewNode,
     column: (children: { ViewNode }?) -> ViewNode,
-    list: (children: { ViewNode }?) -> ViewNode,
+    -- A list of rows. `selected` is the 1-based index of the row the cursor is
+    -- on; give it and the host scrolls the list to keep that row visible when
+    -- there are more rows than the pane has lines. Omit it and the list draws
+    -- from its first row and is clipped. An index outside the children is an
+    -- error naming the field — including `0`, so a 0-based index fails loudly
+    -- rather than pinning the cursor to the first row.
+    list: (children: { ViewNode }?, selectedRow: number?) -> ViewNode,
     -- Like `line`, but soft-wraps onto further rows instead of clipping at the
     -- pane edge. Use it for text whose length you do not control; use `line`
     -- when a following row must not be pushed down. Same admissible children.
@@ -217,6 +236,35 @@ export type TaskList = {
     focused: boolean,
 }
 
+-- One row of the file tree the file viewer has open.
+--
+-- `name` is a **basename**: there is no path here, and none is needed to draw the
+-- pane. `depth` is what indentation is built from — a root is 0.
+--
+-- `matched` is the running search's verdict on this row, and it is `true` when no
+-- search is running, so an unsearched tree draws in its ordinary colours without
+-- the pane asking whether a search exists. The verdict crosses and the query does
+-- not: you need no matcher, so yours cannot disagree with thurbox's.
+export type FileNode = {
+    name: string,
+    depth: number,
+    isDir: boolean,
+    expanded: boolean,
+    matched: boolean,
+}
+
+-- The open file tree.
+--
+-- `selected` is the 1-based row the cursor is on — hand it straight to
+-- `ui.list`'s second argument and the pane scrolls. Absent when there is no
+-- cursor. `nerdFont` says which marker set to draw; the glyphs themselves are
+-- yours to choose.
+export type FileTree = {
+    nodes: { FileNode },
+    selected: number?,
+    nerdFont: boolean,
+}
+
 export type Thurbox = {
     -- This plugin's own name. Always present.
     name: string,
@@ -240,6 +288,16 @@ export type Thurbox = {
     -- *not* fitted to any width: your pane's size is not yours to know, so draw
     -- the row and let the host clip it.
     tasks: (() -> TaskList)?,
+    -- Present only with `files`. Always a table — "the viewer has no tree open"
+    -- is a fact. Reports the tree the *user* has expanded in thurbox's file
+    -- viewer: one basename per visible row, with its depth and expansion state.
+    --
+    -- This is **not** a filesystem binding. It lists no directory, reads no file,
+    -- reveals no path, and causes no I/O: it reads a snapshot the host already
+    -- built from the pane's own state. A directory the user has not expanded is
+    -- not in it, dotfiles never entered it, and nothing outside the active
+    -- session's own directories can appear.
+    files: (() -> FileTree)?,
 }
 
 -- What a plugin's `init.luau` returns.

@@ -1299,3 +1299,88 @@ reachable — the task list is in SQLite and `plugin` may not import `storage`.
   `PHASE4` §7's prediction that every pane would reimplement `format_bytes` is
   still made by one pane, so a `thurbox.format.*` table remains undesigned on
   purpose.
+
+## ADR-30: A list scrolls to a row it names; the file tree is not the filesystem
+
+**Context.** The file viewer is the third Phase 4 port, and it is the pane that
+could not accept the gap ADR-29 recorded. Its whole interaction is moving a cursor
+through a tree taller than its column, so the tasks pane's compromise — the kernel
+windows the list, the plugin's copy draws from row 0 — would have produced a copy
+that never shows the row that matters. Reading `src/ui/file_viewer.rs` rather than
+the node catalogue (`PHASE4` §6's discipline) turned up two other things the tree
+could not say: the pane draws its cursor's row with a **background**, and its
+marker glyphs depend on a display **setting** no binding reported. And the port was
+specified as needing a filesystem capability, which turned out to be the wrong
+reading of the pane.
+
+**Decision.**
+
+1. **A list may name the row its cursor is on, and the kernel windows it.**
+   `ViewNode::List { children, selected }`; when `selected` is present the renderer
+   picks the visible slice through `ui::file_viewer::visible_window` — the helper
+   the native panes already shared. This is the `gauge` trade of ADR-26 applied to
+   height, and because both sides go through one function the claim strengthens
+   from "the trees are equal" to "the frames are equal when the pane scrolls".
+   Rejected again, for ADR-26's reasons: reporting the resolved rect into the
+   plugin. Rejected: a second node kind for a selectable list — two spellings would
+   force every pane that later grew a cursor to migrate. Rejected: windowing by
+   accumulated child heights, which is more general and speculative — `selected`
+   means "this list is a list of rows", and matching `visible_window` exactly is
+   what makes the frame equality testable.
+2. **A run may declare that it belongs to the selected row.**
+   `TextStyle::selected` resolves to the theme's `selection_fg` on `selection_bg`,
+   *replacing* the token's colour rather than layering over it as the three
+   emphases do. The plugin names a role; the theme owns both colours, so the tree
+   still admits no way to name one. Rejected — and this is the interesting
+   rejection — letting the **list's** selected index drive the appearance, which
+   the kernel could trivially do. It cannot, because thurbox's two list panes
+   disagree about what a selected row looks like: the tasks pane draws it in the
+   accent and bold, the file viewer in the selection pair. An appearance inferred from the
+   anchor would have made one of them unreproducible. So the anchor is the list's
+   and the appearance is the run's.
+3. **`Capability::Files` reads the tree the pane has open — not the filesystem.**
+   The published section is basenames, depths, expansion state, each row's search
+   verdict, the cursor's index, and whether nerd glyphs are on. It grants no
+   `read_dir`, no file contents, no path, and causes no I/O. Rejected: the
+   directory-listing capability the port was specified with. Of the five facts a
+   row draws only its name comes from disk — depth and expansion are the *user's*
+   navigation, `matched` is a search the kernel runs, the cursor is the keyboard's
+   — so a plugin holding `read_dir` could draw *a* tree but not *this pane*, and
+   the equality test that is a Phase 4 port's deliverable could not exist. It would
+   also put blocking, unbounded I/O behind an instruction budget that does not
+   measure it. The name is `Files` and not `Fs` on purpose:
+   `tests/teardown_gate.rs` reserves `Capability::Fs` for v1's "place a file in an
+   agent's own config dir" power, and a filesystem binding here would have advanced
+   that verdict as a side effect of drawing a tree.
+4. **The kernel publishes `nerdFont`, not the glyph.** ADR-29's rule — publish a
+   rendering only when two panes must agree about it — and `src/ui/file_viewer.rs`
+   is the only reader of `nerd_font_enabled` outside the theme. It rides on the
+   file section because that is its only consumer; a second consumer should lift it
+   to its own section rather than a copy appearing.
+
+**Consequences.**
+
+- `ui::file_viewer::file_tree` carries **no geometry at all** — not even a window,
+  which `tasks_tree` still receives. The pane resolves the same window itself for
+  its click hitboxes and its scrollbar, from the same helper, and a test asserts
+  the clickable rows are the rows that were drawn.
+- The bundled `file-viewer` plugin reproduces the pane from two declared
+  capabilities, and `tests/bundled_file_viewer.rs` asserts tree equality across ten
+  content variants (both glyph sets, a running search, a selected row the search
+  excluded, deep nesting, wide names, no cursor at all) **and** frame equality at a
+  height that forces a scroll.
+- **The search sub-mode's bar is out of scope, stated rather than omitted.** It
+  needs three things the surface lacks — a bordered container node, a cursor
+  appearance, and a bottom-anchored fixed-height region — and its match counter
+  would need the query text the capability withholds. The search's *effect on the
+  rows* is ported and tested, so the record distinguishes "cannot be drawn" from
+  "was not attempted". The scrollbar is likewise pinned as a divergence: it is
+  chrome the native pane reserves *outside* the tree, so moving it in would change
+  the native pane's layout.
+- One limitation of the section, pinned by its own test: the published tree is the
+  tree **the pane has open**, filled lazily by the pane that owns it, so a plugin
+  sees `No folders` until the native viewer has been opened once for a session.
+  Filling it from the publisher would let the presence of a plugin decide when
+  thurbox reads directories.
+- Still no formatter. After three ports `PHASE4` §7's `thurbox.format.*` case is
+  made by exactly one pane, which is now evidence rather than an absence of it.

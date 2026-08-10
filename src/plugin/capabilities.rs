@@ -176,6 +176,20 @@ pub fn build_module_table(
         module.set("tasks", read)?;
     }
 
+    // Reads the file tree the file viewer has open — and nothing else. There is
+    // deliberately no companion binding that lists a directory or reads a file:
+    // the pane's rows are kernel view state (which directories the user
+    // expanded, where the cursor is, what the search matched), so a filesystem
+    // binding would be strictly more power for strictly less result. Denial
+    // stays by absence, so the way to keep it that way is not to write one.
+    if granted.has(Capability::Files) {
+        let read = lua.create_function(|lua, ()| {
+            let context = crate::session::pane_context::published().unwrap_or_default();
+            super::kernel_state::files_table(lua, &context)
+        })?;
+        module.set("files", read)?;
+    }
+
     // View-node constructors. Ungated on purpose: they build plain tables and
     // grant no host power, so hiding them behind a capability would be theatre.
     // Implemented here rather than as a shipped `.luau` file so they live in
@@ -200,37 +214,47 @@ pub fn build_module_table(
 fn build_ui_table(lua: &Lua) -> mlua::Result<Table> {
     let ui = lua.create_table()?;
 
-    // `ui.text(content, style?, bold?, underline?, dim?)`
+    // `ui.text(content, style?, bold?, underline?, dim?, selected?)`
     //
-    // The emphases are positional flags rather than an options table because the
-    // node's own fields are the canonical form and `bold` cannot stop being the
-    // third argument without breaking every plugin already written against it —
-    // two spellings of one node would be worse than one long signature.
+    // The flags are positional rather than an options table because the node's
+    // own fields are the canonical form and `bold` cannot stop being the third
+    // argument without breaking every plugin already written against it — two
+    // spellings of one node would be worse than one long signature. Six is the
+    // practical limit of that form: a seventh should convert the flags to a
+    // table rather than continue, which is a decision for whoever needs one.
     type TextArgs = (
         mlua::Value,
         Option<String>,
         Option<bool>,
         Option<bool>,
         Option<bool>,
+        Option<bool>,
     );
     ui.set(
         "text",
-        lua.create_function(|lua, (content, style, bold, underline, dim): TextArgs| {
-            let node = lua.create_table()?;
-            node.set("kind", "text")?;
-            node.set("content", content)?;
-            if let Some(style) = style {
-                node.set("style", style)?;
-            }
-            // Only a `true` is carried, so a node table stays as small as
-            // what it actually declares.
-            for (key, flag) in [("bold", bold), ("underline", underline), ("dim", dim)] {
-                if let Some(true) = flag {
-                    node.set(key, true)?;
+        lua.create_function(
+            |lua, (content, style, bold, underline, dim, selected): TextArgs| {
+                let node = lua.create_table()?;
+                node.set("kind", "text")?;
+                node.set("content", content)?;
+                if let Some(style) = style {
+                    node.set("style", style)?;
                 }
-            }
-            Ok(node)
-        })?,
+                // Only a `true` is carried, so a node table stays as small as
+                // what it actually declares.
+                for (key, flag) in [
+                    ("bold", bold),
+                    ("underline", underline),
+                    ("dim", dim),
+                    ("selected", selected),
+                ] {
+                    if let Some(true) = flag {
+                        node.set(key, true)?;
+                    }
+                }
+                Ok(node)
+            },
+        )?,
     )?;
 
     // `line` shares the container shape but not the layout: its children are
@@ -239,7 +263,7 @@ fn build_ui_table(lua: &Lua) -> mlua::Result<Table> {
     // `paragraph` shares `line`'s inline children but wraps instead of clipping,
     // so an unbounded value stays readable where a fixed-width row must not push
     // its neighbours down.
-    for kind in ["row", "line", "paragraph", "column", "list"] {
+    for kind in ["row", "line", "paragraph", "column"] {
         ui.set(
             kind,
             lua.create_function(move |lua, children: Option<Table>| {
@@ -250,6 +274,27 @@ fn build_ui_table(lua: &Lua) -> mlua::Result<Table> {
             })?,
         )?;
     }
+
+    // `ui.list(children, selected?)` — the one container that may name the row
+    // its cursor is on, so the kernel can scroll it to that row from a height
+    // the plugin is never told. One-based, like the table it indexes.
+    ui.set(
+        "list",
+        lua.create_function(
+            |lua, (children, selected_row): (Option<Table>, Option<mlua::Value>)| {
+                let node = lua.create_table()?;
+                node.set("kind", "list")?;
+                node.set("children", children.unwrap_or(lua.create_table()?))?;
+                // Passed through rather than validated here: conversion owns the
+                // range check, so a bad index is one named error rather than two
+                // that can disagree.
+                if let Some(row) = selected_row.filter(|v| !v.is_nil()) {
+                    node.set("selectedRow", row)?;
+                }
+                Ok(node)
+            },
+        )?,
+    )?;
 
     ui.set(
         "divider",
@@ -469,22 +514,37 @@ mod tests {
             (
                 Capability::Sessions,
                 "activeSession",
-                ["systemMetrics", "upcomingAutomations", "tasks"],
+                ["systemMetrics", "upcomingAutomations", "tasks", "files"],
             ),
             (
                 Capability::Metrics,
                 "systemMetrics",
-                ["activeSession", "upcomingAutomations", "tasks"],
+                ["activeSession", "upcomingAutomations", "tasks", "files"],
             ),
             (
                 Capability::Automations,
                 "upcomingAutomations",
-                ["activeSession", "systemMetrics", "tasks"],
+                ["activeSession", "systemMetrics", "tasks", "files"],
             ),
             (
                 Capability::Tasks,
                 "tasks",
-                ["activeSession", "systemMetrics", "upcomingAutomations"],
+                [
+                    "activeSession",
+                    "systemMetrics",
+                    "upcomingAutomations",
+                    "files",
+                ],
+            ),
+            (
+                Capability::Files,
+                "files",
+                [
+                    "activeSession",
+                    "systemMetrics",
+                    "upcomingAutomations",
+                    "tasks",
+                ],
             ),
         ] {
             let module = build_module_table(
@@ -516,6 +576,7 @@ mod tests {
             "systemMetrics",
             "upcomingAutomations",
             "tasks",
+            "files",
         ] {
             assert!(!module.contains_key(name).unwrap(), "{name} leaked");
         }
@@ -536,6 +597,7 @@ mod tests {
                 Capability::Metrics,
                 Capability::Automations,
                 Capability::Tasks,
+                Capability::Files,
             ])),
             None,
         )
@@ -558,6 +620,52 @@ mod tests {
             .call(())
             .unwrap();
         assert_eq!(tasks.get::<Table>("entries").unwrap().raw_len(), 0);
+        let files: Table = module
+            .get::<mlua::Function>("files")
+            .unwrap()
+            .call(())
+            .unwrap();
+        assert_eq!(files.get::<Table>("nodes").unwrap().raw_len(), 0);
+        assert!(matches!(
+            files.get::<mlua::Value>("selected").unwrap(),
+            mlua::Value::Nil
+        ));
+    }
+
+    /// The `files` capability is the widest-*sounding* grant in the host, so what
+    /// it does not insert is asserted directly: there is no binding through which
+    /// a plugin holding it can reach the filesystem.
+    #[test]
+    fn the_file_capability_inserts_no_filesystem_binding() {
+        let lua = Lua::new();
+        let module = build_module_table(
+            &lua,
+            "demo",
+            &GrantedCapabilities::from_manifest(&set(&[Capability::Files])),
+            None,
+        )
+        .unwrap();
+        for name in [
+            "readDir",
+            "readFile",
+            "listDir",
+            "stat",
+            "openFile",
+            "writeFile",
+            "fs",
+            "path",
+        ] {
+            assert!(
+                !module.contains_key(name).unwrap(),
+                "granting `files` must not insert `{name}`"
+            );
+        }
+        // And the host defines no filesystem capability at all, so none could be
+        // granted even by a manifest that asked.
+        assert!(
+            Capability::from_str("fs").is_err(),
+            "the vocabulary must define no filesystem capability"
+        );
     }
 
     #[test]

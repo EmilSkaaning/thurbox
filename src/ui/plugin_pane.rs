@@ -56,11 +56,21 @@ pub fn token_color(token: StyleToken, palette: &ThemePalette) -> Color {
 
 /// Turn a node's text style into a ratatui style.
 fn text_style(style: TextStyle, palette: &ThemePalette) -> Style {
-    let color = style
-        .token
-        .map(|t| token_color(t, palette))
-        .unwrap_or(palette.text_primary);
-    let mut s = Style::default().fg(color);
+    // Selection is a *pair* the theme owns, and it replaces the token's colour
+    // rather than layering over it: a run on the cursor's row is drawn in the
+    // theme's selection appearance whatever role it would otherwise have had.
+    // The three emphases below still apply, so a selected row can be bold.
+    let mut s = if style.selected {
+        Style::default()
+            .bg(palette.selection_bg)
+            .fg(palette.selection_fg)
+    } else {
+        let color = style
+            .token
+            .map(|t| token_color(t, palette))
+            .unwrap_or(palette.text_primary);
+        Style::default().fg(color)
+    };
     if style.bold {
         s = s.add_modifier(Modifier::BOLD);
     }
@@ -121,7 +131,7 @@ fn height_of(node: &ViewNode, width: u16, palette: &ThemePalette, frames: &Frame
             .map(|(cell, child)| height_of(child, cell.width, palette, frames))
             .max()
             .unwrap_or(0),
-        ViewNode::Column(children) | ViewNode::List(children) => children
+        ViewNode::Column(children) | ViewNode::List { children, .. } => children
             .iter()
             .map(|c| height_of(c, width, palette, frames))
             .sum::<u16>(),
@@ -184,7 +194,7 @@ fn inline_width(node: &ViewNode) -> usize {
         ViewNode::Row(_)
         | ViewNode::Paragraph(_)
         | ViewNode::Column(_)
-        | ViewNode::List(_)
+        | ViewNode::List { .. }
         | ViewNode::Divider
         | ViewNode::Gauge { .. }
         | ViewNode::Spacer { .. } => 0,
@@ -227,7 +237,7 @@ fn inline_spans<'a>(
             ViewNode::Row(_)
             | ViewNode::Paragraph(_)
             | ViewNode::Column(_)
-            | ViewNode::List(_)
+            | ViewNode::List { .. }
             | ViewNode::Divider
             | ViewNode::Gauge { .. }
             | ViewNode::Spacer { .. } => {}
@@ -335,6 +345,45 @@ fn render_gauge(
     Paragraph::new(bar_line).render(Rect { height: 1, ..area }, buf);
 }
 
+/// Draw `children` top to bottom, each at the height it asks for, stopping at
+/// the bottom of `area`.
+///
+/// Shared by [`ViewNode::Column`] and [`ViewNode::List`] so the two stack
+/// identically; a list's only difference is *which* children it hands over.
+fn render_stacked(
+    children: &[ViewNode],
+    area: Rect,
+    palette: &ThemePalette,
+    frames: &FrameTable,
+    buf: &mut ratatui::buffer::Buffer,
+) {
+    let mut y = area.y;
+    let bottom = area.y.saturating_add(area.height);
+    for child in children {
+        if y >= bottom {
+            break;
+        }
+        let want = height_of(child, area.width, palette, frames);
+        let height = want.min(bottom - y);
+        if height == 0 {
+            continue;
+        }
+        render_tree(
+            child,
+            Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height,
+            },
+            palette,
+            frames,
+            buf,
+        );
+        y = y.saturating_add(height);
+    }
+}
+
 /// Draw a view tree into `area`.
 ///
 /// `frames` says which frame each animated node is showing. It is plain data
@@ -409,32 +458,21 @@ pub fn render_tree(
                 );
             }
         }
-        ViewNode::Column(children) | ViewNode::List(children) => {
-            let mut y = area.y;
-            let bottom = area.y.saturating_add(area.height);
-            for child in children {
-                if y >= bottom {
-                    break;
-                }
-                let want = height_of(child, area.width, palette, frames);
-                let height = want.min(bottom - y);
-                if height == 0 {
-                    continue;
-                }
-                render_tree(
-                    child,
-                    Rect {
-                        x: area.x,
-                        y,
-                        width: area.width,
-                        height,
-                    },
-                    palette,
-                    frames,
-                    buf,
-                );
-                y = y.saturating_add(height);
-            }
+        ViewNode::Column(children) => {
+            render_stacked(children, area, palette, frames, buf);
+        }
+        ViewNode::List { children, selected } => {
+            // The one place the kernel resolves a *height* on a plugin's behalf.
+            // A plugin is never told how many rows it got, so a list that
+            // declares which child the cursor is on hands the scroll decision
+            // here — through the same `visible_window` thurbox's own panes use,
+            // which is what lets a native pane and a plugin reproducing it paint
+            // the same frame rather than merely build the same tree.
+            let window = selected.map(|selected| {
+                super::file_viewer::visible_window(children.len(), selected, area.height as usize)
+            });
+            let (start, end) = window.unwrap_or((0, children.len()));
+            render_stacked(&children[start..end], area, palette, frames, buf);
         }
         ViewNode::Motion { key, motion, .. } => {
             // Frame 0 is the answer for a motion the kernel is not animating
@@ -492,7 +530,7 @@ mod tests {
 
     #[test]
     fn a_list_stacks_its_children() {
-        let tree = ViewNode::List(vec![
+        let tree = ViewNode::list(vec![
             ViewNode::text("one"),
             ViewNode::text("two"),
             ViewNode::text("three"),
@@ -507,7 +545,7 @@ mod tests {
 
     #[test]
     fn a_spacer_leaves_blank_lines() {
-        let tree = ViewNode::List(vec![
+        let tree = ViewNode::list(vec![
             ViewNode::text("above"),
             ViewNode::Spacer { lines: 2 },
             ViewNode::text("below"),
@@ -524,7 +562,7 @@ mod tests {
 
     #[test]
     fn content_past_the_bottom_is_dropped_not_overdrawn() {
-        let tree = ViewNode::List(vec![
+        let tree = ViewNode::list(vec![
             ViewNode::text("one"),
             ViewNode::text("two"),
             ViewNode::text("three"),
@@ -654,6 +692,91 @@ mod tests {
         );
     }
 
+    /// The selection role: both palette colours come from the theme, and the run
+    /// keeps whatever emphasis it declared.
+    #[test]
+    fn a_selected_run_takes_the_themes_selection_pair() {
+        let p = palette();
+        let rect = area(6, 1);
+        let mut buf = Buffer::empty(rect);
+        render_tree(
+            &ViewNode::Line(vec![
+                ViewNode::styled(
+                    "s",
+                    TextStyle {
+                        // A token that would otherwise have coloured it: the
+                        // selection has to win, or a selected muted row would
+                        // read as unselected.
+                        token: Some(StyleToken::Muted),
+                        bold: true,
+                        selected: true,
+                        ..TextStyle::default()
+                    },
+                ),
+                ViewNode::token("n", StyleToken::Muted),
+            ]),
+            rect,
+            &p,
+            &FrameTable::default(),
+            &mut buf,
+        );
+
+        let sel = &buf[(0, 0)];
+        assert_eq!(sel.fg, p.selection_fg);
+        assert_eq!(sel.bg, p.selection_bg);
+        assert!(
+            sel.modifier.contains(Modifier::BOLD),
+            "emphasis still applies"
+        );
+
+        let next = &buf[(1, 0)];
+        assert_eq!(next.fg, p.text_muted, "the neighbour keeps its own token");
+        assert_ne!(next.bg, p.selection_bg, "the selection does not bleed");
+    }
+
+    // ── a list that scrolls to its cursor ──
+
+    fn rows(labels: &[&str], selected: Option<usize>) -> ViewNode {
+        ViewNode::selectable_list(
+            labels.iter().map(|l| ViewNode::text(*l)).collect(),
+            selected,
+        )
+    }
+
+    #[test]
+    fn a_list_that_fits_draws_every_row_whether_or_not_it_has_a_cursor() {
+        let labels = ["a", "b", "c"];
+        assert_eq!(draw(&rows(&labels, Some(2)), 4, 3), vec!["a", "b", "c"]);
+        assert_eq!(draw(&rows(&labels, None), 4, 3), vec!["a", "b", "c"]);
+    }
+
+    /// The whole point of the field: without it the cursor's row is below the
+    /// fold and the pane shows a list with no visible selection.
+    #[test]
+    fn a_list_longer_than_its_area_scrolls_to_its_cursor() {
+        let labels = ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"];
+        let drawn = draw(&rows(&labels, Some(7)), 4, 3);
+        assert!(drawn.contains(&"r7".to_string()), "{drawn:?}");
+        assert!(!drawn.contains(&"r0".to_string()), "{drawn:?}");
+        // And the same list without a cursor still starts at the top, so the
+        // field changes nothing a plugin did not ask for.
+        assert_eq!(draw(&rows(&labels, None), 4, 3), vec!["r0", "r1", "r2"]);
+    }
+
+    /// The window is the *shared* one, not a second rule that happens to agree:
+    /// a native pane derives its click hitboxes from `visible_window` and the
+    /// renderer paints from it, and the two must not be able to drift.
+    #[test]
+    fn the_window_is_the_one_the_native_panes_use() {
+        let labels: Vec<String> = (0..20).map(|i| format!("r{i}")).collect();
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        for selected in [0usize, 7, 19] {
+            let (start, end) = super::super::file_viewer::visible_window(refs.len(), selected, 5);
+            let expected: Vec<String> = refs[start..end].iter().map(|s| s.to_string()).collect();
+            assert_eq!(draw(&rows(&refs, Some(selected)), 4, 5), expected);
+        }
+    }
+
     #[test]
     fn a_line_packs_runs_at_their_own_width() {
         // The whole point: `row` would have given each of these half the area,
@@ -703,7 +826,7 @@ mod tests {
 
     #[test]
     fn a_line_longer_than_the_pane_is_clipped_not_wrapped() {
-        let tree = ViewNode::List(vec![
+        let tree = ViewNode::list(vec![
             ViewNode::Line(vec![ViewNode::text("aaaa"), ViewNode::text("bbbb")]),
             ViewNode::text("next"),
         ]);
@@ -725,7 +848,7 @@ mod tests {
     fn a_wrapping_paragraph_does_not_overdraw_its_sibling() {
         // The reason `height_of` takes a width at all: allocate one row here and
         // `next` would be painted over by the wrap.
-        let tree = ViewNode::List(vec![
+        let tree = ViewNode::list(vec![
             ViewNode::Paragraph(vec![ViewNode::text("one two three four")]),
             ViewNode::text("next"),
         ]);
@@ -737,7 +860,7 @@ mod tests {
 
     #[test]
     fn a_paragraph_that_fits_is_one_row() {
-        let tree = ViewNode::List(vec![
+        let tree = ViewNode::list(vec![
             ViewNode::Paragraph(vec![ViewNode::text("short")]),
             ViewNode::text("next"),
         ]);
@@ -806,7 +929,7 @@ mod tests {
 
     #[test]
     fn a_gauge_reserves_two_rows_so_a_sibling_follows_its_bar() {
-        let tree = ViewNode::List(vec![
+        let tree = ViewNode::list(vec![
             ViewNode::gauge("CPU", 50.0, None),
             ViewNode::text("after"),
         ]);
@@ -818,7 +941,7 @@ mod tests {
         // The case the info panel's differential sweep found: label plus suffix
         // exceed the width, so the header wraps and the bar must follow it rather
         // than being painted over the overflow.
-        let tree = ViewNode::List(vec![
+        let tree = ViewNode::list(vec![
             ViewNode::gauge("Context", 7.0, None),
             ViewNode::text("after"),
         ]);

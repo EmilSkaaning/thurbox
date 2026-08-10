@@ -3711,7 +3711,7 @@ fn plugin_pane_renders_its_tree_in_a_real_frame() {
     );
 
     // A successful render replaces it with the plugin's own content.
-    pane.apply(Ok(ViewNode::List(vec![
+    pane.apply(Ok(ViewNode::list(vec![
         ViewNode::styled(
             "PLUGIN HEADING",
             TextStyle {
@@ -4745,6 +4745,137 @@ fn a_changed_task_list_republishes_and_an_unchanged_one_does_not() {
         h.app.perf_counters().pane_context_publishes,
         before + 1,
         "a still task list must not be republished every tick"
+    );
+}
+
+/// The file section publishes the tree the viewer has open — with the cursor's
+/// row as an index, basenames rather than paths, and no rendering.
+#[test]
+fn pane_context_describes_the_open_file_tree() {
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(1);
+
+    // Nothing is published before the pane has a tree: `FileViewerState` is
+    // filled lazily by the pane that owns it, so an untouched viewer is an empty
+    // section rather than a directory read on the tick.
+    assert!(h.app.build_pane_context().files.nodes.is_empty());
+    assert_eq!(h.app.build_pane_context().files.selected, None);
+
+    // Give the session a directory with something in it, then open the viewer the
+    // way a user does.
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::create_dir(repo.path().join("src")).unwrap();
+    std::fs::write(repo.path().join("README.md"), "hi").unwrap();
+    let idx = h.app.active_index;
+    h.app.sessions[idx].info.cwd = Some(repo.path().to_path_buf());
+    h.app.rebuild_file_viewer_for_active();
+
+    let files = h.app.build_pane_context().files;
+    let names: Vec<&str> = files.nodes.iter().map(|n| n.name.as_str()).collect();
+    // The root, then its entries — directories before files, which is the order
+    // the pane lists them in.
+    assert_eq!(names.len(), 3, "{names:?}");
+    assert_eq!(names[1], "src");
+    assert_eq!(names[2], "README.md");
+    assert_eq!(files.nodes[0].depth, 0);
+    assert!(files.nodes[0].is_dir && files.nodes[0].expanded);
+    assert_eq!(files.nodes[1].depth, 1);
+    assert!(files.nodes[1].is_dir && !files.nodes[1].expanded);
+    assert!(!files.nodes[2].is_dir);
+    assert!(
+        files.nodes.iter().all(|n| n.matched),
+        "no search is running, so every row matches"
+    );
+    assert_eq!(
+        files.selected,
+        Some(0),
+        "the cursor is an index into the rows, in the form the list node takes"
+    );
+    // And a basename, not a path: the whole capability rests on this.
+    assert!(
+        !names.iter().any(|n| n.contains(std::path::MAIN_SEPARATOR)),
+        "{names:?}"
+    );
+}
+
+/// With the feature off thurbox draws no file viewer, so a pane advertising one
+/// would surface something the user switched off.
+#[test]
+fn pane_context_publishes_no_files_when_the_feature_is_off() {
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(1);
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("a.txt"), "x").unwrap();
+    let idx = h.app.active_index;
+    h.app.sessions[idx].info.cwd = Some(repo.path().to_path_buf());
+    h.app.rebuild_file_viewer_for_active();
+    assert!(!h.app.build_pane_context().files.nodes.is_empty());
+
+    h.app.features.file_viewer = false;
+    let files = h.app.build_pane_context().files;
+    assert!(
+        files.nodes.is_empty() && files.selected.is_none(),
+        "the section follows its feature flag, like the task and automation sections"
+    );
+}
+
+/// The bound is on the section, so a tree far longer than any pane can show
+/// cannot make a plugin's render exceed the view tree's node budget — and the
+/// cursor is dropped rather than published as an index into rows that were not.
+#[test]
+fn pane_context_bounds_how_many_file_rows_it_publishes() {
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(1);
+    let repo = tempfile::tempdir().unwrap();
+    let over = crate::session::pane_context::MAX_FILE_ROWS + 7;
+    for i in 0..over {
+        std::fs::write(repo.path().join(format!("f{i:05}.txt")), "x").unwrap();
+    }
+    let idx = h.app.active_index;
+    h.app.sessions[idx].info.cwd = Some(repo.path().to_path_buf());
+    h.app.rebuild_file_viewer_for_active();
+    // Put the cursor past the bound, which is the case the drop rule is for.
+    h.app.file_viewer.select_index(over);
+
+    let files = h.app.build_pane_context().files;
+    assert_eq!(
+        files.nodes.len(),
+        crate::session::pane_context::MAX_FILE_ROWS
+    );
+    assert_eq!(
+        files.selected, None,
+        "a cursor past the published rows is dropped, not clamped: an index into \
+         rows that were not published would make the kernel's windowing meaningless"
+    );
+}
+
+/// A changed file tree is a changed snapshot; an unchanged one still publishes
+/// once, so adding the section did not defeat the change gate.
+#[test]
+fn a_changed_file_tree_republishes_and_an_unchanged_one_does_not() {
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(1);
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("a.txt"), "x").unwrap();
+    let idx = h.app.active_index;
+    h.app.sessions[idx].info.cwd = Some(repo.path().to_path_buf());
+    h.tick();
+    let before = h.app.perf_counters().pane_context_publishes;
+
+    h.app.rebuild_file_viewer_for_active();
+    h.tick();
+    assert_eq!(
+        h.app.perf_counters().pane_context_publishes,
+        before + 1,
+        "a tree the user opened is state that moved"
+    );
+    for _ in 0..3 {
+        h.tick();
+    }
+    assert_eq!(
+        h.app.perf_counters().pane_context_publishes,
+        before + 1,
+        "a still file tree must not be republished every tick"
     );
 }
 

@@ -220,9 +220,7 @@ fn convert(
         "column" => Ok(ViewNode::Column(convert_children(
             table, &kind, depth, budget, path,
         )?)),
-        "list" => Ok(ViewNode::List(convert_children(
-            table, &kind, depth, budget, path,
-        )?)),
+        "list" => convert_list(table, &kind, depth, budget, path),
         "line" => {
             let runs = convert_children(table, &kind, depth, budget, path)?;
             // Asked of the converted child rather than decided while walking
@@ -262,6 +260,48 @@ fn convert(
         }
         _ => Err(ViewError::UnknownKind(kind)),
     }
+}
+
+/// Convert a `list` node, including the optional row its cursor is on.
+///
+/// The index crosses **one-based**, because every other array a plugin touches
+/// is Lua's one-based kind and a list's `selected` indexes the very table it
+/// declared. It is stored zero-based, converted here so exactly one place knows
+/// about the offset.
+///
+/// An index outside the children is **refused**, not clamped — including `0`,
+/// which is what a plugin passing a zero-based index sends. A list and the
+/// cursor into it are built in the same call from the same data, so a mismatch
+/// is the plugin's own arithmetic going wrong, and a pane silently drawing a
+/// different row than the one it named would hide that. The renderer still
+/// clamps at paint time, which is what covers a *native* caller.
+fn convert_list(
+    table: &Table,
+    kind: &str,
+    depth: usize,
+    budget: &mut usize,
+    path: &mut Vec<usize>,
+) -> Result<ViewNode, ViewError> {
+    let children = convert_children(table, kind, depth, budget, path)?;
+    let bad = || ViewError::BadField {
+        kind: kind.to_string(),
+        field: "selectedRow",
+        expected: "a 1-based index into the list's children",
+    };
+    let selected = match table.get::<Value>("selectedRow") {
+        Ok(Value::Nil) | Err(_) => None,
+        Ok(Value::Integer(n)) => Some(n),
+        // A Lua number that happens to be whole is the shape `#t` arithmetic
+        // produces, so it is accepted; a fractional one is not an index.
+        Ok(Value::Number(n)) if n.fract() == 0.0 && n.is_finite() => Some(n as i64),
+        Ok(_) => return Err(bad()),
+    };
+    let selected = match selected {
+        None => None,
+        Some(n) if n >= 1 && (n as usize) <= children.len() => Some(n as usize - 1),
+        Some(_) => return Err(bad()),
+    };
+    Ok(ViewNode::selectable_list(children, selected))
 }
 
 /// Convert a `gauge` node.
@@ -377,6 +417,7 @@ fn convert_text(table: &Table, kind: &str) -> Result<ViewNode, ViewError> {
             bold: flag("bold"),
             dim: flag("dim"),
             underline: flag("underline"),
+            selected: flag("selected"),
         },
     })
 }
@@ -697,7 +738,7 @@ mod tests {
 
         let all = convert_src(
             r#"return { kind = "text", content = "hi", bold = true, dim = true,
-                        underline = true }"#,
+                        underline = true, selected = true }"#,
         )
         .unwrap();
         assert_eq!(
@@ -709,6 +750,7 @@ mod tests {
                     bold: true,
                     dim: true,
                     underline: true,
+                    selected: true,
                 }
             )
         );
@@ -723,6 +765,8 @@ mod tests {
             r#"underline = "yes""#,
             r#"underline = 1"#,
             r#"dim = {}"#,
+            r#"selected = false"#,
+            r#"selected = "yes""#,
         ] {
             let node = convert_src(&format!(
                 r#"return {{ kind = "text", content = "x", {decl} }}"#
@@ -730,6 +774,100 @@ mod tests {
             .unwrap();
             assert_eq!(node, ViewNode::text("x"), "{decl}");
         }
+    }
+
+    /// The selection role is a colour decision the *host* makes, so all a plugin
+    /// can do is declare it — asserted separately from the emphases because it
+    /// is the one flag that replaces the run's colour rather than layering.
+    #[test]
+    fn a_run_may_declare_it_belongs_to_the_selected_row() {
+        let node = convert_src(
+            r#"return { kind = "text", content = "row", style = "muted", selected = true }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            node,
+            ViewNode::styled(
+                "row",
+                TextStyle {
+                    token: Some(StyleToken::Muted),
+                    selected: true,
+                    ..TextStyle::default()
+                }
+            ),
+            "the token is preserved on the node; the renderer is what overrides it"
+        );
+    }
+
+    // ── a list's cursor ──
+
+    /// The index crosses one-based and is stored zero-based, so the conversion is
+    /// the only place that knows about the offset.
+    #[test]
+    fn a_list_may_name_the_row_its_cursor_is_on() {
+        let node = convert_src(
+            r#"return { kind = "list", selectedRow = 2, children = {
+                 { kind = "text", content = "a" },
+                 { kind = "text", content = "b" },
+               }}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            node,
+            ViewNode::selectable_list(vec![ViewNode::text("a"), ViewNode::text("b")], Some(1))
+        );
+    }
+
+    #[test]
+    fn a_list_without_a_cursor_has_none() {
+        let node = convert_src(
+            r#"return { kind = "list", children = { { kind = "text", content = "a" } } }"#,
+        )
+        .unwrap();
+        assert_eq!(node, ViewNode::list(vec![ViewNode::text("a")]));
+    }
+
+    /// An index outside the children is refused, not clamped. `0` is the case
+    /// that matters: it is what a plugin passing a zero-based index sends, and
+    /// clamping it would silently select the first row forever.
+    #[test]
+    fn a_list_cursor_outside_its_children_is_refused() {
+        for decl in [
+            "selectedRow = 0",
+            "selectedRow = 3",
+            "selectedRow = -1",
+            "selectedRow = 1.5",
+        ] {
+            let err = convert_src(&format!(
+                r#"return {{ kind = "list", {decl}, children = {{
+                     {{ kind = "text", content = "a" }},
+                     {{ kind = "text", content = "b" }},
+                   }}}}"#
+            ))
+            .expect_err(decl);
+            assert_eq!(
+                err,
+                ViewError::BadField {
+                    kind: "list".to_string(),
+                    field: "selectedRow",
+                    expected: "a 1-based index into the list's children",
+                },
+                "{decl}"
+            );
+        }
+    }
+
+    /// An empty list can name no row, so any index at all is out of range —
+    /// which is the degenerate case the range check has to get right.
+    #[test]
+    fn an_empty_list_can_name_no_cursor() {
+        assert!(
+            convert_src(r#"return { kind = "list", selectedRow = 1, children = {} }"#).is_err()
+        );
+        assert_eq!(
+            convert_src(r#"return { kind = "list", children = {} }"#).unwrap(),
+            ViewNode::list(vec![])
+        );
     }
 
     #[test]
@@ -766,7 +904,7 @@ mod tests {
         );
         assert_eq!(
             convert_src(r#"return { kind = "list", children = {} }"#).unwrap(),
-            ViewNode::List(vec![])
+            ViewNode::list(vec![])
         );
     }
 

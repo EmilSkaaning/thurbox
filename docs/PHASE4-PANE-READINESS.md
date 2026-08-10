@@ -14,7 +14,9 @@ cheapest honest closure named.
 Status of the audit: **all five gaps closed** (inline lines, commit `6e0c7cc`;
 style tokens and gauges, ADR-26; kernel state, ADR-27; the layout and the
 keyboard, ADR-28). §8 records what the **second** port — the tasks pane, ADR-29 —
-needed on top of them, which is the only part of this document still a worklist.
+needed on top of them, and §9 the **third** — the file viewer, ADR-30, which
+closed §8's scrolling row. Those two sections are the only part of this document
+still a worklist.
 
 The info panel has now been ported twice — first to the view tree in every
 build (ADR-26), then reproduced as the **bundled `info-panel` plugin** (ADR-27) —
@@ -297,3 +299,110 @@ line falls: the kernel publishes a status's *name* here, where it publishes a
 session status's glyph and token in `StatusSnapshot` — because that mapping is
 shared by two native panes and this one is not. "Publish the rendering only when
 two panes must agree about it" is the rule the next port should apply.
+
+## 9. The third port: the file viewer's tree (ADR-30)
+
+§8's table left two open geometry rows and called the second one — a list that
+cannot scroll to its selection — a *precondition of the session-list port*. The
+file viewer is the pane that could not defer it: its whole interaction is moving a
+cursor through a tree taller than its column, so a copy drawing from row 0 would
+not be a reproduction. **That row is now closed**, and closed for every remaining
+pane rather than only this one.
+
+**What closed it.** `ViewNode::List` carries an optional selected child, and when
+a list declares one the *renderer* chooses the visible slice — through
+`ui::file_viewer::visible_window`, the same helper the native panes already
+shared. That is the `gauge` trade applied to height (ADR-26), and it buys
+something the tasks port could not claim: this pane's equality is not only tree
+equality but **frame** equality at a size where the pane scrolls
+(`the_plugin_paints_the_native_frame_when_the_pane_scrolls`). The other way out —
+report the resolved rect into the plugin — was rejected for the third time, for
+ADR-26's reasons.
+
+The consequence for `ui::file_viewer` is worth noting: `file_tree` takes no
+geometry **at all**, not even a window. It is the first pane tree of which that is
+fully true (`tasks_tree` still receives rows someone fitted and windowed).
+
+**The second widening was not a colour and not an emphasis.** The file viewer draws
+its cursor's row with a *background* (`selection_bg`/`selection_fg`), and nothing in
+the catalog could name one. `TextStyle::selected` is a **role**: the plugin says
+"this run is on the selected row" and the theme owns both colours. It *replaces*
+the token's colour rather than layering, unlike the three emphases — which is
+also what the native pane does.
+
+The tempting alternative, and the one worth recording as rejected: let the *list's*
+selected index drive the appearance, since the kernel already knows which row it
+is. It cannot, and the reason is a fact about thurbox rather than about the
+catalog — **thurbox's two list panes disagree about what a selected row looks
+like.** The tasks pane draws it `accent` + bold (`Theme::selected_item()`), the
+file viewer draws it in the selection pair. An appearance inferred from the anchor
+would have made one of the two unreproducible. So the anchor is the list's and the
+appearance is the run's.
+
+**The capability came out narrower than the brief predicted, not wider.** The port
+was specified as needing a `files` capability that could "list a directory and read
+a file's lines", with the correct observation that this would be the widest power
+granted to a plugin so far. It turned out the pane needs **no filesystem access at
+all**, and the finding generalises: of the five facts a row draws, only its name
+comes from disk. Depth and expansion state are the *user's* navigation, `matched`
+is a search the kernel runs, and the cursor is the keyboard's. A plugin holding
+`read_dir` could therefore draw *a* file tree but not *this pane* — its tree would
+have an expansion state nobody chose, no cursor and no search, and the equality
+test that is a Phase 4 port's deliverable could not have been written.
+
+So `Capability::Files` reads a published section and nothing else. It is named
+`Files` rather than `Fs` deliberately: `tests/teardown_gate.rs` reserves
+`Capability::Fs` for v1's "place a file in an agent's own config dir" power, and
+that row stays blocked — adding a filesystem binding here would have advanced a
+teardown verdict as a side effect of drawing a tree. What the section carries and
+what it refuses is tabulated in the change's `design.md` §1; the short form is
+basenames, no paths, no unexpanded directories, no dotfiles, no query, and no I/O.
+
+**One thing the kernel does publish that is not a fact about files:**
+`nerdFont`. The markers are chosen from two glyph sets by a display setting, and
+§8's rule (publish a rendering only when two panes must agree) says the *fact*
+crosses and the glyph does not — `src/ui/file_viewer.rs` is the only reader of
+`nerd_font_enabled` outside the theme. It rides on the file section because that is
+its only consumer; a second consumer should lift it to its own section rather than
+a copy appearing.
+
+**What is out of scope, and said so.** The search **sub-mode's bar** — the
+three-row bordered `Search (2/5)` block below the tree, with its slash prefix, the
+query scrolled to its end, and a block cursor — is not reproduced, and could not
+be. Three host features are missing, and naming them is the point of this
+paragraph:
+
+| Missing | Needed for |
+|---|---|
+| a bordered/framed container node | the bar's own block inside the pane |
+| a cursor appearance (a reversed cell) | the caret in the query |
+| a bottom-anchored fixed-height region | the `Min(0)` + `Length(3)` split the pane makes of its own area |
+
+and the match counter would need the query *text*, which the capability
+deliberately does not publish. The search's **effect on the tree** is ported and is
+part of the equality test, so the record distinguishes "cannot be drawn" from "was
+not attempted". A port that had quietly dropped the row emphasis too would have
+looked cleaner and proved less.
+
+**Still open, pinned by tests:**
+
+| Open gap | Native pane | The plugin's copy | Cheapest closure |
+|---|---|---|---|
+| the search bar | a bordered block carrying a query, a caret and a match counter | nothing; the rows still show the search's verdict | the three nodes above |
+| the scrollbar | a reserved rightmost column with a draggable thumb | nothing | a `scrollbar` field on the list node — the renderer already resolves the window, but the native pane reserves its track *outside* the tree, so moving it in is Phase 6 work |
+| the tree is the pane's, lazily | filled on toggle, session change, or a search reveal | `No folders` until the native viewer has been opened once | rebuild the state on session change rather than on first draw |
+
+The third is a limitation of the *section*, not of the catalog, and it is a
+deliberate trade: filling the tree from the publisher would mean the presence of a
+plugin decided when thurbox reads directories.
+
+**§8's first row is still open.** Nothing here needed an ellipsizing clip or a
+flush-right run — the file viewer does not fit its labels, it lets the renderer
+clip them — so that row is unchanged and still waits for a pane that does.
+
+**And what needed nothing.** No new style token (`accent`, `muted` and the
+token-less primary foreground drew every row). No formatter, so §7's
+`thurbox.format.*` case is *still* made by exactly one pane after three ports —
+which is now strong evidence that it should stay undesigned. No new architecture
+edge, and no change to the demand or change gates: the snapshot took a fifth
+section the way it took its fourth.
