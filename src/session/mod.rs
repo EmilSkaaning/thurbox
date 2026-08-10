@@ -15,6 +15,7 @@ pub mod settings;
 pub mod spawn_contribution;
 pub mod task;
 pub mod theme_config;
+pub mod workspace_tree;
 // The plugin view tree is v2 surface: pure data, but it exists only to
 // describe what a plugin draws, so stable builds do not carry it.
 #[cfg(feature = "plugins")]

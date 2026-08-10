@@ -1,5 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
+use crate::session::workspace_tree::{Axis, Node, Region, RegionId, Sizing};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PanelAreas {
     pub header: Rect,
@@ -42,93 +44,6 @@ const AUTOMATIONS_PANE_MIN_ROWS: u16 = 3;
 /// Minimum rows the session list keeps when the automations pane is shown.
 const SESSIONS_MIN_ROWS: u16 = 3;
 
-/// Split a left-column rect into (sessions, automations). The automations pane
-/// is always present (its height grows with `automation_count`, with a minimum
-/// so an empty pane still shows) unless the column is too short for both lists.
-fn split_left_column(col: Rect, automation_count: usize) -> (Rect, Option<Rect>) {
-    let desired =
-        (automation_count as u16 + 2).clamp(AUTOMATIONS_PANE_MIN_ROWS, AUTOMATIONS_PANE_MAX_ROWS);
-    let auto_h = desired.min(col.height.saturating_sub(SESSIONS_MIN_ROWS));
-    if auto_h < AUTOMATIONS_PANE_MIN_ROWS {
-        return (col, None); // not enough vertical room — keep sessions only
-    }
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(SESSIONS_MIN_ROWS),
-            Constraint::Length(auto_h),
-        ])
-        .split(col);
-    (rows[0], Some(rows[1]))
-}
-
-/// Vertical bands carved from the full area: header, content region, optional
-/// global-search strip, optional status-message row, and footer.
-struct VerticalBands {
-    header: Rect,
-    content: Rect,
-    global_search: Option<Rect>,
-    status_message: Option<Rect>,
-    footer: Rect,
-}
-
-/// Split the full area into header / content / global-search / status-message /
-/// footer bands.
-fn split_vertical(area: Rect, show_global_search: bool, show_status_row: bool) -> VerticalBands {
-    // Compact mode: when the terminal is shorter than 20 rows, drop the
-    // header line entirely so the content + footer get every row available.
-    let header_height = if area.height < 20 { 0 } else { 1 };
-
-    // The global-search strip is carved from the bottom of the content region
-    // (full width, above the footer) so every column shrinks to make room — the
-    // same way the optional right-side panels share the content width.
-    let search_height = if show_global_search {
-        GLOBAL_SEARCH_HEIGHT.min(area.height.saturating_sub(header_height + 1))
-    } else {
-        0
-    };
-
-    // One transient row for the active status/error message, directly above the
-    // footer (keeping the pills pinned to the bottom edge). Carved only while a
-    // message is showing, so content shrinks by 1 only transiently.
-    let status_height = if show_status_row { 1 } else { 0 };
-
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(header_height),
-            Constraint::Min(1),
-            Constraint::Length(search_height),
-            Constraint::Length(status_height),
-            Constraint::Length(1),
-        ])
-        .split(area);
-
-    VerticalBands {
-        header: vertical[0],
-        content: vertical[1],
-        global_search: (search_height > 0).then_some(vertical[2]),
-        status_message: (status_height > 0).then_some(vertical[3]),
-        footer: vertical[4],
-    }
-}
-
-/// Split a left-column rect into (session list, automations pane) honouring the
-/// `show_automations_pane` flag.
-fn left_column_split(
-    col: Rect,
-    show_automations_pane: bool,
-    automation_count: usize,
-) -> (Rect, Option<Rect>) {
-    if show_automations_pane {
-        split_left_column(col, automation_count)
-    } else {
-        (col, None)
-    }
-}
-
-/// Build the wide (≥ three_panel_min_cols) layout with optional info / tasks /
-/// file-viewer columns. Column order: list? | info? | terminal | tasks? |
 /// Which panels the layout should place, as a named structure.
 ///
 /// Named rather than positional because the old signature took **nine**
@@ -158,164 +73,256 @@ pub struct LayoutParams {
     pub show_status_row: bool,
 }
 
-/// One occupant of the right-hand column.
-///
-/// The column is built as an **ordered list** of these rather than a fixed set
-/// of named rects, so a hidden occupant leaves no gap and a new one is a list
-/// entry rather than another branch threaded through the split.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RightSlot {
-    Tasks,
-    FileViewer,
-    Plugin,
-}
-
 impl LayoutParams {
     /// The right column's occupants, in the order they are drawn.
     ///
     /// Order is fixed by the host (tasks, then file viewer, then plugin panes)
     /// — a pane picks a column, not a position, so two panes can never
     /// disagree about who comes first.
-    fn right_slots(&self) -> Vec<RightSlot> {
-        let mut slots = Vec::new();
+    fn right_regions(&self) -> Vec<RegionId> {
+        let mut regions = Vec::new();
         if self.show_tasks_panel {
-            slots.push(RightSlot::Tasks);
+            regions.push(RegionId::Tasks);
         }
         if self.show_file_viewer {
-            slots.push(RightSlot::FileViewer);
+            regions.push(RegionId::FileViewer);
         }
         if self.show_plugin_pane {
-            slots.push(RightSlot::Plugin);
+            regions.push(RegionId::Plugin(0));
         }
-        slots
+        regions
     }
 
     /// Whether anything wants the wide three-column layout.
     fn wants_side_columns(&self) -> bool {
-        self.show_info_panel || !self.right_slots().is_empty()
+        self.show_info_panel || !self.right_regions().is_empty()
     }
 }
 
-/// file_viewer?. The list column is omitted entirely when
-/// `show_session_list` is false (the terminal expands to fill the freed width),
-/// but the right-side columns are unaffected.
-fn three_panel_layout(bands: &VerticalBands, content: Rect, p: LayoutParams) -> PanelAreas {
-    let right = p.right_slots();
-    let mut constraints: Vec<Constraint> = Vec::new();
-    if p.show_session_list {
-        constraints.push(Constraint::Percentage(18));
-    }
-    if p.show_info_panel {
-        constraints.push(Constraint::Percentage(15));
-    }
-    // terminal takes the remainder
-    let terminal_idx = constraints.len();
-    constraints.push(Constraint::Min(0));
-    for _ in &right {
-        constraints.push(Constraint::Percentage(20));
+/// Every region the tree placed, in draw order.
+///
+/// A region id appears at most once, so a lookup can never get two answers.
+struct Placements(Vec<(RegionId, Rect)>);
+
+impl Placements {
+    /// The rect the tree gave `id`, or `None` when the tree did not place it.
+    fn rect(&self, id: RegionId) -> Option<Rect> {
+        self.0.iter().find(|(r, _)| *r == id).map(|(_, rect)| *rect)
     }
 
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(constraints)
-        .split(content);
+    /// A band the tree placed but sized to nothing.
+    ///
+    /// The vertical bands are always in the tree — a hidden one is a zero-cell
+    /// child rather than an omitted one, so the solver keeps seeing the same
+    /// five constraints — and it is this projection that reads zero extent as
+    /// "not shown".
+    fn band(&self, id: RegionId) -> Option<Rect> {
+        self.rect(id).filter(|r| r.height > 0)
+    }
+}
 
-    // Walk the split left→right. The list column (when present) is index 0,
-    // followed by info; the terminal sits at `terminal_idx` regardless of
-    // whether the list column was emitted.
-    let mut idx = 0;
-    let (left_panel, automations_panel) = if p.show_session_list {
-        let (lp, ap) =
-            left_column_split(horizontal[idx], p.show_automations_pane, p.automation_count);
-        idx += 1;
-        (Some(lp), ap)
-    } else {
-        (None, None)
-    };
-    let info_panel = p.show_info_panel.then(|| {
-        let r = horizontal[idx];
-        idx += 1;
-        r
-    });
-    let terminal = horizontal[terminal_idx];
+/// Solve a workspace tree against `area`, yielding each leaf's rect.
+///
+/// Each branch hands its children's [`Sizing`] to ratatui as the matching
+/// [`Constraint`], so the arithmetic — including how percentages round — is the
+/// same call the fixed-rect layout made. That is why the synthesized default
+/// preset reproduces the previous geometry by construction rather than by
+/// inspection.
+fn solve(node: &Node, area: Rect) -> Placements {
+    let mut out = Vec::new();
+    place(node, area, &mut out);
+    Placements(out)
+}
 
-    // The right column is assigned by walking its occupant list, so a hidden
-    // occupant simply is not in the list and leaves no gap behind it.
-    let mut tasks_panel = None;
-    let mut file_viewer = None;
-    let mut plugin_pane = None;
-    for (offset, slot) in right.iter().enumerate() {
-        let rect = horizontal[terminal_idx + 1 + offset];
-        match slot {
-            RightSlot::Tasks => tasks_panel = Some(rect),
-            RightSlot::FileViewer => file_viewer = Some(rect),
-            RightSlot::Plugin => plugin_pane = Some(rect),
+fn place(node: &Node, area: Rect, out: &mut Vec<(RegionId, Rect)>) {
+    match &node.region {
+        Region::Pane(id) => out.push((*id, area)),
+        Region::Split { axis, children } => {
+            let constraints: Vec<Constraint> =
+                children.iter().map(|c| constraint_for(c.sizing)).collect();
+            let direction = match axis {
+                Axis::Horizontal => Direction::Horizontal,
+                Axis::Vertical => Direction::Vertical,
+            };
+            let rects = Layout::default()
+                .direction(direction)
+                .constraints(constraints)
+                .split(area);
+            for (child, rect) in children.iter().zip(rects.iter()) {
+                place(child, *rect, out);
+            }
         }
     }
+}
 
-    PanelAreas {
-        header: bands.header,
-        left_panel,
-        automations_panel,
-        info_panel,
-        tasks_panel,
-        file_viewer,
-        plugin_pane,
-        global_search: bands.global_search,
-        status_message: bands.status_message,
-        terminal,
-        footer: bands.footer,
+fn constraint_for(sizing: Sizing) -> Constraint {
+    match sizing {
+        Sizing::Cells(n) => Constraint::Length(n),
+        Sizing::Percent(n) => Constraint::Percentage(n),
+        Sizing::Fill { min } => Constraint::Min(min),
     }
 }
 
-/// Build the 2-panel layout: 25% list | 75% terminal. When the session list
-/// is hidden the terminal takes the full content width (no list column).
-fn two_panel_layout(
-    bands: &VerticalBands,
-    content: Rect,
-    show_session_list: bool,
-    show_automations_pane: bool,
-    automation_count: usize,
-) -> PanelAreas {
-    if !show_session_list {
-        return PanelAreas {
-            header: bands.header,
-            left_panel: None,
-            automations_panel: None,
-            info_panel: None,
-            tasks_panel: None,
-            file_viewer: None,
-            plugin_pane: None,
-            global_search: bands.global_search,
-            status_message: bands.status_message,
-            terminal: content,
-            footer: bands.footer,
-        };
+/// Rows the header band takes: none below 20 rows, so a short terminal gives
+/// every row it has to the content and footer.
+fn header_rows(area: Rect) -> u16 {
+    if area.height < 20 {
+        0
+    } else {
+        1
     }
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
-        .split(content);
+}
 
-    let (left_panel, automations_panel) =
-        left_column_split(horizontal[0], show_automations_pane, automation_count);
-    PanelAreas {
-        header: bands.header,
-        left_panel: Some(left_panel),
-        automations_panel,
-        info_panel: None,
-        tasks_panel: None,
-        file_viewer: None,
-        plugin_pane: None,
-        global_search: bands.global_search,
-        status_message: bands.status_message,
-        terminal: horizontal[1],
-        footer: bands.footer,
+/// Rows the global-search strip takes, clamped so the content band and footer
+/// always keep a row between them.
+fn global_search_rows(area: Rect, header: u16, show: bool) -> u16 {
+    if show {
+        GLOBAL_SEARCH_HEIGHT.min(area.height.saturating_sub(header + 1))
+    } else {
+        0
     }
+}
+
+/// The height the content band will resolve to.
+///
+/// Needed *before* the tree is finished, because the automations pane's height
+/// is a function of the left column's height. It runs the same split the solver
+/// will run — ratatui caches it — so the preset and the solve can never
+/// disagree about how tall the column is.
+fn content_band_rows(area: Rect, header: u16, search: u16, status: u16) -> u16 {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(band_constraints(header, search, status))
+        .split(area)[1]
+        .height
+}
+
+/// The five vertical bands, in order: header, content, search strip, status
+/// row, footer. A hidden band is `Length(0)` rather than absent so the
+/// constraint list never changes shape.
+fn band_constraints(header: u16, search: u16, status: u16) -> [Constraint; 5] {
+    [
+        Constraint::Length(header),
+        Constraint::Min(1),
+        Constraint::Length(search),
+        Constraint::Length(status),
+        Constraint::Length(1),
+    ]
+}
+
+/// The left column: the session list, with the automations pane beneath it when
+/// it is enabled and the column is tall enough for both lists.
+///
+/// The pane's height grows with `automation_count` between a minimum (so an
+/// empty pane is still discoverable) and a cap; below the minimum the column is
+/// the session list alone rather than two unusably short lists.
+fn left_column(sizing: Sizing, p: LayoutParams, column_rows: u16) -> Node {
+    if !p.show_automations_pane {
+        return Node::pane(sizing, RegionId::SessionList);
+    }
+    let desired =
+        (p.automation_count as u16 + 2).clamp(AUTOMATIONS_PANE_MIN_ROWS, AUTOMATIONS_PANE_MAX_ROWS);
+    let rows = desired.min(column_rows.saturating_sub(SESSIONS_MIN_ROWS));
+    if rows < AUTOMATIONS_PANE_MIN_ROWS {
+        return Node::pane(sizing, RegionId::SessionList);
+    }
+    Node::split(
+        sizing,
+        Axis::Vertical,
+        vec![
+            Node::pane(
+                Sizing::Fill {
+                    min: SESSIONS_MIN_ROWS,
+                },
+                RegionId::SessionList,
+            ),
+            Node::pane(Sizing::Cells(rows), RegionId::Automations),
+        ],
+    )
+}
+
+/// The content band: the columns between the header and the bottom strips.
+///
+/// Three shapes, picked by width exactly as before: the center alone below the
+/// two-panel minimum, `list | center` in between, and
+/// `list? | info? | center | right…` at or above the three-panel minimum when
+/// something actually wants a side column.
+fn content_band(area: Rect, p: LayoutParams, column_rows: u16) -> Node {
+    let sizing = Sizing::Fill { min: 1 };
+    let settings = crate::session::settings::global();
+
+    if area.width < settings.two_panel_min_cols {
+        return Node::pane(sizing, RegionId::Center);
+    }
+
+    if area.width >= settings.three_panel_min_cols && p.wants_side_columns() {
+        let mut children = Vec::new();
+        if p.show_session_list {
+            children.push(left_column(Sizing::Percent(18), p, column_rows));
+        }
+        if p.show_info_panel {
+            children.push(Node::pane(Sizing::Percent(15), RegionId::Info));
+        }
+        // The center takes the remainder, so a hidden occupant's width goes
+        // here rather than leaving a gap in the column.
+        children.push(Node::pane(Sizing::Fill { min: 0 }, RegionId::Center));
+        for region in p.right_regions() {
+            children.push(Node::pane(Sizing::Percent(20), region));
+        }
+        return Node::split(sizing, Axis::Horizontal, children);
+    }
+
+    if !p.show_session_list {
+        return Node::pane(sizing, RegionId::Center);
+    }
+    Node::split(
+        sizing,
+        Axis::Horizontal,
+        vec![
+            left_column(Sizing::Percent(25), p, column_rows),
+            Node::pane(Sizing::Percent(75), RegionId::Center),
+        ],
+    )
+}
+
+/// Synthesize the workspace tree for `area`.
+///
+/// This is the **default preset**: the tree that reproduces the fixed-rect
+/// layout exactly. Every responsive rule lives here — the compact-mode header,
+/// the two width thresholds, the automations pane's minimum column height —
+/// leaving the solver to do nothing but divide rects.
+fn default_preset(area: Rect, p: LayoutParams) -> Node {
+    let header = header_rows(area);
+    let search = global_search_rows(area, header, p.show_global_search);
+    // One transient row for the active status/error message, directly above the
+    // footer (keeping the pills pinned to the bottom edge). Carved only while a
+    // message is showing, so content shrinks by 1 only transiently.
+    let status = u16::from(p.show_status_row);
+    let column_rows = content_band_rows(area, header, search, status);
+
+    Node::split(
+        Sizing::Fill { min: 0 },
+        Axis::Vertical,
+        vec![
+            Node::pane(Sizing::Cells(header), RegionId::Header),
+            content_band(area, p, column_rows),
+            // Full width, above the footer, so every column shrinks to make
+            // room — the same way the optional right-side panels share the
+            // content width.
+            Node::pane(Sizing::Cells(search), RegionId::GlobalSearch),
+            Node::pane(Sizing::Cells(status), RegionId::StatusMessage),
+            Node::pane(Sizing::Cells(1), RegionId::Footer),
+        ],
+    )
 }
 
 /// Compute panel layout areas based on terminal dimensions and optional
 /// right-side panel visibility.
+///
+/// Geometry is described by a **workspace tree** (`session::workspace_tree`):
+/// `default_preset` synthesizes it from `p`, `solve` divides the rects, and
+/// [`PanelAreas`] is the projection the view reads. Adding a pane is a leaf in
+/// the tree rather than a rect field and a branch through the split.
 ///
 /// At width ≥ 120, the layout becomes
 /// `list? | info? | terminal | tasks? | file_viewer?` with info (15%), tasks
@@ -333,39 +340,25 @@ fn two_panel_layout(
 /// message is never clipped by the right-aligned footer pills. It shrinks the
 /// content region by one row while shown (mirroring `show_global_search`).
 pub fn compute_layout(area: Rect, p: LayoutParams) -> PanelAreas {
-    let bands = split_vertical(area, p.show_global_search, p.show_status_row);
-    let content = bands.content;
-
-    let settings = crate::session::settings::global();
-    if area.width < settings.two_panel_min_cols {
-        return PanelAreas {
-            header: bands.header,
-            left_panel: None,
-            automations_panel: None,
-            info_panel: None,
-            tasks_panel: None,
-            file_viewer: None,
-            plugin_pane: None,
-            global_search: bands.global_search,
-            status_message: bands.status_message,
-            terminal: content,
-            footer: bands.footer,
-        };
+    let placed = solve(&default_preset(area, p), area);
+    PanelAreas {
+        // Header, center and footer are in every tree the preset builds (the
+        // header is simply zero rows tall in compact mode), which
+        // `preset_always_places_the_mandatory_regions` pins. A zero rect rather
+        // than an unwrap keeps a preset bug a blank band instead of a panic
+        // halfway through painting a frame.
+        header: placed.rect(RegionId::Header).unwrap_or_default(),
+        left_panel: placed.rect(RegionId::SessionList),
+        automations_panel: placed.rect(RegionId::Automations),
+        info_panel: placed.rect(RegionId::Info),
+        tasks_panel: placed.rect(RegionId::Tasks),
+        file_viewer: placed.rect(RegionId::FileViewer),
+        plugin_pane: placed.rect(RegionId::Plugin(0)),
+        global_search: placed.band(RegionId::GlobalSearch),
+        status_message: placed.band(RegionId::StatusMessage),
+        terminal: placed.rect(RegionId::Center).unwrap_or_default(),
+        footer: placed.rect(RegionId::Footer).unwrap_or_default(),
     }
-
-    // At width ≥ three_panel_min_cols (default 120), support optional info /
-    // tasks / file-viewer columns.
-    if area.width >= settings.three_panel_min_cols && p.wants_side_columns() {
-        return three_panel_layout(&bands, content, p);
-    }
-
-    two_panel_layout(
-        &bands,
-        content,
-        p.show_session_list,
-        p.show_automations_pane,
-        p.automation_count,
-    )
 }
 
 #[cfg(test)]
@@ -374,6 +367,146 @@ mod tests {
 
     fn area(width: u16, height: u16) -> Rect {
         Rect::new(0, 0, width, height)
+    }
+
+    #[test]
+    fn solver_nests_a_split_inside_its_parent() {
+        let tree = Node::split(
+            Sizing::Fill { min: 0 },
+            Axis::Vertical,
+            vec![
+                Node::pane(Sizing::Cells(1), RegionId::Header),
+                Node::split(
+                    Sizing::Fill { min: 1 },
+                    Axis::Horizontal,
+                    vec![
+                        Node::pane(Sizing::Percent(25), RegionId::SessionList),
+                        Node::pane(Sizing::Fill { min: 0 }, RegionId::Center),
+                    ],
+                ),
+            ],
+        );
+        let placed = solve(&tree, area(80, 24));
+        let header = placed.rect(RegionId::Header).unwrap();
+        let list = placed.rect(RegionId::SessionList).unwrap();
+        let center = placed.rect(RegionId::Center).unwrap();
+
+        // The inner split's children share the band below the header, side by
+        // side, and cover it exactly.
+        assert_eq!(header.height, 1);
+        assert_eq!((list.y, list.height), (1, 23));
+        assert_eq!((center.y, center.height), (1, 23));
+        assert_eq!(list.x, 0);
+        assert_eq!(center.x, list.x + list.width);
+        assert_eq!(center.x + center.width, 80);
+    }
+
+    #[test]
+    fn solver_keeps_a_fixed_child_while_a_fill_sibling_grows() {
+        let tree = Node::split(
+            Sizing::Fill { min: 0 },
+            Axis::Vertical,
+            vec![
+                Node::pane(Sizing::Cells(3), RegionId::Automations),
+                Node::pane(Sizing::Fill { min: 0 }, RegionId::Center),
+            ],
+        );
+        let short = solve(&tree, area(40, 10));
+        let tall = solve(&tree, area(40, 30));
+        assert_eq!(short.rect(RegionId::Automations).unwrap().height, 3);
+        assert_eq!(tall.rect(RegionId::Automations).unwrap().height, 3);
+        assert_eq!(short.rect(RegionId::Center).unwrap().height, 7);
+        assert_eq!(tall.rect(RegionId::Center).unwrap().height, 27);
+    }
+
+    #[test]
+    fn solver_gives_a_zero_cell_child_no_extent() {
+        let tree = Node::split(
+            Sizing::Fill { min: 0 },
+            Axis::Vertical,
+            vec![
+                Node::pane(Sizing::Cells(0), RegionId::Header),
+                Node::pane(Sizing::Fill { min: 1 }, RegionId::Center),
+                Node::pane(Sizing::Cells(1), RegionId::Footer),
+            ],
+        );
+        let placed = solve(&tree, area(40, 10));
+        // Zero rows, and the content starts at the top as if it were absent.
+        assert_eq!(placed.rect(RegionId::Header).unwrap().height, 0);
+        assert_eq!(placed.rect(RegionId::Center).unwrap().y, 0);
+        assert_eq!(placed.rect(RegionId::Center).unwrap().height, 9);
+    }
+
+    #[test]
+    fn solving_is_deterministic() {
+        let tree = default_preset(
+            area(160, 40),
+            LayoutParams {
+                show_session_list: true,
+                show_info_panel: true,
+                show_file_viewer: true,
+                show_automations_pane: true,
+                automation_count: 3,
+                ..Default::default()
+            },
+        );
+        let first = solve(&tree, area(160, 40)).0;
+        let second = solve(&tree, area(160, 40)).0;
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn preset_always_places_the_mandatory_regions() {
+        // Whatever is hidden, the three regions `compute_layout` projects
+        // unconditionally must be in the tree — over a spread of sizes that
+        // covers compact mode and both width thresholds.
+        for (w, h) in [(40, 10), (79, 19), (100, 24), (120, 40), (200, 60)] {
+            for params in [
+                LayoutParams::default(),
+                LayoutParams {
+                    show_session_list: true,
+                    show_info_panel: true,
+                    show_tasks_panel: true,
+                    show_file_viewer: true,
+                    show_plugin_pane: true,
+                    show_global_search: true,
+                    show_automations_pane: true,
+                    automation_count: 4,
+                    show_status_row: true,
+                },
+            ] {
+                let ids = default_preset(area(w, h), params).region_ids();
+                for required in [RegionId::Header, RegionId::Center, RegionId::Footer] {
+                    assert!(
+                        ids.contains(&required),
+                        "{w}x{h} {params:?} lost {required:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preset_names_each_region_at_most_once() {
+        let ids = default_preset(
+            area(200, 60),
+            LayoutParams {
+                show_session_list: true,
+                show_info_panel: true,
+                show_tasks_panel: true,
+                show_file_viewer: true,
+                show_plugin_pane: true,
+                show_global_search: true,
+                show_automations_pane: true,
+                automation_count: 4,
+                show_status_row: true,
+            },
+        )
+        .region_ids();
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(ids.len(), unique.len(), "a region is placed twice: {ids:?}");
     }
 
     #[test]
