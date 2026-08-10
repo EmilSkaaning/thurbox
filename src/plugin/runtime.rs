@@ -24,8 +24,11 @@ use mlua::{Lua, LuaOptions, StdLib, Table, Value, VmState};
 use crate::plugin::capabilities::{build_module_table, GrantedCapabilities};
 use crate::session::view_tree::ViewNode;
 
-/// File a plugin's code is loaded from, at the root of its directory.
+/// File a plugin's view half is loaded from, at the root of its directory.
 pub const ENTRY_FILE_NAME: &str = "init.luau";
+
+/// File a plugin's headless half is loaded from.
+pub const SERVICE_ENTRY_FILE_NAME: &str = "service.luau";
 
 /// Module name that resolves to the host API rather than to a file.
 pub const HOST_MODULE: &str = "@thurbox";
@@ -153,6 +156,8 @@ const BUDGET_MARKER: &str = "thurbox:budget-exceeded";
 struct PluginVm {
     lua: Lua,
     dir: PathBuf,
+    /// Which file this VM loads — the view half or the service half.
+    entry: &'static str,
     /// Interrupt ticks consumed by the call in flight. Reset per call, so the
     /// budget bounds a single call rather than a plugin's whole lifetime.
     ticks: Rc<Cell<u64>>,
@@ -167,8 +172,10 @@ impl PluginVm {
     fn new(
         name: &str,
         dir: &Path,
+        entry: &'static str,
         granted: &GrantedCapabilities,
         bounds: ExecutionBounds,
+        store: Option<Box<dyn crate::session::plugin_store::PluginStore>>,
     ) -> Result<Self, RuntimeError> {
         // Only the pure-computation libraries. `io`, `os`, `package` and
         // `debug` are the ambient filesystem, process, clock and introspection
@@ -191,7 +198,8 @@ impl PluginVm {
         lua.set_named_registry_value(STATE_REGISTRY_KEY, state)
             .map_err(|e| classify(&e))?;
 
-        let host_module = build_module_table(&lua, name, granted).map_err(|e| classify(&e))?;
+        let host_module =
+            build_module_table(&lua, name, granted, store).map_err(|e| classify(&e))?;
 
         // Our own `require`, replacing Luau's filesystem requirer: it answers
         // the host namespace and otherwise resolves strictly inside the
@@ -245,6 +253,7 @@ impl PluginVm {
         Ok(Self {
             lua,
             dir: dir.to_path_buf(),
+            entry,
             ticks,
         })
     }
@@ -256,7 +265,7 @@ impl PluginVm {
 
     /// Compile and run the entry chunk, keeping the table it returns.
     fn load_entry(&self) -> Result<(), RuntimeError> {
-        let path = self.dir.join(ENTRY_FILE_NAME);
+        let path = self.dir.join(self.entry);
         let source = std::fs::read_to_string(&path).map_err(|e| RuntimeError::EntryUnreadable {
             path: path.clone(),
             cause: e.to_string(),
@@ -279,23 +288,23 @@ impl PluginVm {
         }
     }
 
-    /// Call the module's `init` if it declared one.
+    /// Call a named module function that takes no arguments.
     ///
-    /// Returns whether an `init` was actually present, so the lifecycle can
-    /// tell "ran successfully" from "had nothing to run" without guessing.
-    fn call_init(&self) -> Result<bool, RuntimeError> {
+    /// Returns whether the function was present, so "ran successfully" is
+    /// distinguishable from "had nothing to run" without guessing.
+    fn call_named(&self, name: &str) -> Result<bool, RuntimeError> {
         let module: Table = self
             .lua
             .named_registry_value(MODULE_REGISTRY_KEY)
             .map_err(|e| classify(&e))?;
 
-        let init: Value = module.get("init").map_err(|e| classify(&e))?;
-        let func = match init {
+        let entry: Value = module.get(name).map_err(|e| classify(&e))?;
+        let func = match entry {
             Value::Function(f) => f,
             Value::Nil => return Ok(false),
             other => {
                 return Err(RuntimeError::BadEntryValue(format!(
-                    "init = {}",
+                    "{name} = {}",
                     other.type_name()
                 )))
             }
@@ -304,6 +313,14 @@ impl PluginVm {
         self.arm();
         func.call::<()>(()).map_err(|e| classify(&e))?;
         Ok(true)
+    }
+
+    /// Call the module's `init` if it declared one.
+    ///
+    /// Returns whether an `init` was actually present, so the lifecycle can
+    /// tell "ran successfully" from "had nothing to run" without guessing.
+    fn call_init(&self) -> Result<bool, RuntimeError> {
+        self.call_named("init")
     }
 
     /// Ask the module's `render` for a pane's view tree.
@@ -433,6 +450,7 @@ enum Request {
     Eval(String, Sender<Result<String, RuntimeError>>),
     Render(String, Sender<Result<ViewNode, RuntimeError>>),
     Key(String, String, Sender<Result<bool, RuntimeError>>),
+    Named(String, Sender<Result<bool, RuntimeError>>),
     Stop(Sender<()>),
 }
 
@@ -462,6 +480,21 @@ impl PluginThread {
         granted: GrantedCapabilities,
         bounds: ExecutionBounds,
     ) -> Result<Self, RuntimeError> {
+        Self::spawn_half(name, dir, ENTRY_FILE_NAME, granted, bounds, None)
+    }
+
+    /// Start a thread for one half of a plugin.
+    ///
+    /// The store is built by the factory **on the new thread**, because a
+    /// database connection cannot cross threads and each VM has its own.
+    pub fn spawn_half(
+        name: &str,
+        dir: &Path,
+        entry: &'static str,
+        granted: GrantedCapabilities,
+        bounds: ExecutionBounds,
+        store: Option<crate::session::plugin_store::PluginStoreFactory>,
+    ) -> Result<Self, RuntimeError> {
         let (req_tx, req_rx) = mpsc::channel::<Request>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), RuntimeError>>();
 
@@ -471,16 +504,18 @@ impl PluginThread {
         let join = std::thread::Builder::new()
             .name(format!("thurbox-plugin-{name}"))
             .spawn(move || {
-                let vm = match PluginVm::new(&name_owned, &dir_owned, &granted, bounds) {
-                    Ok(vm) => {
-                        let _ = ready_tx.send(Ok(()));
-                        vm
-                    }
-                    Err(e) => {
-                        let _ = ready_tx.send(Err(e));
-                        return;
-                    }
-                };
+                let store = store.and_then(|factory| factory());
+                let vm =
+                    match PluginVm::new(&name_owned, &dir_owned, entry, &granted, bounds, store) {
+                        Ok(vm) => {
+                            let _ = ready_tx.send(Ok(()));
+                            vm
+                        }
+                        Err(e) => {
+                            let _ = ready_tx.send(Err(e));
+                            return;
+                        }
+                    };
                 serve(vm, req_rx);
             })
             .map_err(|e| RuntimeError::Runtime(format!("cannot spawn plugin thread: {e}")))?;
@@ -536,6 +571,12 @@ impl PluginThread {
             Err(RecvTimeoutError::Timeout) => Err(RuntimeError::BudgetExceeded),
             Err(RecvTimeoutError::Disconnected) => Err(RuntimeError::ThreadGone),
         }
+    }
+
+    /// Call a named no-argument function on the plugin's module.
+    pub fn call_named(&self, name: &str) -> Result<bool, RuntimeError> {
+        let owned = name.to_string();
+        self.round_trip(move |reply| Request::Named(owned, reply))
     }
 
     /// Evaluate a chunk inside this plugin's VM (host-side diagnostic).
@@ -636,6 +677,16 @@ fn serve(vm: PluginVm, requests: Receiver<Request>) {
             Request::Key(pane_id, key, reply) => {
                 let result = match vm.as_ref() {
                     Some(v) => v.on_key(&pane_id, &key),
+                    None => Err(RuntimeError::Terminated),
+                };
+                if result.as_ref().err().is_some_and(RuntimeError::is_fatal) {
+                    vm = None;
+                }
+                let _ = reply.send(result);
+            }
+            Request::Named(name, reply) => {
+                let result = match vm.as_ref() {
+                    Some(v) => v.call_named(&name),
                     None => Err(RuntimeError::Terminated),
                 };
                 if result.as_ref().err().is_some_and(RuntimeError::is_fatal) {

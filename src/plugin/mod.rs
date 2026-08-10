@@ -27,6 +27,7 @@ pub mod discovery;
 pub mod lifecycle;
 pub mod pane;
 pub mod runtime;
+pub mod service;
 pub mod view;
 
 pub use capabilities::GrantedCapabilities;
@@ -34,4 +35,5 @@ pub use discovery::{DiscoveredPlugin, DiscoveryOutcome, PluginSource};
 pub use lifecycle::{PluginHost, PluginReport, PluginState, PluginStatus, Transition};
 pub use pane::{PanePresentation, PluginPane};
 pub use runtime::{ExecutionBounds, RuntimeError};
+pub use service::{ServiceError, ServiceHost};
 pub use view::ViewError;

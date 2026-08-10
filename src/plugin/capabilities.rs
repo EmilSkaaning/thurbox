@@ -74,6 +74,7 @@ pub fn build_module_table(
     lua: &Lua,
     plugin_name: &str,
     granted: &GrantedCapabilities,
+    store: Option<Box<dyn crate::session::plugin_store::PluginStore>>,
 ) -> mlua::Result<Table> {
     let module = lua.create_table()?;
 
@@ -90,23 +91,43 @@ pub fn build_module_table(
         module.set("log", log)?;
     }
 
+    // Durable storage. `Rc` because both bindings share one store and a VM is
+    // single-threaded by construction; the plugin name is baked in here so a
+    // plugin never names its own namespace.
+    let store = store.map(std::rc::Rc::new);
+
     if granted.has(Capability::StateRead) {
-        // Reads the plugin's own state. Backed by an in-VM table until the
-        // persistence change gives it a store; the capability boundary is what
-        // this change is establishing, not the storage.
-        let read = lua.create_function(|lua, key: String| {
-            let state: Table = lua.named_registry_value("thurbox_plugin_state")?;
-            state.get::<mlua::Value>(key)
+        let name = plugin_name.to_string();
+        let reader = store.clone();
+        let read = lua.create_function(move |_, key: String| {
+            let Some(store) = reader.as_ref() else {
+                return Err(mlua::Error::runtime("plugin storage is unavailable"));
+            };
+            store.get(&name, &key).map_err(mlua::Error::runtime)
         })?;
         module.set("stateRead", read)?;
     }
 
     if granted.has(Capability::StateWrite) {
-        let write = lua.create_function(|lua, (key, value): (String, mlua::Value)| {
-            let state: Table = lua.named_registry_value("thurbox_plugin_state")?;
-            state.set(key, value)
+        let name = plugin_name.to_string();
+        let writer = store.clone();
+        let write = lua.create_function(move |_, (key, value): (String, String)| {
+            let Some(store) = writer.as_ref() else {
+                return Err(mlua::Error::runtime("plugin storage is unavailable"));
+            };
+            store.set(&name, &key, &value).map_err(mlua::Error::runtime)
         })?;
         module.set("stateWrite", write)?;
+
+        let name = plugin_name.to_string();
+        let deleter = store.clone();
+        let delete = lua.create_function(move |_, key: String| {
+            let Some(store) = deleter.as_ref() else {
+                return Err(mlua::Error::runtime("plugin storage is unavailable"));
+            };
+            store.delete(&name, &key).map_err(mlua::Error::runtime)
+        })?;
+        module.set("stateDelete", delete)?;
     }
 
     // View-node constructors. Ungated on purpose: they build plain tables and
@@ -226,7 +247,7 @@ mod tests {
         lua.set_named_registry_value("thurbox_plugin_state", lua.create_table().unwrap())
             .unwrap();
         let granted = GrantedCapabilities::from_manifest(&set(&[Capability::Log]));
-        let module = build_module_table(&lua, "demo", &granted).unwrap();
+        let module = build_module_table(&lua, "demo", &granted, None).unwrap();
 
         assert!(module.contains_key("log").unwrap());
         assert!(module.get::<mlua::Function>("log").is_ok());
@@ -236,7 +257,7 @@ mod tests {
     fn undeclared_binding_is_absent_not_refusing() {
         let lua = Lua::new();
         let granted = GrantedCapabilities::none();
-        let module = build_module_table(&lua, "demo", &granted).unwrap();
+        let module = build_module_table(&lua, "demo", &granted, None).unwrap();
 
         assert!(!module.contains_key("log").unwrap());
         assert!(!module.contains_key("stateRead").unwrap());
@@ -258,9 +279,11 @@ mod tests {
             &lua,
             "with",
             &GrantedCapabilities::from_manifest(&set(&[Capability::Log])),
+            None,
         )
         .unwrap();
-        let without = build_module_table(&lua, "without", &GrantedCapabilities::none()).unwrap();
+        let without =
+            build_module_table(&lua, "without", &GrantedCapabilities::none(), None).unwrap();
 
         assert!(with.contains_key("log").unwrap());
         assert!(!without.contains_key("log").unwrap());
@@ -275,6 +298,7 @@ mod tests {
             &lua,
             "reader",
             &GrantedCapabilities::from_manifest(&set(&[Capability::StateRead])),
+            None,
         )
         .unwrap();
 
@@ -285,7 +309,7 @@ mod tests {
     #[test]
     fn the_module_table_is_frozen() {
         let lua = Lua::new();
-        let module = build_module_table(&lua, "demo", &GrantedCapabilities::none()).unwrap();
+        let module = build_module_table(&lua, "demo", &GrantedCapabilities::none(), None).unwrap();
         assert!(module.is_readonly());
         assert!(
             module.set("log", true).is_err(),
@@ -296,7 +320,7 @@ mod tests {
     #[test]
     fn ui_constructors_are_present_without_any_capability() {
         let lua = Lua::new();
-        let module = build_module_table(&lua, "demo", &GrantedCapabilities::none()).unwrap();
+        let module = build_module_table(&lua, "demo", &GrantedCapabilities::none(), None).unwrap();
         let ui: Table = module.get("ui").expect("ui table present");
         for name in ["text", "row", "column", "list", "divider", "spacer"] {
             assert!(ui.contains_key(name).unwrap(), "missing ui.{name}");
@@ -306,7 +330,7 @@ mod tests {
     #[test]
     fn the_ui_table_is_frozen_too() {
         let lua = Lua::new();
-        let module = build_module_table(&lua, "demo", &GrantedCapabilities::none()).unwrap();
+        let module = build_module_table(&lua, "demo", &GrantedCapabilities::none(), None).unwrap();
         let ui: Table = module.get("ui").unwrap();
         assert!(ui.is_readonly());
     }
@@ -314,7 +338,7 @@ mod tests {
     #[test]
     fn plugin_always_knows_its_own_name() {
         let lua = Lua::new();
-        let module = build_module_table(&lua, "demo", &GrantedCapabilities::none()).unwrap();
+        let module = build_module_table(&lua, "demo", &GrantedCapabilities::none(), None).unwrap();
         assert_eq!(module.get::<String>("name").unwrap(), "demo");
     }
 }

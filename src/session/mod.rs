@@ -5,6 +5,8 @@ pub mod host_def;
 pub mod keybindings;
 pub mod message;
 pub mod plugin_manifest;
+#[cfg(feature = "plugins")]
+pub mod plugin_store;
 pub mod review;
 pub mod settings;
 pub mod task;

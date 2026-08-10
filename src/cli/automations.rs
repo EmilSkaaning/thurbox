@@ -417,6 +417,66 @@ fn render_tick(v: &Value) -> String {
     format!("Tick: {fired} fired, {skipped} skipped, {healed} extension(s) healed.")
 }
 
+/// Start, tick, and stop every plugin service, for the length of this
+/// invocation.
+///
+/// Start-tick-stop rather than a resident loop: this host lives for one tick,
+/// so a plugin's background work has to be expressible as "do a unit of work",
+/// which is the only shape that suits both a 60-second keeper invocation and a
+/// long-lived TUI. A plugin whose service another host already runs is skipped
+/// — that is the lock doing its job, not a failure.
+#[cfg(feature = "plugins")]
+fn tick_plugin_services() -> Vec<String> {
+    let outcome = crate::plugin::discovery::discover();
+    let with_service: Vec<_> = outcome
+        .loadable
+        .iter()
+        .filter(|p| p.manifest.has_service())
+        .collect();
+    if with_service.is_empty() {
+        return Vec::new();
+    }
+
+    let Some(path) = crate::paths::database_file() else {
+        return vec!["plugin services: no database path".to_string()];
+    };
+    let Ok(lock_db) = crate::storage::Database::open(&path) else {
+        return vec!["plugin services: cannot open the database".to_string()];
+    };
+    let lock = crate::storage::plugins::DbServiceLock::new(lock_db, "tick");
+
+    // Each VM builds its own store on its own thread — a connection cannot be
+    // shared, and the service half is where durable state actually gets used.
+    let store: crate::session::plugin_store::PluginStoreFactory = std::sync::Arc::new(|| {
+        crate::storage::plugins::DbPluginStore::open()
+            .map(|s| Box::new(s) as Box<dyn crate::session::plugin_store::PluginStore>)
+    });
+
+    let mut host = crate::plugin::ServiceHost::new(crate::plugin::ExecutionBounds::default());
+    let mut messages = Vec::new();
+
+    for plugin in with_service {
+        match host.start(plugin, &lock, Some(std::sync::Arc::clone(&store))) {
+            Ok(true) => match host.tick(plugin.name()) {
+                Ok(true) => messages.push(format!("plugin service ticked: {}", plugin.name())),
+                Ok(false) => {}
+                Err(e) => messages.push(format!("plugin service {} failed: {e}", plugin.name())),
+            },
+            Ok(false) => {}
+            Err(crate::plugin::ServiceError::AlreadyHosted { holder }) => {
+                messages.push(format!(
+                    "plugin service {} is hosted by {holder}",
+                    plugin.name()
+                ));
+            }
+            Err(e) => messages.push(format!("plugin service {} failed: {e}", plugin.name())),
+        }
+    }
+
+    host.stop_all(&lock);
+    messages
+}
+
 /// Fire every due automation headlessly: claim (atomic CAS, so this is safe to
 /// run alongside the TUI and other tickers), perform the action, record the run.
 fn tick(db: &Database) -> Result<Value, String> {
@@ -438,6 +498,15 @@ fn tick(db: &Database) -> Result<Value, String> {
     if let Err(e) = db.prune_old_messages() {
         tracing::debug!("prune_old_messages: {e}");
     }
+    // Host each plugin's service half for the length of this tick. The keeper
+    // loops `automation tick` every 60 s, so this is what keeps a service-only
+    // plugin working with the TUI closed — v1's guarantee that scheduled work
+    // fires headlessly, inherited rather than revoked (ADR-V16).
+    #[cfg(feature = "plugins")]
+    for m in tick_plugin_services() {
+        tracing::info!("{m}");
+    }
+
     let now = current_time_millis();
     let due = db
         .due_automations(now)

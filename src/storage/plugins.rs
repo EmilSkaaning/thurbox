@@ -199,6 +199,103 @@ impl Database {
     }
 }
 
+// The trait impls below are the seam to `crate::plugin`, which exists only
+// with the `plugins` feature. The tables and accessors above stay ungated so
+// the schema is identical in every build.
+
+/// A [`PluginStore`](crate::session::plugin_store::PluginStore) backed by its
+/// own connection to the thurbox database.
+///
+/// Built on the thread that will use it — a `rusqlite::Connection` cannot
+/// cross threads, and each plugin VM runs on its own.
+#[cfg(feature = "plugins")]
+pub struct DbPluginStore {
+    db: Database,
+}
+
+#[cfg(feature = "plugins")]
+impl DbPluginStore {
+    /// Open a store against the standard database path.
+    pub fn open() -> Option<Self> {
+        let path = crate::paths::database_file()?;
+        Database::open(&path).ok().map(|db| Self { db })
+    }
+
+    /// Wrap an already-open database (tests).
+    pub fn from_db(db: Database) -> Self {
+        Self { db }
+    }
+}
+
+#[cfg(feature = "plugins")]
+impl crate::session::plugin_store::PluginStore for DbPluginStore {
+    fn get(&self, plugin: &str, key: &str) -> Result<Option<String>, String> {
+        self.db
+            .plugin_kv_get(plugin, key)
+            .map_err(|e| e.to_string())
+    }
+
+    fn set(&self, plugin: &str, key: &str, value: &str) -> Result<(), String> {
+        self.db
+            .plugin_kv_set(plugin, key, value)
+            .map_err(|e| e.to_string())
+    }
+
+    fn delete(&self, plugin: &str, key: &str) -> Result<bool, String> {
+        self.db
+            .plugin_kv_delete(plugin, key)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// A [`ServiceLock`](crate::session::plugin_store::ServiceLock) backed by the
+/// `plugin_service_locks` table.
+///
+/// Holds its own connection for the same reason [`DbPluginStore`] does, and
+/// carries the holder's identity so a refusal can name who is running the
+/// service.
+#[cfg(feature = "plugins")]
+pub struct DbServiceLock {
+    db: Database,
+    holder: String,
+}
+
+#[cfg(feature = "plugins")]
+impl DbServiceLock {
+    /// Build a lock for a named host (`"tui"`, `"tick"`, …).
+    pub fn new(db: Database, holder: impl Into<String>) -> Self {
+        Self {
+            db,
+            holder: holder.into(),
+        }
+    }
+
+    /// Seconds since the epoch, or 0 if the clock is before it.
+    fn now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+}
+
+#[cfg(feature = "plugins")]
+impl crate::session::plugin_store::ServiceLock for DbServiceLock {
+    fn claim(&self, plugin: &str) -> Result<Result<(), String>, String> {
+        self.db
+            .claim_plugin_service(plugin, &self.holder, Self::now())
+            .map(|r| r.map_err(|held| held.holder))
+            .map_err(|e| e.to_string())
+    }
+
+    fn release(&self, plugin: &str) -> Result<(), String> {
+        self.db
+            .release_plugin_service(plugin, &self.holder)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

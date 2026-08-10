@@ -170,6 +170,28 @@ pub struct KeybindingDecl {
     pub chord: Option<String>,
 }
 
+/// Which half of a plugin a grant or an entry point belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PluginHalf {
+    /// The headless half, hosted with or without a TUI.
+    Service,
+    /// The TUI-only half that draws panes.
+    View,
+}
+
+/// The headless half a plugin may declare.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceDecl {
+    /// Capabilities granted to the service half only.
+    ///
+    /// A view rarely needs to reach outward and a service rarely needs to
+    /// draw, so granting per half keeps each VM's reach to what it actually
+    /// does instead of the union of both.
+    #[serde(default)]
+    pub capabilities: BTreeSet<Capability>,
+}
+
 /// One plugin's manifest, as parsed and validated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -187,10 +209,31 @@ pub struct PluginManifest {
     /// Keybindings this plugin contributes.
     #[serde(default)]
     pub keybindings: Vec<KeybindingDecl>,
-    /// Host powers this plugin requests. Anything absent here is unreachable
-    /// from its VM.
+    /// Host powers this plugin requests for **both** halves. Anything absent
+    /// here and from the per-half sets is unreachable from that VM.
     #[serde(default)]
     pub capabilities: BTreeSet<Capability>,
+    /// The headless half, if this plugin has one.
+    #[serde(default)]
+    pub service: Option<ServiceDecl>,
+}
+
+impl PluginManifest {
+    /// The capabilities one half is granted: the shared set plus that half's.
+    pub fn capabilities_for(&self, half: PluginHalf) -> BTreeSet<Capability> {
+        let mut set = self.capabilities.clone();
+        if half == PluginHalf::Service {
+            if let Some(service) = &self.service {
+                set.extend(service.capabilities.iter().copied());
+            }
+        }
+        set
+    }
+
+    /// Whether this plugin has a headless half.
+    pub fn has_service(&self) -> bool {
+        self.service.is_some()
+    }
 }
 
 /// Why a manifest could not be turned into a [`PluginManifest`].
