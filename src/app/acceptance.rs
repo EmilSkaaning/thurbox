@@ -3805,6 +3805,306 @@ fn two_plugin_panes_both_reach_the_screen() {
     assert_eq!(b.x, a.x + a.width);
 }
 
+/// With one declared pane the bound action is a plain toggle: no picker, and the
+/// choice is persisted. This is the shape a stable install with one plugin has,
+/// and the reason the picker is not opened unconditionally.
+#[cfg(feature = "plugins")]
+#[test]
+fn plugin_pane_toggle_flips_a_single_pane_without_a_picker() {
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let mut h = Harness::new(160, 40, 1);
+    h.app
+        .set_plugin_panes(vec![crate::plugin::PluginPane::loading(
+            "demo",
+            "board",
+            "Demo",
+            PaneSlot::Right,
+            false,
+        )]);
+
+    h.func(10);
+    assert!(
+        !h.app.modal.is_open(),
+        "one pane leaves nothing to choose, so no picker opens"
+    );
+    assert_eq!(h.app.visible_plugin_panes(), 1);
+    assert_eq!(
+        h.app.db.get_plugin_pane_visible("demo", "board").unwrap(),
+        Some(true),
+        "the choice outranks the manifest seed on the next launch"
+    );
+
+    h.func(10);
+    assert_eq!(h.app.visible_plugin_panes(), 0);
+    assert_eq!(
+        h.app.db.get_plugin_pane_visible("demo", "board").unwrap(),
+        Some(false)
+    );
+}
+
+/// The gap this closes: with two declared panes the action reached only the
+/// first, so the pane a second bundled plugin declares could not be shown by any
+/// key. The picker is how one action reaches N panes.
+#[cfg(feature = "plugins")]
+#[test]
+fn plugin_pane_picker_reaches_a_pane_other_than_the_first() {
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let mut h = Harness::new(160, 40, 1);
+    h.app.set_plugin_panes(vec![
+        crate::plugin::PluginPane::loading("hello", "board", "Hello", PaneSlot::Right, false),
+        crate::plugin::PluginPane::loading("info-panel", "info", "Info", PaneSlot::Right, false),
+    ]);
+
+    h.func(10);
+    let frame = h.render();
+    assert!(
+        frame.contains("Plugin panes"),
+        "the picker opened:\n{frame}"
+    );
+    assert!(frame.contains("hello.board"), "{frame}");
+    assert!(
+        frame.contains("info-panel.info"),
+        "every declared pane is listed, addressed as the commands address it:\n{frame}"
+    );
+    assert_eq!(
+        h.app.visible_plugin_panes(),
+        0,
+        "opening the picker changes no visibility"
+    );
+
+    // Select the *second* pane and show it: the case the old toggle could not
+    // express at all.
+    h.key(KeyCode::Char('j'), KeyModifiers::NONE);
+    h.key(KeyCode::Char(' '), KeyModifiers::NONE);
+    let visible: Vec<bool> = h.app.plugin_panes.iter().map(|p| p.visible).collect();
+    assert_eq!(visible, vec![false, true], "only the second pane moved");
+    assert_eq!(
+        h.app
+            .db
+            .get_plugin_pane_visible("info-panel", "info")
+            .unwrap(),
+        Some(true),
+        "the picker stores exactly what the pane's own hide/show command stores"
+    );
+    assert_eq!(
+        h.app.db.get_plugin_pane_visible("hello", "board").unwrap(),
+        None,
+        "a pane nobody touched keeps no stored choice"
+    );
+
+    // `Space` keeps the picker open, so both panes can be turned on in one visit,
+    // and the row it redraws reflects what actually happened.
+    assert!(h.app.modal.is_open());
+    let crate::app::modals::Modal::PluginPanes(ref m) = h.app.modal else {
+        panic!("the picker is still open");
+    };
+    assert!(m.rows[1].visible, "the toggled row shows its new state");
+
+    // `Esc` leaves without changing anything further.
+    h.key(KeyCode::Esc, KeyModifiers::NONE);
+    assert!(!h.app.modal.is_open());
+    assert_eq!(h.app.visible_plugin_panes(), 1);
+}
+
+/// `Enter` is the "show this one and get out of the way" gesture, and the bound
+/// action closes the picker again like every other self-toggling overlay.
+#[cfg(feature = "plugins")]
+#[test]
+fn plugin_pane_picker_enter_toggles_and_closes() {
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let mut h = Harness::new(160, 40, 1);
+    h.app.set_plugin_panes(vec![
+        crate::plugin::PluginPane::loading("a", "one", "A", PaneSlot::Right, false),
+        crate::plugin::PluginPane::loading("b", "two", "B", PaneSlot::Right, false),
+    ]);
+
+    h.func(10);
+    h.key(KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!h.app.modal.is_open(), "Enter closes the picker");
+    assert_eq!(h.app.visible_plugin_panes(), 1);
+
+    // Re-pressing the opener dismisses it, as with the theme picker.
+    h.func(10);
+    assert!(h.app.modal.is_open());
+    h.func(10);
+    assert!(!h.app.modal.is_open());
+    assert_eq!(
+        h.app.visible_plugin_panes(),
+        1,
+        "dismissing changes nothing"
+    );
+}
+
+/// Every pane thurbox *ships* must be reachable from the bound action — the
+/// property `migration/phase-4` now requires, driven over the real bundled
+/// plugins rather than synthetic panes, because the gap it closes was invisible
+/// until a second bundled pane existed. As later Phase 4 panes land, this keeps
+/// asserting the same thing about each of them.
+#[cfg(feature = "plugins")]
+#[test]
+fn every_bundled_pane_is_reachable_from_the_keyboard() {
+    use crate::session::pane_visibility as pv;
+
+    let _guard = pv::test_lock();
+    pv::clear_for_test();
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/plugin/bundled");
+    let mut dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&root)
+        .expect("the bundled plugin sources ship in the tree")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.join("plugin.toml").is_file())
+        .collect();
+    dirs.sort();
+    let outcome = crate::plugin::discovery::discover_in(&dirs, None);
+    assert!(
+        outcome.problems.is_empty(),
+        "every bundled plugin must load: {:?}",
+        outcome.problems
+    );
+    let mut host = crate::plugin::PluginHost::from_discovery(
+        outcome,
+        crate::plugin::ExecutionBounds::default(),
+    );
+    host.start_all();
+    let panes = host.panes();
+    assert!(
+        panes.len() >= 2,
+        "thurbox ships more than one pane, which is the case the picker exists for"
+    );
+
+    let mut h = Harness::new(160, 40, 1);
+    h.app.set_plugin_panes(panes.clone());
+    h.func(10);
+    let frame = h.render();
+    for pane in &panes {
+        assert!(
+            frame.contains(&format!("{}.{}", pane.plugin, pane.id)),
+            "{}.{} must be listed:\n{frame}",
+            pane.plugin,
+            pane.id
+        );
+    }
+
+    // Each of them, in turn, can be shown or hidden from that one key.
+    for (i, pane) in panes.iter().enumerate() {
+        let before = h
+            .app
+            .plugin_pane_visible(&pane.plugin, &pane.id)
+            .expect("the pane is declared");
+        for _ in 0..panes.len() {
+            h.key(KeyCode::Char('k'), KeyModifiers::NONE);
+        }
+        for _ in 0..i {
+            h.key(KeyCode::Char('j'), KeyModifiers::NONE);
+        }
+        h.key(KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(
+            h.app.plugin_pane_visible(&pane.plugin, &pane.id),
+            Some(!before),
+            "{}.{} did not answer the keyboard",
+            pane.plugin,
+            pane.id
+        );
+    }
+
+    host.stop_all();
+    pv::clear_for_test();
+}
+
+/// A plugin reload replaces the whole pane set, and it can land while the picker
+/// is open — so a row addresses its pane by name, never by list position.
+#[cfg(feature = "plugins")]
+#[test]
+fn plugin_pane_picker_toggles_the_pane_it_names_after_a_reload() {
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let mut h = Harness::new(160, 40, 1);
+    let a = crate::plugin::PluginPane::loading("a", "one", "A", PaneSlot::Right, false);
+    let b = crate::plugin::PluginPane::loading("b", "two", "B", PaneSlot::Right, false);
+    h.app.set_plugin_panes(vec![a.clone(), b.clone()]);
+
+    h.func(10);
+    h.key(KeyCode::Char('j'), KeyModifiers::NONE);
+
+    // A reload publishes the same panes in the other order; the selected row
+    // still names `b.two`.
+    h.app.set_plugin_panes(vec![b, a]);
+    h.key(KeyCode::Char(' '), KeyModifiers::NONE);
+
+    assert_eq!(
+        h.app.plugin_pane_visible("b", "two"),
+        Some(true),
+        "the pane the row names is the one that moved"
+    );
+    assert_eq!(h.app.plugin_pane_visible("a", "one"), Some(false));
+}
+
+/// The action is bound whether or not a plugin is installed, so with no declared
+/// pane it must do nothing at all — not open an empty picker.
+#[cfg(feature = "plugins")]
+#[test]
+fn plugin_pane_toggle_with_no_panes_is_silent() {
+    let mut h = Harness::new(160, 40, 1);
+    h.func(10);
+    assert!(!h.app.modal.is_open());
+    assert!(h.app.status_message.is_none(), "and raises no error");
+}
+
+/// The render worker must be told which panes to skip, and told *only* when the
+/// answer moved: the publication runs on the tick, so a per-tick write would put
+/// a lock and a clone on the idle loop for every install with a plugin pane.
+#[cfg(feature = "plugins")]
+#[test]
+fn plugin_pane_visibility_publication_is_change_gated() {
+    use crate::session::pane_visibility as pv;
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let _guard = pv::test_lock();
+    pv::clear_for_test();
+
+    let mut h = Harness::new(160, 40, 1);
+    h.app.set_plugin_panes(vec![
+        crate::plugin::PluginPane::loading("a", "one", "A", PaneSlot::Right, true),
+        crate::plugin::PluginPane::loading("b", "two", "B", PaneSlot::Right, false),
+    ]);
+
+    // Nothing is published while no running plugin declares a pane: a build with
+    // no plugin host pays one atomic load per tick and returns.
+    for _ in 0..5 {
+        h.tick();
+    }
+    assert_eq!(h.app.perf_counters().pane_visibility_publishes, 0);
+    assert!(pv::hidden().is_empty());
+
+    pv::set_panes_present(true);
+    h.tick();
+    assert_eq!(h.app.perf_counters().pane_visibility_publishes, 1);
+    assert!(pv::is_hidden("b", "two"), "the hidden pane is published");
+    assert!(!pv::is_hidden("a", "one"), "the visible one is not");
+
+    // Steady state: the set has not moved, so nothing is written.
+    for _ in 0..20 {
+        h.tick();
+    }
+    assert_eq!(
+        h.app.perf_counters().pane_visibility_publishes,
+        1,
+        "an unchanged hidden set costs no publication"
+    );
+
+    // A toggle moves it, and exactly one publication follows.
+    h.app.set_plugin_pane_visible("a", "one", false);
+    h.tick();
+    assert_eq!(h.app.perf_counters().pane_visibility_publishes, 2);
+    assert!(pv::is_hidden("a", "one"));
+    assert!(pv::is_hidden("b", "two"));
+
+    pv::clear_for_test();
+}
+
 /// A pane the user has never chosen for keeps whatever the manifest seeded, so
 /// applying stored visibility is not a way for the store to erase a seed.
 #[cfg(feature = "plugins")]

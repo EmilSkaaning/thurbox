@@ -2039,6 +2039,11 @@ pub enum Modal {
     RepoPicker(RepoPickerModal),
     SessionName(SessionNameModal),
     ThemePicker(ThemePickerModal),
+    /// Gated because rustc reports an unconstructed variant as dead code and
+    /// `-D warnings` is a hard gate: only a build with the plugin host can ever
+    /// open this one.
+    #[cfg(feature = "plugins")]
+    PluginPanes(PluginPanesModal),
     TaskActionPicker(TaskActionPickerModal),
     ConfirmDelete(ConfirmDeleteModal),
     ConfirmRestore(ConfirmRestoreModal),
@@ -2066,6 +2071,11 @@ impl Modal {
         match self {
             Modal::Help(h) => Some((&mut h.selected, KeyCode::Enter)),
             Modal::ThemePicker(tp) => Some((&mut tp.index, KeyCode::Enter)),
+            // `Space`, like the repo picker: a row's action is a toggle, and
+            // `Enter` on a misclick would both flip a pane and dismiss the window
+            // that showed what happened.
+            #[cfg(feature = "plugins")]
+            Modal::PluginPanes(pp) => Some((&mut pp.index, KeyCode::Char(' '))),
             Modal::AgentPicker(ap) => Some((&mut ap.selected_index, KeyCode::Enter)),
             Modal::HostPicker(hp) => Some((&mut hp.selected_index, KeyCode::Enter)),
             Modal::BranchSelector(bs) => Some((&mut bs.index, KeyCode::Enter)),
@@ -2075,6 +2085,55 @@ impl Modal {
             Modal::RepoPicker(rp) => Some((&mut rp.list_index, KeyCode::Char(' '))),
             _ => None,
         }
+    }
+}
+
+// ── PluginPanesModal ─────────────────────────────────────────────────────
+
+/// One declared plugin pane, as the picker shows it.
+///
+/// Plain data rather than a borrowed `plugin::PluginPane` so the renderer stays
+/// inside the `ui → app` edge: `ui` may not reference `crate::plugin`, and
+/// putting the plugin host in the view's type graph for four fields would be a
+/// poor trade. The pane list remains the source of truth — a row is refreshed
+/// from it after every toggle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginPaneRow {
+    /// The plugin that declared the pane.
+    pub plugin: String,
+    /// The pane's id within that plugin.
+    pub id: String,
+    /// The pane's title, as its border shows it.
+    pub title: String,
+    /// Whether it is currently on screen.
+    pub visible: bool,
+}
+
+/// Picker over every declared plugin pane, opened by the pane-visibility action
+/// when more than one pane exists (with exactly one, the action toggles it
+/// directly — there is nothing to choose).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginPanesModal {
+    pub rows: Vec<PluginPaneRow>,
+    pub index: usize,
+}
+
+impl PluginPanesModal {
+    /// Move the selection down, stopping at the last row.
+    pub fn next(&mut self) {
+        if self.index + 1 < self.rows.len() {
+            self.index += 1;
+        }
+    }
+
+    /// Move the selection up, stopping at the first row.
+    pub fn prev(&mut self) {
+        self.index = self.index.saturating_sub(1);
+    }
+
+    /// The selected row, if the list is not empty.
+    pub fn selected(&self) -> Option<&PluginPaneRow> {
+        self.rows.get(self.index)
     }
 }
 

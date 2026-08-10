@@ -78,6 +78,12 @@ pub(crate) struct PerfCounters {
     /// pane can see actually moves.
     pub(crate) pane_context_publishes: u64,
     #[cfg(feature = "plugins")]
+    /// Times the set of panes the render worker should skip was actually
+    /// written. Gated on a running plugin declaring a pane and on the set having
+    /// changed, so it advances once per show/hide and stays flat otherwise —
+    /// which is what stops the publication becoming per-tick work.
+    pub(crate) pane_visibility_publishes: u64,
+    #[cfg(feature = "plugins")]
     /// Animation leases granted to a plugin pane (a retained lease is not
     /// re-counted). A pane with six animated nodes takes one lease, so this
     /// counts panes that started animating, not nodes.
@@ -143,6 +149,10 @@ impl PerfCounters {
             pane_context_publishes: self
                 .pane_context_publishes
                 .wrapping_sub(prev.pane_context_publishes),
+            #[cfg(feature = "plugins")]
+            pane_visibility_publishes: self
+                .pane_visibility_publishes
+                .wrapping_sub(prev.pane_visibility_publishes),
             #[cfg(feature = "plugins")]
             motion_leases: self.motion_leases.wrapping_sub(prev.motion_leases),
             #[cfg(feature = "plugins")]

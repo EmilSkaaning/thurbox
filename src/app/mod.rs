@@ -991,6 +991,10 @@ pub struct App {
     pub(crate) published_pane_context: Option<crate::session::pane_context::PaneContext>,
     #[cfg(feature = "plugins")]
     pub(crate) plugin_panes: Vec<crate::plugin::PluginPane>,
+    /// The last hidden set published for the render worker, held so the publisher
+    /// can skip writing an unchanged one.
+    #[cfg(feature = "plugins")]
+    pub(crate) published_hidden_panes: Vec<crate::session::pane_visibility::HiddenPane>,
     /// Plugin pane events, produced off-thread and drained on the tick.
     #[cfg(feature = "plugins")]
     pub(crate) plugin_events: Option<std::sync::mpsc::Receiver<PluginUiEvent>>,
@@ -1392,6 +1396,8 @@ impl App {
             published_pane_context: None,
             #[cfg(feature = "plugins")]
             plugin_panes: Vec::new(),
+            #[cfg(feature = "plugins")]
+            published_hidden_panes: Vec::new(),
             #[cfg(feature = "plugins")]
             plugin_events: None,
             #[cfg(feature = "plugins")]
@@ -4697,6 +4703,12 @@ impl App {
         // gap at one worker cycle rather than two.
         self.publish_pane_context();
 
+        // Tell the render worker which panes it can skip. Before the drain below
+        // for the same reason: a pane hidden this tick should not be re-rendered
+        // for the cycle it spends off screen.
+        #[cfg(feature = "plugins")]
+        self.publish_plugin_pane_visibility();
+
         // Apply finished plugin pane renders.
         #[cfg(feature = "plugins")]
         self.poll_plugin_renders();
@@ -4825,10 +4837,11 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        // Motion counters only exist where the plugin host does; a stable
-        // build's snapshot is byte-identical to before this change.
+        // These counters only exist where the plugin host does; a stable build's
+        // snapshot carries exactly the fields it did before the host existed.
         #[cfg(feature = "plugins")]
-        let motion = serde_json::json!({
+        let plugin_counters = serde_json::json!({
+            "pane_visibility_publishes": p.pane_visibility_publishes,
             "motion_leases": p.motion_leases,
             "motion_frames": p.motion_frames,
             "motion_denied": p.motion_denied,
@@ -4862,10 +4875,11 @@ impl App {
         #[cfg(feature = "plugins")]
         let snapshot = {
             let mut snapshot = snapshot;
-            if let (Some(counters), Some(motion)) =
-                (snapshot["counters"].as_object_mut(), motion.as_object())
-            {
-                counters.extend(motion.clone());
+            if let (Some(counters), Some(extra)) = (
+                snapshot["counters"].as_object_mut(),
+                plugin_counters.as_object(),
+            ) {
+                counters.extend(extra.clone());
             }
             snapshot
         };
@@ -7570,24 +7584,150 @@ impl App {
         reply_rx.recv_timeout(PLUGIN_KEY_TIMEOUT).unwrap_or(false)
     }
 
-    /// Show or hide the plugin pane.
+    /// Decide which plugin panes are on screen.
     ///
     /// Visibility is kernel state, not the plugin's: the manifest only seeds
     /// it, and a user's choice is persisted per pane so it survives a restart
     /// — unlike v1, which resets every panel's visibility on each launch.
+    ///
+    /// One bound action covers any number of panes, because the alternative —
+    /// one generated action per discovered pane — would make the keybinding
+    /// namespace (and the F1 editor's row indices) depend on which plugins
+    /// happen to be installed. So the action toggles directly when there is one
+    /// pane and opens a picker when there are several, on the same rule the
+    /// new-session host picker follows: a chooser over a single option is a
+    /// question with one answer.
     #[cfg(feature = "plugins")]
     pub(crate) fn toggle_plugin_pane(&mut self) {
-        let Some(pane) = self.plugin_panes.first_mut() else {
+        match self.plugin_panes.len() {
             // Nothing declared a pane; silently a no-op rather than an error,
             // since the key is bound whether or not a plugin is installed.
+            0 => {}
+            1 => {
+                let pane = &self.plugin_panes[0];
+                let (plugin, id, visible) = (pane.plugin.clone(), pane.id.clone(), pane.visible);
+                self.set_plugin_pane_visible(&plugin, &id, !visible);
+            }
+            _ => self.open_plugin_panes_picker(),
+        }
+    }
+
+    /// Show or hide one pane, addressed as everything else addresses a pane.
+    ///
+    /// The single write path for pane visibility, shared by the direct toggle and
+    /// the picker, so a keyboard toggle and the generated `<plugin>.<pane>.hide`
+    /// command leave the same stored choice by construction rather than by
+    /// coincidence. Keyed by name rather than by list position because the pane
+    /// list is replaced whenever a plugin reloads, which can happen while the
+    /// picker is open — a pane that has since vanished is a no-op.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn set_plugin_pane_visible(&mut self, plugin: &str, pane: &str, visible: bool) {
+        let Some(slot) = self
+            .plugin_panes
+            .iter_mut()
+            .find(|p| p.plugin == plugin && p.id == pane)
+        else {
             return;
         };
-        pane.visible = !pane.visible;
-        let (plugin, id, visible) = (pane.plugin.clone(), pane.id.clone(), pane.visible);
-        if let Err(e) = self.db.set_plugin_pane_visible(&plugin, &id, visible) {
+        if slot.visible == visible {
+            return;
+        }
+        slot.visible = visible;
+        if let Err(e) = self.db.set_plugin_pane_visible(plugin, pane, visible) {
             tracing::warn!("cannot persist plugin pane visibility: {e}");
         }
         self.needs_redraw = true;
+    }
+
+    /// The visibility a pane currently has, or `None` when it is gone.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn plugin_pane_visible(&self, plugin: &str, pane: &str) -> Option<bool> {
+        self.plugin_panes
+            .iter()
+            .find(|p| p.plugin == plugin && p.id == pane)
+            .map(|p| p.visible)
+    }
+
+    /// Open the picker listing every declared pane and whether it is on screen.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn open_plugin_panes_picker(&mut self) {
+        let rows = self
+            .plugin_panes
+            .iter()
+            .map(|pane| modals::PluginPaneRow {
+                plugin: pane.plugin.clone(),
+                id: pane.id.clone(),
+                title: pane.title.clone(),
+                visible: pane.visible,
+            })
+            .collect();
+        self.modal = modals::Modal::PluginPanes(modals::PluginPanesModal { rows, index: 0 });
+        self.needs_redraw = true;
+    }
+
+    /// Re-read the picker's rows from the panes, after one was toggled.
+    ///
+    /// The modal holds a copy rather than borrowing the panes, so a toggle has to
+    /// be reflected back; doing it from the panes rather than flipping the row
+    /// keeps the panes the single source of truth for what is on screen. Matched
+    /// by name, for the same reason the setter is.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn sync_plugin_panes_picker(&mut self) {
+        let state: Vec<(String, String, bool)> = self
+            .plugin_panes
+            .iter()
+            .map(|p| (p.plugin.clone(), p.id.clone(), p.visible))
+            .collect();
+        if let modals::Modal::PluginPanes(ref mut m) = self.modal {
+            for row in &mut m.rows {
+                if let Some((.., visible)) = state
+                    .iter()
+                    .find(|(plugin, id, _)| *plugin == row.plugin && *id == row.id)
+                {
+                    row.visible = *visible;
+                }
+            }
+        }
+    }
+
+    /// Publish which panes the render worker should skip.
+    ///
+    /// Two gates, mirroring [`Self::publish_pane_context`]: nothing happens
+    /// unless a running plugin declares a pane at all (one relaxed atomic load in
+    /// a build that has none), and the slot is written only when the hidden set
+    /// actually changed — so a tick on which no pane's visibility moved costs the
+    /// comparison below and nothing else. The comparison walks the panes without
+    /// allocating; only a real change builds a set.
+    ///
+    /// It marks nothing dirty: what is on screen changed where the visibility
+    /// changed, and this only tells the worker what not to bother rendering.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn publish_plugin_pane_visibility(&mut self) {
+        use crate::session::pane_visibility as pv;
+
+        if !pv::panes_present() {
+            return;
+        }
+        let mut count = 0;
+        let mut same = true;
+        for pane in self.plugin_panes.iter().filter(|p| !p.visible) {
+            match self.published_hidden_panes.get(count) {
+                Some(h) if h.plugin == pane.plugin && h.pane == pane.id => {}
+                _ => same = false,
+            }
+            count += 1;
+        }
+        if same && count == self.published_hidden_panes.len() {
+            return;
+        }
+        self.published_hidden_panes = self
+            .plugin_panes
+            .iter()
+            .filter(|p| !p.visible)
+            .map(|p| pv::HiddenPane::new(&p.plugin, &p.id))
+            .collect();
+        pv::publish_hidden(self.published_hidden_panes.clone());
+        self.metrics.bump(|p| &mut p.pane_visibility_publishes);
     }
 
     /// Without the plugin feature there is no pane to toggle.

@@ -1233,6 +1233,14 @@ impl App {
             return Some(render_help_overlay(frame, &self.keybindings, help));
         }
 
+        // Plugin pane picker (opened when more than one pane is declared)
+        #[cfg(feature = "plugins")]
+        if let super::modals::Modal::PluginPanes(ref pp) = self.modal {
+            return Some(crate::ui::plugin_panes_modal::render_plugin_panes_modal(
+                frame, pp,
+            ));
+        }
+
         // Task trigger-time action picker
         if let super::modals::Modal::TaskActionPicker(ref p) = self.modal {
             return Some(

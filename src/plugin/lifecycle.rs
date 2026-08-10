@@ -161,6 +161,13 @@ pub struct PluginHost {
     /// became a slot at all.
     problems: Vec<String>,
     bounds: ExecutionBounds,
+    /// VM renders performed, cumulative.
+    ///
+    /// Exists so "a hidden pane costs no render" is checkable: a pane filtered
+    /// out before the call is indistinguishable, in the returned results, from
+    /// one rendered and discarded. Counted inside [`PluginHost::render_pane`], so
+    /// no caller can satisfy the rule by skipping in one path and not another.
+    render_calls: std::sync::atomic::AtomicU64,
 }
 
 impl fmt::Debug for PluginHost {
@@ -194,6 +201,7 @@ impl PluginHost {
             slots,
             problems: outcome.problems.iter().map(|p| p.to_string()).collect(),
             bounds,
+            render_calls: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -255,7 +263,8 @@ impl PluginHost {
         self.slots.iter().filter(|s| s.state.is_running()).count()
     }
 
-    /// Tell the kernel whether anything running can read its state.
+    /// Tell the kernel what the running set demands of it: whether anything can
+    /// read its state, and whether any pane exists whose visibility it owns.
     ///
     /// Answered from the grants the host already holds, and published rather than
     /// queried because the reader is `app`'s tick and asking the host would mean
@@ -268,12 +277,14 @@ impl PluginHost {
     /// the plugin a stale one. Both are recoverable on the next call, which is
     /// why it is derived here rather than tracked incrementally.
     fn publish_state_demand(&self) {
-        let wanted = self
-            .slots
-            .iter()
-            .filter(|s| s.state.is_running())
-            .any(|s| s.granted.iter().any(Capability::reads_kernel_state));
+        let running = || self.slots.iter().filter(|s| s.state.is_running());
+        let wanted = running().any(|s| s.granted.iter().any(Capability::reads_kernel_state));
         crate::session::pane_context::set_readers_present(wanted);
+        // The same answer for the other direction of the boundary: with no pane
+        // declared there is nothing for the kernel to keep off screen, so the
+        // tick's visibility publisher can return on one atomic load.
+        let panes = running().any(|s| !s.plugin.manifest.panes.is_empty());
+        crate::session::pane_visibility::set_panes_present(panes);
     }
 
     /// Everything the host knows, as one snapshot.
@@ -394,13 +405,21 @@ impl PluginHost {
             .collect()
     }
 
-    /// Render every pane once, returning each result.
+    /// Render every pane the kernel is showing, returning each result.
     ///
     /// Runs on the caller's thread — a plugin-render worker, never the UI
     /// thread.
+    ///
+    /// A pane the kernel publishes as hidden is **not** rendered: its VM is not
+    /// entered at all. Filtering here rather than after the render is the whole
+    /// point — the UI already discards a hidden pane's tree, so rendering one
+    /// spends a Luau call per cycle on something nobody can see, and Phase 4
+    /// ships seven panes. A pane nothing has been published about is rendered
+    /// (see [`crate::session::pane_visibility`]).
     pub fn render_all_panes_collected(&self) -> Vec<(String, String, Result<ViewNode, String>)> {
         self.panes()
             .into_iter()
+            .filter(|pane| !crate::session::pane_visibility::is_hidden(&pane.plugin, &pane.id))
             .map(|pane| {
                 let result = self
                     .render_pane(&pane.plugin, &pane.id)
@@ -515,10 +534,17 @@ impl PluginHost {
             ));
         }
 
-        slot.thread
-            .as_ref()
-            .ok_or(RuntimeError::ThreadGone)?
-            .render(pane_id)
+        let thread = slot.thread.as_ref().ok_or(RuntimeError::ThreadGone)?;
+        self.render_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        thread.render(pane_id)
+    }
+
+    /// How many times a plugin VM has been entered to render a pane.
+    ///
+    /// A diagnostic, and the evidence behind "a hidden pane costs no render".
+    pub fn render_calls(&self) -> u64 {
+        self.render_calls.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Evaluate a chunk inside one plugin's VM (host-side diagnostic).
@@ -1023,6 +1049,110 @@ mod tests {
             format!("return {{ render = function(paneId) {render_body} end }}"),
         )
         .unwrap();
+    }
+
+    /// The kernel keeps a pane off screen, so the host must not spend a VM call
+    /// building a tree for it. Asserted on the render count rather than on the
+    /// returned results, because a pane filtered out before the call and one
+    /// rendered and discarded produce the identical result list — which is how
+    /// the discarding version survived until now.
+    #[test]
+    fn a_hidden_pane_is_not_rendered() {
+        use crate::session::pane_visibility as pv;
+
+        let _lock = pv::test_lock();
+        pv::clear_for_test();
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_pane_plugin(tmp.path(), "alpha", r#"return { kind = "divider" }"#);
+        write_pane_plugin(tmp.path(), "beta", r#"return { kind = "divider" }"#);
+
+        let mut host = host_over(tmp.path());
+        host.start_all();
+        assert_eq!(host.render_calls(), 0);
+
+        // Nothing published: both panes draw, exactly as before this rule.
+        assert_eq!(host.render_all_panes_collected().len(), 2);
+        assert_eq!(host.render_calls(), 2);
+
+        pv::publish_hidden(vec![pv::HiddenPane::new("beta", "board")]);
+        let rendered = host.render_all_panes_collected();
+        assert_eq!(
+            rendered
+                .iter()
+                .map(|(p, ..)| p.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha"],
+            "only the visible pane is returned"
+        );
+        assert_eq!(
+            host.render_calls(),
+            3,
+            "and only one VM was entered, not two"
+        );
+
+        // Unhiding restores it: the skip is a function of what is published, not
+        // a decision the host remembers.
+        pv::publish_hidden(Vec::new());
+        assert_eq!(host.render_all_panes_collected().len(), 2);
+        assert_eq!(host.render_calls(), 5);
+
+        pv::clear_for_test();
+    }
+
+    /// The host's own pane list must keep a hidden pane: it is what the picker
+    /// that turns the pane back on is built from, and what the stored choice is
+    /// applied to.
+    #[test]
+    fn a_hidden_pane_is_still_declared() {
+        use crate::session::pane_visibility as pv;
+
+        let _lock = pv::test_lock();
+        pv::clear_for_test();
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_pane_plugin(tmp.path(), "alpha", r#"return { kind = "divider" }"#);
+
+        let mut host = host_over(tmp.path());
+        host.start_all();
+        pv::publish_hidden(vec![pv::HiddenPane::new("alpha", "board")]);
+
+        assert_eq!(host.panes().len(), 1, "a hidden pane still exists");
+        assert!(host.render_all_panes_collected().is_empty());
+
+        pv::clear_for_test();
+    }
+
+    /// The demand flag mirrors `pane_context`'s: derived from what is running, so
+    /// a build whose plugins declare no pane never reaches the publisher.
+    #[test]
+    fn pane_presence_is_published_from_the_running_set() {
+        use crate::session::pane_visibility as pv;
+
+        let _lock = pv::test_lock();
+        pv::clear_for_test();
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(
+            tmp.path(),
+            "paneless",
+            "",
+            "return { init = function() end }",
+        );
+        let mut host = host_over(tmp.path());
+        host.start_all();
+        assert!(!pv::panes_present(), "no pane, so nothing to publish about");
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_pane_plugin(tmp.path(), "alpha", r#"return { kind = "divider" }"#);
+        let mut host = host_over(tmp.path());
+        host.start_all();
+        assert!(pv::panes_present());
+
+        host.stop_all();
+        assert!(!pv::panes_present(), "and stops being true when it stops");
+
+        pv::clear_for_test();
     }
 
     #[test]

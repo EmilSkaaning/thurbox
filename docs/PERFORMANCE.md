@@ -81,6 +81,7 @@ wall-clock-free `u64` counters bumped at the render/tick hot paths:
 | `agent_meta_syncs` | a session's OSC title/notification actually re-read (gated on the reader thread's meta generation, ADR-P10) |
 | `data_version_checks` | the status refresh actually ran its `PRAGMA data_version` read (throttled ~10×/s, ADR-P10) |
 | `pane_context_builds` / `pane_context_publishes` | the plugin-readable kernel snapshot was gathered / differed from the last one and was written (ADR-27) |
+| `pane_visibility_publishes` | the set of panes the render worker should skip differed from the last one and was written (ADR-28) — `plugins` builds only |
 | `motion_leases` / `motion_frames` | animation leases granted to a plugin pane / repaints declared motion caused (one per tick where a resolved frame moved) — `plugins` builds only |
 | `motion_denied` / `motion_frozen` | declared motions the kernel declined (reduced motion, or a hidden pane) / leases frozen by the aggregate rate budget — `plugins` builds only |
 
@@ -98,6 +99,15 @@ a hundred times a second: the countdown is published in whole *seconds*, the
 granularity it is displayed at, so it differs at most once per second rather than
 on every tick. Publishing never marks the UI dirty — a plugin pane repaints when
 its own tree changes.
+
+`pane_visibility_publishes` is the same discipline for the other direction of the
+plugin boundary (ADR-28): the kernel tells the render worker which panes it is
+keeping off screen, so a hidden pane's VM is never entered. It must advance
+**once per show/hide** and stay flat otherwise — gated first on some running
+plugin declaring a pane at all, then on the hidden set having actually changed, so
+an install with a plugin pane does not pay a lock and a clone per tick. Like the
+snapshot above it marks nothing dirty: it changes what is *not* rendered, and what
+is on screen changed where the visibility did.
 `external_poll_reloads` stays 0 with no other writer. Tick-driven counters are
 asserted in the `#[test]` units in `super::tests`
 (`perf_hook_states_cached_across_idle_ticks`,

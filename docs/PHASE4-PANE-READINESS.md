@@ -135,7 +135,7 @@ The pane now needs no width at all: `ui::info_panel::info_tree` takes no area,
 which `the_tree_carries_no_geometry` asserts. That, not the gauge itself, is the
 property a plugin would need.
 
-## 5. Half closed: the layout seats N panes; the keyboard still reaches one
+## 5. Closed: the layout seats N panes, and so does the keyboard
 
 Unchanged by the info-panel port: the pane is read-only and takes no keys, so it
 neither needed nor exercised this.
@@ -147,20 +147,36 @@ screen with a workspace tree (ADR-24), the right column holds one region per
 screen at once, which is what `two_plugin_panes_both_reach_the_screen` in
 `src/app/acceptance.rs` asserts.
 
-**Still open.** `App::toggle_plugin_pane` mutates `plugin_panes.first_mut()`, so
-`F10` toggles the **first** declared pane whatever the user wanted and a second
-bundled pane is unreachable from the keyboard. Phase 4 ships seven panes, so
-this has to be decided before the pane migration finishes: whether `F10` remains
-one toggle or becomes per-pane visibility with generated
-`<plugin>.<pane>.toggle` commands (ADR-V21) — the pane-visibility spec already
-describes the latter. Deliberately not folded into the layout change: seating a
-pane is geometry, and giving each pane a key is a keybinding decision with its
-own surface.
+**Closed by the keyboard half** (ADR-28). What was open was not cosmetic:
+`App::toggle_plugin_pane` mutated `plugin_panes.first_mut()`, and with `hello`
+and `info-panel` both declaring a pane that meant **the pane §2 shipped could not
+be put on screen by any key** — only by `thurbox-cli command run
+info-panel.info.show` or by editing the stored choice. So the answer to "did the
+port work" was, for a keyboard user, no.
 
-A related measurement worth taking at the same time: `render_all_panes_collected`
-renders **every** declared pane each cycle, visible or not. That is correct for
-a first pane and wrong at seven, and it is the cost the motion work was careful
-to avoid paying for hidden panes.
+`Action::TogglePluginPane` now toggles directly with one declared pane and opens
+`Modal::PluginPanes` with several (none: it does nothing). The alternative this
+row proposed — generated per-pane commands as *chords* (ADR-V21) — was rejected
+with a reason: `session::Action` is a fixed enum whose order indexes the F1
+editor's rows, so generating variants per discovered pane would make the
+keybinding namespace depend on which plugins are installed. ADR-V21's generated
+commands remain the right answer for the *name-addressed* case and already exist
+headlessly; the picker is the answer for the keyboard.
+
+**And the related measurement is answered.** `render_all_panes_collected` no
+longer renders a pane the kernel is hiding: `session::pane_visibility` publishes
+the hidden set on the tick (change-gated, counted by
+`pane_visibility_publishes`) and the host consults it before entering a VM. The
+cost this removes is exactly the one the motion work refused to pay for a hidden
+pane, and it was being paid by every default install with two bundled panes. The
+skip is asserted on `PluginHost::render_calls` rather than on the returned
+results, because a pane filtered before the call and one rendered and discarded
+produce the identical list — which is how the discarding version survived a
+review at all.
+
+One cost accepted in exchange: a hidden pane's tree goes stale, so unhiding shows
+its last tree (or `loading`) for up to one worker cycle. That is §7's staleness,
+now paid once on a keystroke instead of every second forever.
 
 ## 6. What the audit implies about ordering
 

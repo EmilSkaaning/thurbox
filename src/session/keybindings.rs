@@ -213,7 +213,10 @@ impl Action {
             Action::StartSync => "Sync worktrees",
             Action::ToggleShell => "Toggle shell view",
             Action::ToggleReview => "Toggle code review",
-            Action::TogglePluginPane => "Toggle plugin pane",
+            // Not "toggle": with several declared panes it opens the picker that
+            // shows and hides each of them, and the help must not promise a
+            // toggle of one unnamed pane (ADR-28).
+            Action::TogglePluginPane => "Show/hide plugin panes",
             Action::ForkSession => "Fork session",
             Action::RestartSession => "Restart session",
             Action::UndoDelete => "Undo delete",

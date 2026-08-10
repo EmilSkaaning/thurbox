@@ -1024,9 +1024,21 @@ a second pane), and every plugin will reimplement `format_bytes` until a
 
 Pane **visibility is kernel
 state**: the manifest seeds it (`default_visible`), `F10`
-(rebindable `TogglePluginPane`) toggles it, and the choice is persisted per
+(rebindable `TogglePluginPane`) decides it, and the choice is persisted per
 pane in `metadata` so it survives a restart — unlike v1's panel toggles, which
-reset each launch. `src/plugin/bundled/thurbox.d.luau` declares the API and
+reset each launch. **One action reaches every pane** (ADR-28): with a single
+declared pane `F10` toggles it, with several it opens a picker
+(`Modal::PluginPanes`, rendered by `ui::plugin_panes_modal`) listing each pane as
+`<plugin>.<id>` with a checkbox — `j`/`k` select, `Space` toggles and stays,
+`Enter` toggles and closes, `Esc`/`F10` close; with none it does nothing. Both
+routes write through `App::set_plugin_pane_visible`, the same stored choice the
+generated `<plugin>.<pane>.hide` command writes. A **hidden pane is not
+rendered**: `App::publish_plugin_pane_visibility` publishes the hidden set
+(`session::pane_visibility`, change-gated on the tick and counted by
+`pane_visibility_publishes`) and `PluginHost::render_all_panes_collected` skips
+those panes rather than entering their VM — a pane nothing was published about is
+still drawn, so a `thurbox-cli` process that never publishes behaves as before.
+`src/plugin/bundled/thurbox.d.luau` declares the API and
 `scripts/dev/lint-luau.sh` type-checks the bundled plugins with `luau-analyze`
 in strict mode (wired into `just lint` and CI). A plugin that declares the
 **`input`** capability gets a focusable pane: `Ctrl+L`/`Ctrl+H` cycle onto it,
@@ -2473,7 +2485,7 @@ Global keys use `Ctrl` + semantic Vim conventions:
 | `Ctrl+B` / `F2` | Toggle info panel (visible at width >= 120) | Info **b**ox |
 | `Ctrl+E` / `F3` | Toggle file viewer | **E**xplore files |
 | `F9` | Toggle session-list pane (hide for full-width terminal) | Sessions list |
-| `F10` | Toggle the plugin pane (`plugins` feature) | Plugin pane |
+| `F10` | Show/hide plugin panes — picker when >1 (`plugins` feature) | Plugin pane |
 | `F12` | Toggle perf HUD (live counters + frame/tick timing) | Diagnostics |
 | `F1` / `Ctrl+G` | Keybindings help + interactive editor | Universal |
 

@@ -365,6 +365,8 @@ impl App {
             Modal::AgentPicker(_) => self.handle_agent_picker_key(code),
             Modal::HostPicker(_) => self.handle_host_picker_key(code),
             Modal::ThemePicker(_) => self.handle_theme_picker_key(code, mods),
+            #[cfg(feature = "plugins")]
+            Modal::PluginPanes(_) => self.handle_plugin_panes_key(code),
             Modal::RepoPicker(_) => self.handle_repo_picker_key(code, mods),
             Modal::TaskActionPicker(_) => self.handle_task_action_picker_key(code),
             Modal::ConfirmDelete(_) => self.handle_confirm_delete_key(code),
@@ -386,6 +388,8 @@ impl App {
         };
         match self.modal {
             Modal::ThemePicker(_) => action == crate::session::Action::OpenThemePicker,
+            #[cfg(feature = "plugins")]
+            Modal::PluginPanes(_) => action == crate::session::Action::TogglePluginPane,
             Modal::Settings(_) => action == crate::session::Action::OpenSettings,
             _ => false,
         }
@@ -437,6 +441,41 @@ impl App {
             }
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                 self.modal.close();
+            }
+            _ => {}
+        }
+    }
+
+    /// Drive the plugin-pane picker: `j`/`k` (or arrows) select, `Space` toggles
+    /// the selected pane and stays (so two panes can be turned on in one visit),
+    /// `Enter` toggles and closes, `Esc` closes.
+    ///
+    /// Toggling goes through the same per-pane setter the single-pane action
+    /// uses, so the stored choice is identical whichever route was taken.
+    #[cfg(feature = "plugins")]
+    fn handle_plugin_panes_key(&mut self, code: KeyCode) {
+        let super::modals::Modal::PluginPanes(ref mut m) = self.modal else {
+            return;
+        };
+        match code {
+            KeyCode::Esc => self.modal.close(),
+            KeyCode::Char('j') | KeyCode::Down => m.next(),
+            KeyCode::Char('k') | KeyCode::Up => m.prev(),
+            KeyCode::Char(' ') | KeyCode::Enter => {
+                let close = code == KeyCode::Enter;
+                let target = m.selected().map(|row| (row.plugin.clone(), row.id.clone()));
+                if let Some((plugin, id)) = target {
+                    // Flip what the pane *is*, not what the row last showed: a
+                    // plugin reload can replace the pane set while the picker is
+                    // open.
+                    if let Some(visible) = self.plugin_pane_visible(&plugin, &id) {
+                        self.set_plugin_pane_visible(&plugin, &id, !visible);
+                        self.sync_plugin_panes_picker();
+                    }
+                }
+                if close {
+                    self.modal.close();
+                }
             }
             _ => {}
         }

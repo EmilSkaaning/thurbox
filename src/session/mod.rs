@@ -9,6 +9,11 @@ pub mod overlay;
 // data type, and a data type gated on a Cargo feature is how one pane ends up
 // with two descriptions of its own state.
 pub mod pane_context;
+// Gated, unlike `pane_context` beside it: the hidden set is not kernel state a
+// pane reads, it is scheduling input for the plugin-render worker, and nothing in
+// a build without the plugin host publishes or consults it.
+#[cfg(feature = "plugins")]
+pub mod pane_visibility;
 #[cfg(feature = "plugins")]
 pub mod plugin_command;
 pub mod plugin_manifest;

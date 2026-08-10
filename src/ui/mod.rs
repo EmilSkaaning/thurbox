@@ -20,6 +20,7 @@ pub mod perf_hud;
 // Ungated with `session::view_tree`: this is the renderer for *any* view tree,
 // and `info_panel` is its first kernel-side caller.
 pub mod plugin_pane;
+pub mod plugin_panes_modal;
 pub mod project_list;
 pub mod repo_picker_modal;
 pub mod restore_sessions_modal;

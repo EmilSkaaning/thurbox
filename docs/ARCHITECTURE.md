@@ -1153,3 +1153,74 @@ not per-tick work.
   native pane — because a plugin reproducing a pane alongside the native one has
   replaced nothing, and the old probe would have permitted deleting the renderer
   every user is looking at.
+
+## ADR-28: One action reaches N panes, and the kernel tells the host what to skip
+
+**Context.** ADR-27's port left `docs/PHASE4-PANE-READINESS.md` §5 half open, and
+the half that was open had a consequence: `App::toggle_plugin_pane` mutated
+`plugin_panes.first_mut()`, so with `hello` and `info-panel` both declaring a
+pane, **the pane ADR-27 shipped could not be put on screen by any key** — only by
+`thurbox-cli command run info-panel.info.show` or by editing the stored choice.
+The same section recorded a second cost: `PluginHost::render_all_panes_collected`
+rendered every declared pane and the view then discarded the hidden ones, so a
+default install paid a Luau render per cycle for panes nobody could see. Phase 4
+schedules seven panes, which turns both from untidiness into arithmetic.
+
+**Decision.**
+
+1. **One bound action, a picker only when there is something to choose.**
+   `Action::TogglePluginPane` toggles directly with one declared pane and opens
+   `Modal::PluginPanes` with two or more; with none it does nothing. The rule is
+   the new-session **host picker**'s: a chooser over a single option is a question
+   with one answer. Rejected: **one generated action per pane** (ADR-V21's shape
+   for *commands*) — `session::Action` is a fixed enum that `keybindings.json`
+   maps chords onto and whose order indexes the F1 editor's rows, so generating
+   variants per discovered pane makes the keybinding namespace depend on which
+   plugins are installed, and a plugin that fails to compile would silently drop a
+   user's binding. The generated `<plugin>.<pane>.{toggle,show,hide}` commands
+   already serve the name-addressed case, headlessly. Rejected: `F10` cycling
+   which single pane is shown — two panes side by side is a configuration the
+   workspace tree explicitly supports. Rejected: always opening the picker — it
+   turns the one-pane case into three keystrokes.
+2. **The picker's rows are plain `app` data.** `modals::PluginPaneRow` carries
+   plugin, id, title and visibility, because `ui` may not reference
+   `crate::plugin` (`tests/architecture_rules.rs`) and putting the plugin host in
+   the view's type graph for four fields is a poor trade. Both routes write
+   through one setter, `App::set_plugin_pane_visible`, so a keyboard toggle and a
+   `hide` command leave the same stored choice by construction.
+3. **The hidden set is published, and the host skips it.**
+   `session::pane_visibility` holds the panes the kernel is keeping off screen;
+   `app` publishes on the tick behind a change gate and `plugin` consults it
+   before entering a VM. Same mechanism as ADR-27 and for the same reasons — no
+   reference held either way, no plugin code on the UI thread, no new module edge.
+   It publishes the **hidden** set rather than the visible one so that "a pane
+   nothing was published about is drawn" is the structure rather than a rule to
+   remember: a process that never publishes (a short-lived `thurbox-cli` command)
+   renders exactly as before. Unlike `pane_context` the module **is** gated on the
+   `plugins` feature: this is not kernel state a pane reads, it is scheduling
+   input for the render worker. Rejected: letting the host read the stored choice
+   (needs `plugin → storage`, the edge the host exists to avoid, and puts SQLite
+   in the render loop); rejected: filtering `PluginHost::panes()` instead, which
+   would hide a pane from the very picker that turns it back on.
+4. **The skip is counted, not asserted.** A pane filtered out before the call is
+   indistinguishable, in the returned results, from one rendered and discarded —
+   which is how the discarding version survived. `PluginHost::render_calls` counts
+   VM entries inside `render_pane`, so no caller can satisfy the rule by skipping
+   in one path only, and `pane_visibility_publishes` joins the perf counters so a
+   regression to per-tick publication is a failing test rather than a profile.
+
+**Consequences.**
+
+- The pane ADR-27 shipped is reachable from the keyboard, and every later Phase 4
+  pane is reachable the moment it is declared — `migration/phase-4` now requires
+  it, so the next port cannot repeat the omission.
+- A hidden pane's tree goes stale while it is hidden, so unhiding shows its last
+  tree (or `loading`) for up to one worker cycle. That is the ~1 s staleness ADR-27
+  already recorded, now paid once on a keystroke instead of every second forever.
+- `Modal::PluginPanes` is `#[cfg(feature = "plugins")]`, unlike the rows and the
+  renderer beside it. Not a preference: rustc reports a variant no code constructs
+  as dead code and `-D warnings` is a hard gate, so a stable build cannot carry an
+  unconstructible variant.
+- §5's remaining measurement is answered rather than deferred: the worker no
+  longer renders panes the user cannot see, which was the cost the motion work was
+  careful never to pay for a hidden pane.
