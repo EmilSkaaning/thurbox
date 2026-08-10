@@ -4,7 +4,7 @@
 
 A plugin pane today is a still image. The only way to animate it is to push a
 new tree per frame, which is exactly what
-[ADR-V18](../../../../thurbox-v2/docs/v2/ARCHITECTURE.md) rejects: a push costs a
+ADR-V18 rejects: a push costs a
 call into the plugin, a tree rebuild, a conversion and a diff, of which only
 the paint is inherent. Worse, it costs those things *whether or not anyone is
 looking* — a plugin cannot tell that its pane is hidden, so the idle case pays
