@@ -15,6 +15,8 @@ use crate::storage::Database;
 
 pub mod action;
 pub mod automations;
+#[cfg(feature = "plugins")]
+pub mod commands;
 pub mod config;
 pub mod editor;
 pub mod extensions;
@@ -118,6 +120,20 @@ pub enum Command {
         #[command(subcommand)]
         action: plugins::Action,
     },
+    /// List, describe, and invoke the commands plugins contribute.
+    ///
+    /// Absent from a build without the `plugins` feature, like `plugin`: with no
+    /// plugin host there is no registry to answer from.
+    ///
+    /// Named `PluginCommands` because a variant ending in the enum's own name
+    /// (`Command::Command`) trips clippy; clap takes the typed verb from the
+    /// attribute, so the surface is still `thurbox-cli command`.
+    #[cfg(feature = "plugins")]
+    #[command(name = "command")]
+    PluginCommands {
+        #[command(subcommand)]
+        action: commands::Action,
+    },
 }
 
 /// Build the additional-repo list for a multi-repo `Spawn` from the repeatable
@@ -173,6 +189,8 @@ pub fn run(cli: Cli, db: &Database) -> Result<(), String> {
         Command::Perf => perf::run(db),
         #[cfg(feature = "plugins")]
         Command::Plugin { action } => plugins::run(action),
+        #[cfg(feature = "plugins")]
+        Command::PluginCommands { action } => commands::run(action),
     }?;
 
     println!("{}", format.render(&output));

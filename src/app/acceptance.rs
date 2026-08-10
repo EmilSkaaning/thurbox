@@ -3664,6 +3664,59 @@ fn plugin_pane_renders_its_tree_in_a_real_frame() {
     assert!(stale.contains("error"), "the failure is surfaced:\n{stale}");
 }
 
+/// A pane hidden by another process (`thurbox-cli command run
+/// <plugin>.<pane>.hide`) has to reach this TUI without a restart. The write is
+/// made through the harness's own connection because a second connection to an
+/// in-memory database is not reachable; the poll's `data_version` trigger is one
+/// line above the call and is exercised by the ordinary sync tests.
+#[cfg(feature = "plugins")]
+#[test]
+fn plugin_pane_visibility_follows_an_external_change() {
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let mut h = Harness::new(160, 40, 1);
+    let pane = crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, true);
+    h.app.set_plugin_panes(vec![pane]);
+    assert!(h.app.show_plugin_pane(), "seeded visible");
+
+    h.app
+        .db
+        .set_plugin_pane_visible("demo", "board", false)
+        .expect("store the choice");
+    assert!(
+        h.app.apply_stored_plugin_pane_visibility(),
+        "an external hide is a change"
+    );
+    assert!(!h.app.show_plugin_pane(), "the pane is off screen");
+    assert!(
+        !h.render().contains("Demo"),
+        "a hidden pane must not be drawn"
+    );
+
+    // Applying the same store again changes nothing, so the demand-driven loop
+    // owes no repaint: one installed plugin must not repaint on every detected
+    // database change.
+    assert!(!h.app.apply_stored_plugin_pane_visibility());
+}
+
+/// A pane the user has never chosen for keeps whatever the manifest seeded, so
+/// applying stored visibility is not a way for the store to erase a seed.
+#[cfg(feature = "plugins")]
+#[test]
+fn plugin_pane_visibility_leaves_an_unstored_pane_alone() {
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let mut h = Harness::new(160, 40, 1);
+    h.app.set_plugin_panes(vec![
+        crate::plugin::PluginPane::loading("a", "shown", "A", PaneSlot::Right, true),
+        crate::plugin::PluginPane::loading("b", "hidden", "B", PaneSlot::Right, false),
+    ]);
+
+    assert!(!h.app.apply_stored_plugin_pane_visibility());
+    let visible: Vec<bool> = h.app.plugin_panes.iter().map(|p| p.visible).collect();
+    assert_eq!(visible, vec![true, false]);
+}
+
 /// Reduced motion is whole-app, not plugin-only: thurbox's own working spinner
 /// holds a single glyph too. This is what makes the setting honest in a build
 /// with no plugin host at all.

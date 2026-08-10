@@ -891,7 +891,10 @@ failure is invisible until something runs them; `doctor` discovers only.
 Plugins live in `~/.config/thurbox/plugins/<name>/` as a `plugin.toml` plus an
 `init.luau`; the bundled `hello` plugin is materialized to
 `~/.local/share/thurbox/builtin-plugins/`, and a user plugin of the same name
-overrides it). A plugin builds its pane from `require("@thurbox").ui`
+overrides it) and **`command`** (list/describe/run: the typed, agent-callable
+plugin command registry — below; unlike `plugin list`, discovery here starts no
+plugin, since a command's id and schema are manifest facts).
+A plugin builds its pane from `require("@thurbox").ui`
 constructors (`text`/`row`/`line`/`column`/`list`/`divider`/`spacer`), styled by
 **theme token** (`accent`/`muted`/`danger`/`success`/`warning`) rather than by
 colour, so every plugin follows a theme switch. `row` and `line` differ in who
@@ -937,6 +940,53 @@ value size and key count. A plugin may own a `thurbox-cli` verb
 (`[[cli]] name = "…"`), dispatched to its service half so it works with no TUI;
 verbs matching a kernel subcommand are refused at manifest validation, and a
 word matching neither still gets clap's ordinary unknown-subcommand error.
+
+A plugin's `[[commands]]` are **typed, agent-callable entry points** (ADR-V10)
+registered in one `session::plugin_command::CommandRegistry`. The registry is
+built **from manifests, never from running plugins**
+(`plugin::commands::registry_for`), so `thurbox-cli command list|describe`
+answers for a plugin that never started or whose code faults — and no VM is
+created to answer "what does this offer". A command declares a `description`,
+`[[commands.args]]` typed `string`/`integer`/`boolean` arguments (emitted as
+**JSON Schema**, the shape agent CLIs already consume as tool definitions),
+`agent_callable`, and an `agent_policy` of `allow`/`deny` (`confirm` needs a
+cross-process prompt channel that does not exist, so it is a manifest error
+naming what does). An argument may declare `default_from = "session"|"task"`,
+which the kernel fills from the **injected `THURBOX_SESSION`/`THURBOX_TASK`** —
+so an agent inside a session invokes a command passing no ids, exactly as
+`message send` already stamps provenance. An explicit value always wins over an
+identity default, and a required identity-defaulted argument invoked from
+outside a session is a clean `E_ARGS` rather than an empty string.
+`thurbox-cli command run <id>` takes either `--name value` flags (a bare flag is
+`true` only for a `boolean` argument; anything else is a missing value) or one
+positional JSON object (the flag form of the JSON argument would collide with the
+global `--json` output flag). Those global flags are the one sharp edge:
+`--json`/`--pretty`/`--text` are `global = true`, so clap stops matching them
+once the trailing argument list starts collecting — **a global output flag must
+precede the command**, and an argument may not be *named* one of the three
+(`RESERVED_ARG_NAMES`, a manifest error, since such an argument could never be
+delivered). Failures are structured with a stable code and a
+non-zero exit: `E_UNKNOWN_COMMAND`, `E_ARGS`, `E_DENIED` (a caller inside a
+session hitting `agent_callable = false` or `deny`), `E_PLUGIN_UNAVAILABLE`. Ids
+are `<plugin>.<declared-id>` and **cannot collide**: plugin names are unique and
+no manifest identifier may contain a dot. **Every declared pane also gets
+kernel-generated `<plugin>.<pane>.{toggle,show,hide}` commands** with no plugin
+code (ADR-V21) — handled by the kernel against the same persisted per-pane
+visibility `F10` writes, so they work headlessly, `toggle` flips the manifest
+seed when nothing is stored, and a running TUI picks the change up on its
+ordinary external-change poll (`App::apply_stored_plugin_pane_visibility`, which
+marks the UI dirty only when a pane actually moved). A plugin-implemented command
+is dispatched to the plugin's **service** half through a `commands` table keyed
+by the local id — a command on a plugin with no service half is
+`E_PLUGIN_UNAVAILABLE`, not a manifest error, since the same manifest is right
+the instant a `service.luau` appears. A command's return value is converted to
+JSON with depth and node bounds (`plugin::commands::to_json`): a table with a `1`
+key becomes an array, anything else an object, and a function is refused naming
+its type rather than silently becoming null. Not yet built: the JSON-RPC control
+socket, the palette, the loop guard (nothing a plugin can call spawns a session,
+so the counter would have nothing to increment), and plugin keys in the F1
+editor — which needs `KeyBindings` to resolve a chord to a command id as well as
+to the closed `Action` enum.
 
 A plugin may add **environment to every agent session thurbox spawns** — v2's
 bounded replacement for v1's `[[agent_patches]]`. It is **manifest data**

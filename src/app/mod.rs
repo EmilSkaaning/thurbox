@@ -5406,6 +5406,10 @@ impl App {
             self.metrics.bump(|p| &mut p.external_poll_reloads);
             self.apply_external_theme_change();
             self.apply_pending_focus_request();
+            #[cfg(feature = "plugins")]
+            if self.apply_stored_plugin_pane_visibility() {
+                self.needs_redraw = true;
+            }
         }
         if !result.delta.is_empty() {
             self.handle_external_state_change(result.delta);
@@ -7432,6 +7436,34 @@ impl App {
         }
         self.plugin_panes = panes;
         true
+    }
+
+    /// Re-read the stored per-pane visibility, reporting whether the screen
+    /// changed.
+    ///
+    /// [`Self::set_plugin_panes`] is the only other reader, and it runs when the
+    /// plugin worker publishes a pane set — at startup and on hot reload. So a
+    /// *different process* storing a choice (`thurbox-cli command run
+    /// <plugin>.<pane>.hide`, which is how the generated visibility commands
+    /// work) would otherwise go unnoticed until a reload. Called from the
+    /// external-change poll, which already runs only when `PRAGMA data_version`
+    /// moves; the return value is what marks the UI dirty, so a store that
+    /// matches what is on screen costs no repaint.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn apply_stored_plugin_pane_visibility(&mut self) -> bool {
+        let mut changed = false;
+        for pane in &mut self.plugin_panes {
+            // No stored choice means the manifest's seed still decides, so the
+            // pane is left exactly as it was published.
+            let Ok(Some(stored)) = self.db.get_plugin_pane_visible(&pane.plugin, &pane.id) else {
+                continue;
+            };
+            if pane.visible != stored {
+                pane.visible = stored;
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Compute the panel layout for `area` from the current panel visibility
