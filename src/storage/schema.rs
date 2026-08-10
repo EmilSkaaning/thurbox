@@ -20,7 +20,7 @@ use rusqlite::Connection;
 /// gates the worktree toggle) and `parent_path` (persisted children of a
 /// remote parent bookmark) to `repo_bookmarks`.
 /// Gaps in the step table are fine (there is no v18 step either).
-pub const SCHEMA_VERSION: u32 = 40;
+pub const SCHEMA_VERSION: u32 = 41;
 
 /// A single migration step: applied when the stored version is below `target`.
 type MigrationStep = (u32, fn(&Connection) -> rusqlite::Result<()>);
@@ -222,6 +222,22 @@ pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
             ON session_messages(to_session_id) WHERE read_at IS NULL;
         CREATE INDEX IF NOT EXISTS idx_session_messages_created
             ON session_messages(created_at);
+
+        -- v2 plugin host: a plugin's own namespaced key/value store, and the
+        -- advisory lock that keeps exactly one host running its service.
+        CREATE TABLE IF NOT EXISTS plugin_kv (
+            plugin          TEXT NOT NULL,
+            key             TEXT NOT NULL,
+            value           TEXT NOT NULL,
+            updated_at      TEXT NOT NULL,
+            PRIMARY KEY (plugin, key)
+        );
+
+        CREATE TABLE IF NOT EXISTS plugin_service_locks (
+            plugin          TEXT PRIMARY KEY,
+            holder          TEXT NOT NULL,
+            renewed_at      INTEGER NOT NULL
+        );
         ",
     )?;
 
@@ -291,6 +307,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         (38, migrate_v38_code_review),
         (39, migrate_v39_bookmark_host),
         (40, migrate_v40_bookmark_git_kind),
+        (41, migrate_v41_plugin_state),
     ];
 
     for &(target, step) in steps {
@@ -1178,9 +1195,48 @@ fn migrate_v40_bookmark_git_kind(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_absent(conn, "repo_bookmarks", "parent_path", "TEXT")
 }
 
+/// v41: durable plugin state — a namespaced key/value store and the advisory
+/// lock that keeps one host running a given plugin's service.
+///
+/// Separate tables rather than more `metadata` rows: this is per-plugin data
+/// with its own size bounds and its own lifetime, and the lock needs an expiry
+/// column so a killed holder cannot wedge a plugin forever.
+fn migrate_v41_plugin_state(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS plugin_kv (
+             plugin     TEXT NOT NULL,
+             key        TEXT NOT NULL,
+             value      TEXT NOT NULL,
+             updated_at TEXT NOT NULL,
+             PRIMARY KEY (plugin, key)
+         );
+         CREATE TABLE IF NOT EXISTS plugin_service_locks (
+             plugin     TEXT PRIMARY KEY,
+             holder     TEXT NOT NULL,
+             renewed_at INTEGER NOT NULL
+         );",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v41_creates_the_plugin_state_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        for table in ["plugin_kv", "plugin_service_locks"] {
+            let found: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1, "{table} missing");
+        }
+    }
 
     #[test]
     fn initialize_sets_busy_timeout() {
