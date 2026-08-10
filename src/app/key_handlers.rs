@@ -39,6 +39,46 @@ fn is_ctrl_letter_chord(code: KeyCode, mods: KeyModifiers) -> bool {
     mods == KeyModifiers::CONTROL && matches!(code, KeyCode::Char(c) if c.is_ascii_alphabetic())
 }
 
+/// Spell a key for a plugin.
+///
+/// A small, stable vocabulary rather than thurbox's internal chord type: a
+/// plugin should not have to track the kernel's key representation, and a
+/// stable spelling is what makes a plugin's key handling portable across
+/// thurbox versions.
+#[cfg(feature = "plugins")]
+fn plugin_key_name(code: KeyCode, mods: KeyModifiers) -> Option<String> {
+    let base = match code {
+        KeyCode::Char(c) => c.to_string(),
+        KeyCode::Up => "up".to_string(),
+        KeyCode::Down => "down".to_string(),
+        KeyCode::Left => "left".to_string(),
+        KeyCode::Right => "right".to_string(),
+        KeyCode::Enter => "enter".to_string(),
+        KeyCode::Tab => "tab".to_string(),
+        KeyCode::Backspace => "backspace".to_string(),
+        KeyCode::Delete => "delete".to_string(),
+        KeyCode::Home => "home".to_string(),
+        KeyCode::End => "end".to_string(),
+        KeyCode::PageUp => "pageup".to_string(),
+        KeyCode::PageDown => "pagedown".to_string(),
+        // Anything else is not worth inventing a name for until a plugin needs
+        // it; an unnamed key is simply not delivered.
+        _ => return None,
+    };
+    let mut out = String::new();
+    if mods.contains(KeyModifiers::CONTROL) {
+        out.push_str("ctrl+");
+    }
+    if mods.contains(KeyModifiers::ALT) {
+        out.push_str("alt+");
+    }
+    if mods.contains(KeyModifiers::SHIFT) && !matches!(code, KeyCode::Char(_)) {
+        out.push_str("shift+");
+    }
+    out.push_str(&base);
+    Some(out)
+}
+
 impl App {
     /// Main key handler dispatcher.
     ///
@@ -147,6 +187,8 @@ impl App {
             // The global-search strip captures input earlier (before the global
             // keybinding lookup), so this arm is effectively unreachable.
             InputFocus::GlobalSearch => self.handle_global_search_key(code, mods),
+            #[cfg(feature = "plugins")]
+            InputFocus::PluginPane => self.handle_plugin_pane_key(code, mods),
             InputFocus::Terminal => self.handle_terminal_key(code, mods),
             InputFocus::FileViewer => self.handle_file_viewer_key(code, mods),
             // The code-review view and its changed-files list capture input
@@ -469,9 +511,63 @@ impl App {
     /// So cycling out of the automation editor/history wraps back to the
     /// **Automations** pane (returning to the selected automation, like `Esc`),
     /// never off to a session.
+    /// The session context's ring: session list → central → right-hand panels.
+    ///
+    /// Extracted so the plugin pane, which is one of those right-hand panels,
+    /// can share it rather than the ring being restated per stop.
+    fn session_ring(&self) -> Vec<InputFocus> {
+        use InputFocus::*;
+
+        // Order mirrors the on-screen columns: central → tasks → files.
+        // The central pane is the code review when the active session has
+        // one open (persisted per session, like the shell view), else the
+        // terminal — so `Ctrl+L`/`Ctrl+H` move in and out of the review
+        // just like the terminal, and `Ctrl+H` to the session list keeps
+        // the review open.
+        let review = self.active_review().is_some();
+        let central = if review { CodeReview } else { Terminal };
+        // The session list is the ring's left-most stop only while
+        // shown; hidden, the cycle is central ↔ right-side panels.
+        let mut ring = vec![];
+        if self.show_session_list {
+            ring.push(SessionList);
+        }
+        ring.push(central);
+        if self.show_tasks_panel {
+            ring.push(TaskList);
+        }
+        // While a review is open the file-viewer column shows the
+        // changed-files list (forced visible, see `layout_for`), so its
+        // ring stop is `ReviewFiles`; otherwise it's the file viewer when
+        // that panel is toggled on.
+        if review {
+            ring.push(ReviewFiles);
+        } else if self.show_file_viewer {
+            ring.push(FileViewer);
+        }
+        // A plugin pane is a ring stop only when it can do something
+        // with focus — its plugin must have declared `input`. A
+        // read-only pane stays visible but unfocusable, so cycling
+        // never lands somewhere that ignores every key.
+        #[cfg(feature = "plugins")]
+        if self.focusable_plugin_pane().is_some() {
+            ring.push(PluginPane);
+        }
+        ring
+    }
+
     fn focus_ring(&self) -> Vec<InputFocus> {
         use InputFocus::*;
+        #[cfg(feature = "plugins")]
+        if self.focus == PluginPane {
+            // A plugin pane shares the session ring; delegating keeps the ring
+            // definition in one place instead of duplicating it per stop.
+            return self.session_ring();
+        }
         match self.focus {
+            // Handled above; the arm keeps the match exhaustive.
+            #[cfg(feature = "plugins")]
+            PluginPane => self.session_ring(),
             Automations | AutomationEditor | AutomationRunHistory => {
                 let mut ring = vec![Automations, AutomationEditor];
                 // The run-history panel exists only for an existing automation.
@@ -485,34 +581,7 @@ impl App {
             // not the left-column circular list). `Esc` still drops straight back
             // to the session list.
             SessionList | Terminal | FileViewer | TaskList | CodeReview | ReviewFiles => {
-                // Order mirrors the on-screen columns: central → tasks → files.
-                // The central pane is the code review when the active session has
-                // one open (persisted per session, like the shell view), else the
-                // terminal — so `Ctrl+L`/`Ctrl+H` move in and out of the review
-                // just like the terminal, and `Ctrl+H` to the session list keeps
-                // the review open.
-                let review = self.active_review().is_some();
-                let central = if review { CodeReview } else { Terminal };
-                // The session list is the ring's left-most stop only while
-                // shown; hidden, the cycle is central ↔ right-side panels.
-                let mut ring = vec![];
-                if self.show_session_list {
-                    ring.push(SessionList);
-                }
-                ring.push(central);
-                if self.show_tasks_panel {
-                    ring.push(TaskList);
-                }
-                // While a review is open the file-viewer column shows the
-                // changed-files list (forced visible, see `layout_for`), so its
-                // ring stop is `ReviewFiles`; otherwise it's the file viewer when
-                // that panel is toggled on.
-                if review {
-                    ring.push(ReviewFiles);
-                } else if self.show_file_viewer {
-                    ring.push(FileViewer);
-                }
-                ring
+                self.session_ring()
             }
             // While editing a task in the central pane, the ring is
             // `TaskList → editor` (like the automation editor): cycling out of
@@ -1092,6 +1161,10 @@ impl App {
                 "Code review",
                 Self::toggle_code_review,
             ),
+            Action::TogglePluginPane => {
+                self.toggle_plugin_pane();
+                true
+            }
             Action::OpenAutomations => self.gated(
                 self.features.automations,
                 "Automations",
@@ -1271,6 +1344,28 @@ impl App {
         }
     }
 
+    /// Keys while a plugin pane is focused.
+    ///
+    /// The plugin is offered the key first; anything it does not consume falls
+    /// through to thurbox, so a pane can never trap the user in it. `Esc`
+    /// always returns to the session list without consulting the plugin — the
+    /// escape route is kernel-owned, for the same reason the F1 editor is.
+    #[cfg(feature = "plugins")]
+    fn handle_plugin_pane_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+        if code == KeyCode::Esc {
+            self.focus = InputFocus::SessionList;
+            return;
+        }
+        let Some(key) = plugin_key_name(code, mods) else {
+            return;
+        };
+        if self.offer_key_to_plugin(key) {
+            self.needs_redraw = true;
+        }
+        // Unconsumed keys simply fall through: this handler is reached after
+        // the global keybinding lookup, so there is nothing further to do.
+    }
+
     /// `Ctrl+D`: delete the focused entity (session / automation / task). Editors
     /// and search capture their own keys earlier, so they yield here.
     fn act_delete_session(&mut self) -> bool {
@@ -1279,6 +1374,10 @@ impl App {
                 self.close_active_session();
                 true
             }
+            // Delete is not a plugin-pane operation; it does nothing rather
+            // than acting on whatever the session list happens to have selected.
+            #[cfg(feature = "plugins")]
+            InputFocus::PluginPane => false,
             InputFocus::Automations => {
                 self.dispatch_automations_pane_action(crate::session::Action::AutomationsDelete)
             }

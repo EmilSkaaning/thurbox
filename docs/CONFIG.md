@@ -20,7 +20,9 @@ development checkout never touches your real setup.
 | `~/.config/thurbox/themes.toml` | TOML | you | startup | custom theme palettes |
 | `~/.config/thurbox/keybindings.json` | JSON | F1 editor (or you) | **live** (mtime poll) | key chord overrides |
 | `~/.config/thurbox/extensions/<name>.toml` | TOML | `thurbox-cli extension install` | startup + tick | extension manifests (self-healed resources) |
-| `~/.local/share/thurbox/thurbox.db` | SQLite | thurbox | live | sessions, automations, tasks, theme, editor command |
+| `~/.local/share/thurbox/builtin-plugins/<name>/` | dir | thurbox | startup | bundled plugins materialized from the binary (`plugins` feature); a user plugin of the same name overrides one |
+| `~/.config/thurbox/plugins/<name>/plugin.toml` | TOML | you | startup | v2 plugin manifest (`plugins` feature only) — identity, provided panes/commands/keybindings, requested capabilities; the plugin's code sits beside it in `init.luau` |
+| `~/.local/share/thurbox/thurbox.db` | SQLite | thurbox | live | sessions, automations, tasks, theme, editor command, plugin pane visibility |
 | `~/.local/share/thurbox/thurbox.log` | text | thurbox | — | logs (incl. config warnings) |
 
 `agents.toml`, `keybindings.json`, and `settings.toml` reload **live**:

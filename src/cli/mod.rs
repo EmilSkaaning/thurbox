@@ -23,6 +23,8 @@ pub mod messages;
 pub mod notify;
 pub mod output;
 pub mod perf;
+#[cfg(feature = "plugins")]
+pub mod plugins;
 pub mod sessions;
 pub mod tasks;
 pub mod update;
@@ -106,6 +108,16 @@ pub enum Command {
     /// Print the perf snapshot a running TUI publishes (THURBOX_PERF_LOG or
     /// the perf HUD must be active in that TUI).
     Perf,
+    /// Report what the plugin host found (v2 plugin host).
+    ///
+    /// Absent from a build without the `plugins` feature rather than present
+    /// and refusing: a stable binary does not contain the plugin host, so
+    /// advertising the verb would misdescribe the binary printing it.
+    #[cfg(feature = "plugins")]
+    Plugin {
+        #[command(subcommand)]
+        action: plugins::Action,
+    },
 }
 
 /// Build the additional-repo list for a multi-repo `Spawn` from the repeatable
@@ -159,6 +171,8 @@ pub fn run(cli: Cli, db: &Database) -> Result<(), String> {
         Command::Update(args) => Ok(update::run(args)),
         Command::Notify(args) => Ok(notify::run(args)),
         Command::Perf => perf::run(db),
+        #[cfg(feature = "plugins")]
+        Command::Plugin { action } => plugins::run(action),
     }?;
 
     println!("{}", format.render(&output));

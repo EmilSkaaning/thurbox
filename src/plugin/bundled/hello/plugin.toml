@@ -1,0 +1,11 @@
+# The first bundled plugin: proof the contract works end to end, and the
+# worked example a plugin author copies. Deliberately tiny — it exercises every
+# node kind and both style paths without needing any host power beyond drawing.
+name = "hello"
+api_version = 1
+capabilities = ["render"]
+
+[[panes]]
+id = "hello"
+title = "Hello"
+slot = "right"

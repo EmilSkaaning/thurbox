@@ -16,6 +16,8 @@ pub mod layout;
 pub mod links;
 pub mod markdown;
 pub mod perf_hud;
+#[cfg(feature = "plugins")]
+pub mod plugin_pane;
 pub mod project_list;
 pub mod repo_picker_modal;
 pub mod restore_sessions_modal;

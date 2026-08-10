@@ -20,12 +20,20 @@ Domain dependency flow is one-directional:
 ```text
 session  (no project-local imports)
 agent    → session
+plugin   → session, paths
 ui       → session, app (read-only model/view state)
 app      → session, agent, ui
 ```
 
 `agent` and `ui` never import each other. This keeps the side-effect
 layer (PTY management) completely decoupled from the rendering layer.
+`plugin` (the v2 plugin host, behind the `plugins` Cargo feature) is
+deliberately narrower than `agent`: it reads manifests from `session`
+and resolves its directory through `paths`, and reaches nothing else.
+`ui`/`app` would put plugin execution on the render path, while
+`agent`/`git`/`storage` are powers a plugin may only receive through a
+declared capability's binding — each added with the change that
+introduces it, rather than inherited by the module wholesale.
 `ui → app` is the TEA `view(model)` coupling: the view renders state
 types owned by `app` but never triggers side effects (and never
 touches `agent` or `git`). The full per-module allowlist — including

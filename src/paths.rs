@@ -191,6 +191,11 @@ pub enum PathKind {
     WorkspacesDir,
     /// User keybindings JSON file: `~/.config/thurbox/keybindings.json`
     KeybindingsFile,
+    /// User plugin directory: `~/.config/thurbox/plugins/`
+    PluginsDir,
+    /// Where bundled plugins are materialized:
+    /// `~/.local/share/thurbox/builtin-plugins/`
+    BuiltinPluginsDir,
 }
 
 /// Path resolution strategy (thread-local).
@@ -233,6 +238,8 @@ fn resolve_xdg(kind: PathKind) -> Option<PathBuf> {
         PathKind::WorktreesDir => xdg_data_subpath(&["worktrees"]),
         PathKind::WorkspacesDir => xdg_data_subpath(&["workspaces"]),
         PathKind::KeybindingsFile => xdg_config_subpath("keybindings.json"),
+        PathKind::PluginsDir => xdg_config_subpath("plugins"),
+        PathKind::BuiltinPluginsDir => xdg_data_subpath(&["builtin-plugins"]),
     }
 }
 
@@ -247,6 +254,8 @@ fn resolve_override(base: &Path, kind: PathKind) -> PathBuf {
         PathKind::WorktreesDir => base.join("worktrees"),
         PathKind::WorkspacesDir => base.join("workspaces"),
         PathKind::KeybindingsFile => base.join("keybindings.json"),
+        PathKind::PluginsDir => base.join("plugins"),
+        PathKind::BuiltinPluginsDir => base.join("builtin-plugins"),
     }
 }
 
@@ -327,6 +336,27 @@ pub fn workspaces_directory() -> Option<PathBuf> {
 /// `$HOME/.config/thurbox/keybindings.json`.
 pub fn keybindings_file() -> Option<PathBuf> {
     resolve(PathKind::KeybindingsFile)
+}
+
+/// Resolve the user plugin directory.
+///
+/// Sits beside the other user-authored config (`agents.toml`, `hosts.toml`,
+/// `keybindings.json`) rather than under the data dir, which holds
+/// thurbox-materialized assets. Absence is normal — discovery never creates it.
+///
+/// Returns: `$XDG_CONFIG_HOME/thurbox/plugins/` or
+/// `$HOME/.config/thurbox/plugins/`.
+pub fn plugins_directory() -> Option<PathBuf> {
+    resolve(PathKind::PluginsDir)
+}
+
+/// Directory where plugins bundled into the binary are materialized so
+/// discovery can treat them as an ordinary local source.
+///
+/// Mirrors [`builtin_extensions_directory`]: embedded assets live in the data
+/// dir, user-authored ones in the config dir.
+pub fn builtin_plugins_directory() -> Option<PathBuf> {
+    resolve(PathKind::BuiltinPluginsDir)
 }
 
 /// Returns true if a Claude transcript file `<agent_session_id>.jsonl` exists

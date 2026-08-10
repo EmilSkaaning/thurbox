@@ -881,7 +881,35 @@ startup when the flag is on), `notify`
 (diagnose OS desktop notifications: prints the detected delivery backend
 and last error; `--test` fires a sample — see OS notifications below), `perf`
 (print the perf snapshot a running TUI publishes while `THURBOX_PERF_LOG`
-or its perf HUD is active — see `docs/PERFORMANCE.md`).
+or its perf HUD is active — see `docs/PERFORMANCE.md`), and — only in a build
+with the **`plugins`** Cargo feature (the v2 plugin host; absent from stable
+builds rather than present and refusing) — `plugin`
+(list/status/doctor: what the host discovered, each plugin's lifecycle state
+and granted capabilities, and everything discovery rejected with its cause.
+`list`/`status` **start** the plugins they report, since a compile or `init`
+failure is invisible until something runs them; `doctor` discovers only.
+Plugins live in `~/.config/thurbox/plugins/<name>/` as a `plugin.toml` plus an
+`init.luau`; the bundled `hello` plugin is materialized to
+`~/.local/share/thurbox/builtin-plugins/`, and a user plugin of the same name
+overrides it). A plugin builds its pane from `require("@thurbox").ui`
+constructors (`text`/`row`/`column`/`list`/`divider`/`spacer`), styled by
+**theme token** (`accent`/`muted`/`danger`/`success`/`warning`) rather than by
+colour, so every plugin follows a theme switch. Pane **visibility is kernel
+state**: the manifest seeds it (`default_visible`), `F10`
+(rebindable `TogglePluginPane`) toggles it, and the choice is persisted per
+pane in `metadata` so it survives a restart — unlike v1's panel toggles, which
+reset each launch. `src/plugin/bundled/thurbox.d.luau` declares the API and
+`scripts/dev/lint-luau.sh` type-checks the bundled plugins with `luau-analyze`
+in strict mode (wired into `just lint` and CI). A plugin that declares the
+**`input`** capability gets a focusable pane: `Ctrl+L`/`Ctrl+H` cycle onto it,
+its `onKey(paneId, key)` is offered each key and returns whether it consumed
+one, anything unconsumed falls through to thurbox, and `Esc` always leaves
+(kernel-owned, so a pane can never trap you). The UI thread waits at most
+`PLUGIN_KEY_TIMEOUT` (50 ms) for that answer — the one place it depends on
+plugin code — so a wedged plugin costs a dropped key, not a freeze. Plugin
+source is **watched**: editing a loaded plugin's `init.luau` reloads it in
+place with a fresh VM, keeping its pane and visibility;
+`thurbox-cli plugin reload [<name>]` does the same on demand.
 Output is
 **human-readable by default** and switches to JSON automatically when stdout is
 piped (so `… | jq` keeps working); force a format with `--json` (compact),
@@ -1944,6 +1972,8 @@ The app follows **The Elm Architecture**:
 ```text
 session  ← pure data types, no crate-internal references
 agent    ← session (+ paths/shell utils; NEVER ui, git, app)
+plugin   ← session + paths (v2 plugin host, `plugins` feature;
+           NEVER ui, app, agent, git, storage)
 ui       ← session + app model/view state (+ fuzzy/paths;
            NEVER agent or git)
 app      ← coordinator, imports all modules
@@ -1987,7 +2017,13 @@ backend dependency stays visible at each call site.
   substitution logic.
 - **`ui/`** — Pure rendering functions. `layout.rs` computes
   panel areas (responsive: <80 = terminal only, >=80 = 2-panel,
-  >=120 = optional 3-panel). Widgets: `project_list` (session
+  >=120 = optional 3-panel). `compute_layout` takes a
+  **`LayoutParams` struct** rather than positional flags, and the
+  right-hand column is an **ordered occupant list** (`RightSlot`:
+  tasks → file viewer → plugin pane), so adding a pane is a field
+  plus a list entry instead of a signature change at 35 call
+  sites. A hidden occupant leaves no gap — the terminal holds the
+  `Min(0)` slot and absorbs the freed width. Widgets: `project_list` (session
   list with repo/branch display; `compute_session_order` is the
   single comparator that orders sessions by manual order
   (`display_order`, never by status) and groups them by repo
@@ -2163,6 +2199,7 @@ Global keys use `Ctrl` + semantic Vim conventions:
 | `Ctrl+B` / `F2` | Toggle info panel (visible at width >= 120) | Info **b**ox |
 | `Ctrl+E` / `F3` | Toggle file viewer | **E**xplore files |
 | `F9` | Toggle session-list pane (hide for full-width terminal) | Sessions list |
+| `F10` | Toggle the plugin pane (`plugins` feature) | Plugin pane |
 | `F12` | Toggle perf HUD (live counters + frame/tick timing) | Diagnostics |
 | `F1` / `Ctrl+G` | Keybindings help + interactive editor | Universal |
 

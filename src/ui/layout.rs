@@ -1,5 +1,6 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PanelAreas {
     pub header: Rect,
     /// Session list area (top of the left column).
@@ -14,6 +15,9 @@ pub struct PanelAreas {
     /// the file viewer (behaves like the file viewer).
     pub tasks_panel: Option<Rect>,
     pub file_viewer: Option<Rect>,
+    /// A plugin-contributed pane, in the right column after the file viewer.
+    /// Present only in the wide layout, exactly like the native side panels.
+    pub plugin_pane: Option<Rect>,
     /// Global search strip — full-width, docked along the bottom (above the
     /// footer) when active.
     pub global_search: Option<Rect>,
@@ -125,34 +129,89 @@ fn left_column_split(
 
 /// Build the wide (≥ three_panel_min_cols) layout with optional info / tasks /
 /// file-viewer columns. Column order: list? | info? | terminal | tasks? |
+/// Which panels the layout should place, as a named structure.
+///
+/// Named rather than positional because the old signature took **nine**
+/// arguments and every new pane widened it, forcing an edit at all 36 call
+/// sites. With a struct plus `Default`, adding a panel is a field that existing
+/// callers never mention — which is the whole reason a plugin can contribute a
+/// pane without touching this file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LayoutParams {
+    /// Show the session list (and, with it, the whole left column).
+    pub show_session_list: bool,
+    /// Show the info panel, left of the terminal.
+    pub show_info_panel: bool,
+    /// Show the tasks panel in the right column.
+    pub show_tasks_panel: bool,
+    /// Show the file viewer in the right column.
+    pub show_file_viewer: bool,
+    /// Show a plugin-contributed pane in the right column.
+    pub show_plugin_pane: bool,
+    /// Show the full-width global-search strip above the footer.
+    pub show_global_search: bool,
+    /// Show the automations pane beneath the session list.
+    pub show_automations_pane: bool,
+    /// How many automations there are; drives the automations pane's height.
+    pub automation_count: usize,
+    /// Show the transient full-width status-message band above the footer.
+    pub show_status_row: bool,
+}
+
+/// One occupant of the right-hand column.
+///
+/// The column is built as an **ordered list** of these rather than a fixed set
+/// of named rects, so a hidden occupant leaves no gap and a new one is a list
+/// entry rather than another branch threaded through the split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RightSlot {
+    Tasks,
+    FileViewer,
+    Plugin,
+}
+
+impl LayoutParams {
+    /// The right column's occupants, in the order they are drawn.
+    ///
+    /// Order is fixed by the host (tasks, then file viewer, then plugin panes)
+    /// — a pane picks a column, not a position, so two panes can never
+    /// disagree about who comes first.
+    fn right_slots(&self) -> Vec<RightSlot> {
+        let mut slots = Vec::new();
+        if self.show_tasks_panel {
+            slots.push(RightSlot::Tasks);
+        }
+        if self.show_file_viewer {
+            slots.push(RightSlot::FileViewer);
+        }
+        if self.show_plugin_pane {
+            slots.push(RightSlot::Plugin);
+        }
+        slots
+    }
+
+    /// Whether anything wants the wide three-column layout.
+    fn wants_side_columns(&self) -> bool {
+        self.show_info_panel || !self.right_slots().is_empty()
+    }
+}
+
 /// file_viewer?. The list column is omitted entirely when
 /// `show_session_list` is false (the terminal expands to fill the freed width),
 /// but the right-side columns are unaffected.
-#[allow(clippy::too_many_arguments)]
-fn three_panel_layout(
-    bands: &VerticalBands,
-    content: Rect,
-    show_session_list: bool,
-    show_info_panel: bool,
-    show_tasks_panel: bool,
-    show_file_viewer: bool,
-    show_automations_pane: bool,
-    automation_count: usize,
-) -> PanelAreas {
+fn three_panel_layout(bands: &VerticalBands, content: Rect, p: LayoutParams) -> PanelAreas {
+    let right = p.right_slots();
     let mut constraints: Vec<Constraint> = Vec::new();
-    if show_session_list {
+    if p.show_session_list {
         constraints.push(Constraint::Percentage(18));
     }
-    if show_info_panel {
+    if p.show_info_panel {
         constraints.push(Constraint::Percentage(15));
     }
     // terminal takes the remainder
     let terminal_idx = constraints.len();
     constraints.push(Constraint::Min(0));
-    if show_tasks_panel {
-        constraints.push(Constraint::Percentage(20));
-    }
-    if show_file_viewer {
+    for _ in &right {
         constraints.push(Constraint::Percentage(20));
     }
 
@@ -165,28 +224,34 @@ fn three_panel_layout(
     // followed by info; the terminal sits at `terminal_idx` regardless of
     // whether the list column was emitted.
     let mut idx = 0;
-    let (left_panel, automations_panel) = if show_session_list {
-        let (lp, ap) = left_column_split(horizontal[idx], show_automations_pane, automation_count);
+    let (left_panel, automations_panel) = if p.show_session_list {
+        let (lp, ap) =
+            left_column_split(horizontal[idx], p.show_automations_pane, p.automation_count);
         idx += 1;
         (Some(lp), ap)
     } else {
         (None, None)
     };
-    let info_panel = show_info_panel.then(|| {
+    let info_panel = p.show_info_panel.then(|| {
         let r = horizontal[idx];
         idx += 1;
         r
     });
     let terminal = horizontal[terminal_idx];
-    // Tasks (if shown) immediately follow the terminal; the file viewer
-    // follows tasks (or the terminal when tasks are hidden).
-    let mut next = terminal_idx + 1;
-    let tasks_panel = show_tasks_panel.then(|| {
-        let r = horizontal[next];
-        next += 1;
-        r
-    });
-    let file_viewer = show_file_viewer.then(|| horizontal[next]);
+
+    // The right column is assigned by walking its occupant list, so a hidden
+    // occupant simply is not in the list and leaves no gap behind it.
+    let mut tasks_panel = None;
+    let mut file_viewer = None;
+    let mut plugin_pane = None;
+    for (offset, slot) in right.iter().enumerate() {
+        let rect = horizontal[terminal_idx + 1 + offset];
+        match slot {
+            RightSlot::Tasks => tasks_panel = Some(rect),
+            RightSlot::FileViewer => file_viewer = Some(rect),
+            RightSlot::Plugin => plugin_pane = Some(rect),
+        }
+    }
 
     PanelAreas {
         header: bands.header,
@@ -195,6 +260,7 @@ fn three_panel_layout(
         info_panel,
         tasks_panel,
         file_viewer,
+        plugin_pane,
         global_search: bands.global_search,
         status_message: bands.status_message,
         terminal,
@@ -219,6 +285,7 @@ fn two_panel_layout(
             info_panel: None,
             tasks_panel: None,
             file_viewer: None,
+            plugin_pane: None,
             global_search: bands.global_search,
             status_message: bands.status_message,
             terminal: content,
@@ -239,6 +306,7 @@ fn two_panel_layout(
         info_panel: None,
         tasks_panel: None,
         file_viewer: None,
+        plugin_pane: None,
         global_search: bands.global_search,
         status_message: bands.status_message,
         terminal: horizontal[1],
@@ -264,19 +332,8 @@ fn two_panel_layout(
 /// footer for the active status/error message (or the sync spinner), so a long
 /// message is never clipped by the right-aligned footer pills. It shrinks the
 /// content region by one row while shown (mirroring `show_global_search`).
-#[allow(clippy::too_many_arguments)]
-pub fn compute_layout(
-    area: Rect,
-    show_session_list: bool,
-    show_info_panel: bool,
-    show_tasks_panel: bool,
-    show_file_viewer: bool,
-    show_global_search: bool,
-    show_automations_pane: bool,
-    automation_count: usize,
-    show_status_row: bool,
-) -> PanelAreas {
-    let bands = split_vertical(area, show_global_search, show_status_row);
+pub fn compute_layout(area: Rect, p: LayoutParams) -> PanelAreas {
+    let bands = split_vertical(area, p.show_global_search, p.show_status_row);
     let content = bands.content;
 
     let settings = crate::session::settings::global();
@@ -288,6 +345,7 @@ pub fn compute_layout(
             info_panel: None,
             tasks_panel: None,
             file_viewer: None,
+            plugin_pane: None,
             global_search: bands.global_search,
             status_message: bands.status_message,
             terminal: content,
@@ -297,27 +355,16 @@ pub fn compute_layout(
 
     // At width ≥ three_panel_min_cols (default 120), support optional info /
     // tasks / file-viewer columns.
-    if area.width >= settings.three_panel_min_cols
-        && (show_info_panel || show_tasks_panel || show_file_viewer)
-    {
-        return three_panel_layout(
-            &bands,
-            content,
-            show_session_list,
-            show_info_panel,
-            show_tasks_panel,
-            show_file_viewer,
-            show_automations_pane,
-            automation_count,
-        );
+    if area.width >= settings.three_panel_min_cols && p.wants_side_columns() {
+        return three_panel_layout(&bands, content, p);
     }
 
     two_panel_layout(
         &bands,
         content,
-        show_session_list,
-        show_automations_pane,
-        automation_count,
+        p.show_session_list,
+        p.show_automations_pane,
+        p.automation_count,
     )
 }
 
@@ -333,14 +380,11 @@ mod tests {
     fn narrow_terminal_hides_left_panel() {
         let areas = compute_layout(
             area(79, 24),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert!(areas.left_panel.is_none());
         assert!(areas.info_panel.is_none());
@@ -351,14 +395,11 @@ mod tests {
     fn normal_width_shows_two_panels() {
         let areas = compute_layout(
             area(100, 24),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert!(areas.left_panel.is_some());
         assert!(areas.info_panel.is_none());
@@ -369,14 +410,12 @@ mod tests {
     fn wide_terminal_with_info_panel_shows_three_panels() {
         let areas = compute_layout(
             area(120, 24),
-            true,
-            true,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_info_panel: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert!(areas.left_panel.is_some());
         assert!(areas.info_panel.is_some());
@@ -387,14 +426,11 @@ mod tests {
     fn wide_terminal_without_info_panel_shows_two_panels() {
         let areas = compute_layout(
             area(120, 24),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert!(areas.left_panel.is_some());
         assert!(areas.info_panel.is_none());
@@ -405,14 +441,12 @@ mod tests {
     fn wide_terminal_with_file_viewer_only() {
         let areas = compute_layout(
             area(160, 24),
-            true,
-            false,
-            false,
-            true,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_file_viewer: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert!(areas.left_panel.is_some());
         assert!(areas.info_panel.is_none());
@@ -423,14 +457,13 @@ mod tests {
     fn wide_terminal_with_info_and_file_viewer() {
         let areas = compute_layout(
             area(160, 24),
-            true,
-            true,
-            false,
-            true,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_info_panel: true,
+                show_file_viewer: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert!(areas.left_panel.is_some());
         assert!(areas.info_panel.is_some());
@@ -444,14 +477,12 @@ mod tests {
     fn wide_terminal_with_tasks_panel_only() {
         let areas = compute_layout(
             area(160, 24),
-            true,
-            false,
-            true,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_tasks_panel: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert!(areas.left_panel.is_some());
         assert!(areas.info_panel.is_none());
@@ -466,14 +497,13 @@ mod tests {
     fn tasks_panel_sits_left_of_file_viewer() {
         let areas = compute_layout(
             area(180, 24),
-            true,
-            false,
-            true,
-            true,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_tasks_panel: true,
+                show_file_viewer: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         let term = areas.terminal;
         let tp = areas.tasks_panel.expect("tasks panel shown");
@@ -486,14 +516,12 @@ mod tests {
     fn tasks_panel_ignored_below_120_cols() {
         let areas = compute_layout(
             area(119, 24),
-            true,
-            false,
-            true,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_tasks_panel: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert!(areas.tasks_panel.is_none());
     }
@@ -502,14 +530,11 @@ mod tests {
     fn global_search_strip_absent_by_default() {
         let areas = compute_layout(
             area(120, 40),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert!(areas.global_search.is_none());
     }
@@ -518,14 +543,12 @@ mod tests {
     fn global_search_strip_present_when_active() {
         let areas = compute_layout(
             area(120, 40),
-            true,
-            false,
-            false,
-            false,
-            true,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_global_search: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         let strip = areas.global_search.expect("strip shown when active");
         // Full width, carved directly above the footer.
@@ -539,26 +562,21 @@ mod tests {
     fn global_search_strip_shrinks_content() {
         let without = compute_layout(
             area(120, 40),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         )
         .terminal;
         let with = compute_layout(
             area(120, 40),
-            true,
-            false,
-            false,
-            false,
-            true,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_global_search: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         )
         .terminal;
         // The terminal (content) region loses the strip's rows.
@@ -569,14 +587,11 @@ mod tests {
     fn status_row_absent_by_default() {
         let areas = compute_layout(
             area(120, 40),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert!(areas.status_message.is_none());
         assert_eq!(areas.footer.height, 1);
@@ -586,14 +601,12 @@ mod tests {
     fn status_row_present_when_active() {
         let areas = compute_layout(
             area(120, 40),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            0,
-            true,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                show_status_row: true,
+                ..Default::default()
+            },
         );
         let row = areas
             .status_message
@@ -609,26 +622,21 @@ mod tests {
     fn status_row_shrinks_content_by_one() {
         let without = compute_layout(
             area(120, 40),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         )
         .terminal;
         let with = compute_layout(
             area(120, 40),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            0,
-            true,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                show_status_row: true,
+                ..Default::default()
+            },
         )
         .terminal;
         assert_eq!(without.height - with.height, 1);
@@ -639,14 +647,13 @@ mod tests {
         // Both strips active: search on top, status row just above the footer.
         let areas = compute_layout(
             area(120, 40),
-            true,
-            false,
-            false,
-            false,
-            true,
-            true,
-            0,
-            true,
+            LayoutParams {
+                show_session_list: true,
+                show_global_search: true,
+                show_automations_pane: true,
+                show_status_row: true,
+                ..Default::default()
+            },
         );
         let gs = areas.global_search.expect("search strip shown");
         let sm = areas.status_message.expect("status row shown");
@@ -665,14 +672,11 @@ mod tests {
     fn header_and_footer_are_one_line() {
         let areas = compute_layout(
             area(100, 24),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert_eq!(areas.header.height, 1);
         assert_eq!(areas.footer.height, 1);
@@ -682,14 +686,11 @@ mod tests {
     fn compact_mode_hides_header_below_20_rows() {
         let areas = compute_layout(
             area(100, 19),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert_eq!(areas.header.height, 0);
         assert_eq!(areas.footer.height, 1);
@@ -700,14 +701,11 @@ mod tests {
     fn header_returns_at_20_rows() {
         let areas = compute_layout(
             area(100, 20),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert_eq!(areas.header.height, 1);
     }
@@ -716,14 +714,12 @@ mod tests {
     fn info_panel_ignored_below_120_cols() {
         let areas = compute_layout(
             area(119, 24),
-            true,
-            true,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_info_panel: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert!(areas.info_panel.is_none());
     }
@@ -732,14 +728,12 @@ mod tests {
     fn file_viewer_ignored_below_120_cols() {
         let areas = compute_layout(
             area(119, 24),
-            true,
-            false,
-            false,
-            true,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_file_viewer: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert!(areas.file_viewer.is_none());
     }
@@ -748,14 +742,12 @@ mod tests {
         use ratatui::widgets::{Block, Borders};
         let terminal = compute_layout(
             area(width, height),
-            true,
-            show_info,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_info_panel: show_info,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         )
         .terminal;
         let inner = Block::default().borders(Borders::ALL).inner(terminal);
@@ -796,14 +788,11 @@ mod tests {
         // Zero automations still get a minimum-height pane (so it's discoverable).
         let areas = compute_layout(
             area(100, 24),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert!(areas.left_panel.is_some());
         let autos = areas.automations_panel.expect("empty pane still shown");
@@ -814,14 +803,12 @@ mod tests {
     fn automations_pane_appears_below_sessions() {
         let areas = compute_layout(
             area(100, 30),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            2,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                automation_count: 2,
+                ..Default::default()
+            },
         );
         let sessions = areas.left_panel.unwrap();
         let autos = areas.automations_panel.expect("automations pane shown");
@@ -837,14 +824,12 @@ mod tests {
     fn automations_pane_height_is_capped() {
         let areas = compute_layout(
             area(100, 60),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            50,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                automation_count: 50,
+                ..Default::default()
+            },
         );
         assert_eq!(
             areas.automations_panel.unwrap().height,
@@ -856,25 +841,20 @@ mod tests {
     fn automations_pane_hidden_when_feature_disabled() {
         let with = compute_layout(
             area(100, 30),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            2,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                automation_count: 2,
+                ..Default::default()
+            },
         );
         let without = compute_layout(
             area(100, 30),
-            true,
-            false,
-            false,
-            false,
-            false,
-            false,
-            2,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                automation_count: 2,
+                ..Default::default()
+            },
         );
         assert!(without.automations_panel.is_none());
         // The session list absorbs the whole left column.
@@ -891,14 +871,12 @@ mod tests {
         // Content height ≈ 4 rows leaves no room for both lists.
         let areas = compute_layout(
             area(100, 6),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            3,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                automation_count: 3,
+                ..Default::default()
+            },
         );
         assert!(areas.left_panel.is_some());
         assert!(areas.automations_panel.is_none());
@@ -910,25 +888,18 @@ mod tests {
         // width (no 25% list column).
         let shown = compute_layout(
             area(100, 24),
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         let hidden = compute_layout(
             area(100, 24),
-            false,
-            false,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert!(shown.left_panel.is_some());
         assert!(hidden.left_panel.is_none());
@@ -943,14 +914,13 @@ mod tests {
         // stay put.
         let areas = compute_layout(
             area(160, 24),
-            false,
-            true,
-            true,
-            true,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_info_panel: true,
+                show_tasks_panel: true,
+                show_file_viewer: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         );
         assert!(areas.left_panel.is_none(), "list column dropped");
         assert!(areas.automations_panel.is_none());
@@ -977,26 +947,21 @@ mod tests {
         // the list would have reserved.
         let with_list = compute_layout(
             area(160, 24),
-            true,
-            true,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_session_list: true,
+                show_info_panel: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         )
         .terminal;
         let no_list = compute_layout(
             area(160, 24),
-            false,
-            true,
-            false,
-            false,
-            false,
-            true,
-            0,
-            false,
+            LayoutParams {
+                show_info_panel: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
         )
         .terminal;
         assert!(
@@ -1005,5 +970,163 @@ mod tests {
             no_list.width,
             with_list.width
         );
+    }
+
+    #[test]
+    fn a_plugin_pane_sits_after_the_file_viewer() {
+        let areas = compute_layout(
+            area(200, 24),
+            LayoutParams {
+                show_session_list: true,
+                show_tasks_panel: true,
+                show_file_viewer: true,
+                show_plugin_pane: true,
+                ..Default::default()
+            },
+        );
+        let tp = areas.tasks_panel.expect("tasks panel shown");
+        let fv = areas.file_viewer.expect("file viewer shown");
+        let pp = areas.plugin_pane.expect("plugin pane shown");
+        assert!(fv.x >= tp.x + tp.width, "file viewer right of tasks");
+        assert!(pp.x >= fv.x + fv.width, "plugin pane right of file viewer");
+    }
+
+    #[test]
+    fn a_hidden_occupant_leaves_no_gap() {
+        // Tasks hidden: the plugin pane must move left into the space rather
+        // than leaving a hole where tasks would have been.
+        let with_tasks = compute_layout(
+            area(200, 24),
+            LayoutParams {
+                show_tasks_panel: true,
+                show_plugin_pane: true,
+                ..Default::default()
+            },
+        );
+        let without_tasks = compute_layout(
+            area(200, 24),
+            LayoutParams {
+                show_plugin_pane: true,
+                ..Default::default()
+            },
+        );
+
+        let term = without_tasks.terminal;
+        let pp = without_tasks.plugin_pane.expect("plugin pane shown");
+        assert!(without_tasks.tasks_panel.is_none());
+        // The pane butts straight up against the terminal: nothing is left
+        // where the hidden occupant would have been.
+        assert_eq!(pp.x, term.x + term.width, "no gap left behind");
+        // The freed width goes to the terminal (it holds the `Min(0)` slot),
+        // so the remaining occupants keep their size and position rather than
+        // sliding left.
+        assert!(
+            term.width > with_tasks.terminal.width,
+            "the terminal absorbs a hidden occupant's width"
+        );
+        assert_eq!(pp.width, with_tasks.plugin_pane.unwrap().width);
+    }
+
+    #[test]
+    fn a_plugin_pane_alone_still_gets_the_wide_layout() {
+        let areas = compute_layout(
+            area(200, 24),
+            LayoutParams {
+                show_session_list: true,
+                show_plugin_pane: true,
+                ..Default::default()
+            },
+        );
+        assert!(areas.plugin_pane.is_some());
+        assert!(areas.tasks_panel.is_none());
+        assert!(areas.file_viewer.is_none());
+    }
+
+    #[test]
+    fn a_plugin_pane_is_dropped_below_the_wide_threshold() {
+        // Same rule the native side panels follow: no room, not shown.
+        let areas = compute_layout(
+            area(119, 24),
+            LayoutParams {
+                show_session_list: true,
+                show_plugin_pane: true,
+                ..Default::default()
+            },
+        );
+        assert!(areas.plugin_pane.is_none());
+    }
+
+    #[test]
+    fn a_plugin_pane_never_overlaps_a_native_panel() {
+        let areas = compute_layout(
+            area(200, 40),
+            LayoutParams {
+                show_session_list: true,
+                show_info_panel: true,
+                show_tasks_panel: true,
+                show_file_viewer: true,
+                show_plugin_pane: true,
+                show_automations_pane: true,
+                ..Default::default()
+            },
+        );
+        let mut rects: Vec<Rect> = vec![areas.terminal];
+        for r in [
+            areas.left_panel,
+            areas.info_panel,
+            areas.tasks_panel,
+            areas.file_viewer,
+            areas.plugin_pane,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            rects.push(r);
+        }
+        for (i, a) in rects.iter().enumerate() {
+            for b in rects.iter().skip(i + 1) {
+                let overlap = a.x < b.x + b.width
+                    && b.x < a.x + a.width
+                    && a.y < b.y + b.height
+                    && b.y < a.y + a.height;
+                assert!(!overlap, "{a:?} overlaps {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn default_params_show_no_optional_panel() {
+        let areas = compute_layout(area(200, 24), LayoutParams::default());
+        assert!(areas.left_panel.is_none());
+        assert!(areas.info_panel.is_none());
+        assert!(areas.tasks_panel.is_none());
+        assert!(areas.file_viewer.is_none());
+        assert!(areas.plugin_pane.is_none());
+    }
+
+    #[test]
+    fn omitting_a_panel_matches_disabling_it_explicitly() {
+        let implicit = compute_layout(
+            area(200, 24),
+            LayoutParams {
+                show_session_list: true,
+                ..Default::default()
+            },
+        );
+        let explicit = compute_layout(
+            area(200, 24),
+            LayoutParams {
+                show_session_list: true,
+                show_info_panel: false,
+                show_tasks_panel: false,
+                show_file_viewer: false,
+                show_plugin_pane: false,
+                show_global_search: false,
+                show_automations_pane: false,
+                automation_count: 0,
+                show_status_row: false,
+            },
+        );
+        assert_eq!(implicit, explicit);
     }
 }

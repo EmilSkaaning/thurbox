@@ -838,6 +838,10 @@ pub enum InputFocus {
     AutomationRunHistory,
     /// The tasks panel on the right (selecting/acting on a task).
     TaskList,
+    /// A plugin-contributed pane, focused so its plugin receives keys.
+    /// Only reachable when that plugin declared the `input` capability.
+    #[cfg(feature = "plugins")]
+    PluginPane,
     /// Editing the scoped task in the central pane (like a session's terminal —
     /// reached with `Enter`/`e` from the tasks panel; `Esc` returns to it).
     TaskEditor,
@@ -896,6 +900,52 @@ pub struct EditorInvocation {
     pub args: Vec<String>,
 }
 
+/// What the plugin render worker tells the UI thread.
+///
+/// A typed message rather than a bare tuple so "here is the pane set" and
+/// "here is a finished render" cannot be confused — the first arrives once
+/// when the host finishes starting, the second on every render cycle.
+/// How long the UI thread waits for a plugin to answer a key.
+///
+/// Short on purpose: exceeding it drops the key to thurbox's own handling, so
+/// a slow plugin degrades to "unresponsive pane", never to a frozen UI.
+#[cfg(feature = "plugins")]
+pub const PLUGIN_KEY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// A key offered to a plugin, with the channel its answer comes back on.
+///
+/// The UI thread has to know *now* whether the plugin consumed the key — it
+/// cannot defer the decision without double-handling or dropping it — so this
+/// carries a reply channel and the caller waits, bounded.
+#[cfg(feature = "plugins")]
+#[derive(Debug)]
+pub struct PluginKeyRequest {
+    /// Owning plugin.
+    pub plugin: String,
+    /// Pane the key was aimed at.
+    pub pane: String,
+    /// The key, in the plugin-facing spelling.
+    pub key: String,
+    /// Where the answer goes.
+    pub reply: std::sync::mpsc::Sender<bool>,
+}
+
+#[cfg(feature = "plugins")]
+#[derive(Debug)]
+pub enum PluginUiEvent {
+    /// The panes every running plugin declares, sent once at startup.
+    Panes(Vec<crate::plugin::PluginPane>),
+    /// One pane's finished render, or why it failed.
+    Rendered {
+        /// Owning plugin.
+        plugin: String,
+        /// Pane id within that plugin.
+        pane: String,
+        /// The tree, or a rendered error message.
+        result: Result<crate::session::view_tree::ViewNode, String>,
+    },
+}
+
 pub struct App {
     pub(crate) sessions: Vec<Session>,
     pub(crate) active_index: usize,
@@ -920,6 +970,19 @@ pub struct App {
     pub(crate) show_info_panel: bool,
     /// Whether the tasks panel column is shown (toggled like the file viewer).
     pub(crate) show_tasks_panel: bool,
+    /// Plugin-contributed panes and what each is currently showing.
+    ///
+    /// Held here rather than in `main` because, unlike the host itself, this is
+    /// state the view reads every frame. The trees are produced off-thread and
+    /// applied on the tick; painting only ever reads what is already here.
+    #[cfg(feature = "plugins")]
+    pub(crate) plugin_panes: Vec<crate::plugin::PluginPane>,
+    /// Plugin pane events, produced off-thread and drained on the tick.
+    #[cfg(feature = "plugins")]
+    pub(crate) plugin_events: Option<std::sync::mpsc::Receiver<PluginUiEvent>>,
+    /// Outbound key requests to the plugin render worker.
+    #[cfg(feature = "plugins")]
+    pub(crate) plugin_keys: Option<std::sync::mpsc::Sender<PluginKeyRequest>>,
     pub(crate) show_file_viewer: bool,
     /// Whether the session-list pane (the left column: sessions + automations)
     /// is shown. Inverse of the other `show_*` flags — defaults to `true` since
@@ -1307,6 +1370,12 @@ impl App {
             features: crate::session::settings::global().features,
             show_info_panel: false,
             show_tasks_panel: false,
+            #[cfg(feature = "plugins")]
+            plugin_panes: Vec::new(),
+            #[cfg(feature = "plugins")]
+            plugin_events: None,
+            #[cfg(feature = "plugins")]
+            plugin_keys: None,
             show_file_viewer: false,
             show_session_list: true,
             file_viewer: crate::ui::file_viewer::FileViewerState::new(),
@@ -3338,7 +3407,7 @@ impl App {
         let Some(hit) = self
             .scrollbar_hits
             .iter()
-            .find(|h| only.map_or(true, |t| h.target == t) && h.geom.contains(x, y))
+            .find(|h| only.is_none_or(|t| h.target == t) && h.geom.contains(x, y))
         else {
             return false;
         };
@@ -4594,6 +4663,10 @@ impl App {
 
         // Apply a finished off-thread code-review diff build (ADR-P8).
         self.poll_review_build();
+
+        // Apply finished plugin pane renders.
+        #[cfg(feature = "plugins")]
+        self.poll_plugin_renders();
 
         // Adopt remote-backed sessions whose host discovery (started at
         // restore) has since completed.
@@ -7116,28 +7189,178 @@ impl App {
         true
     }
 
+    /// Apply any plugin pane renders that finished since the last tick.
+    ///
+    /// Plugin code runs on its own thread; this only moves finished results
+    /// into the model. The UI is marked dirty **only** when a pane's
+    /// presentation actually changed, so a plugin re-rendering to the same tree
+    /// costs nothing — otherwise one installed plugin would return the app to
+    /// painting every tick, undoing the demand-driven loop.
+    #[cfg(feature = "plugins")]
+    fn poll_plugin_renders(&mut self) {
+        let Some(rx) = self.plugin_events.as_ref() else {
+            return;
+        };
+        // Drain without blocking: a plugin that has not replied yet simply is
+        // not in the queue this tick.
+        let events: Vec<PluginUiEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+
+        let mut changed = false;
+        for event in events {
+            match event {
+                PluginUiEvent::Panes(panes) => changed |= self.set_plugin_panes(panes),
+                PluginUiEvent::Rendered {
+                    plugin,
+                    pane,
+                    result,
+                } => {
+                    if let Some(slot) = self
+                        .plugin_panes
+                        .iter_mut()
+                        .find(|p| p.plugin == plugin && p.id == pane)
+                    {
+                        changed |= slot.apply(result);
+                    }
+                }
+            }
+        }
+        if changed {
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Attach the channels connecting the app to the plugin render worker.
+    #[cfg(feature = "plugins")]
+    pub fn set_plugin_channels(
+        &mut self,
+        rx: std::sync::mpsc::Receiver<PluginUiEvent>,
+        keys: std::sync::mpsc::Sender<PluginKeyRequest>,
+    ) {
+        self.plugin_events = Some(rx);
+        self.plugin_keys = Some(keys);
+    }
+
+    /// Offer a key to the focused plugin pane; returns whether it consumed it.
+    ///
+    /// Waits for the plugin's answer, bounded: this is the one place the UI
+    /// thread depends on plugin code, so a wedged plugin costs a single
+    /// dropped frame rather than a hang.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn offer_key_to_plugin(&mut self, key: String) -> bool {
+        let Some(pane) = self.focusable_plugin_pane() else {
+            return false;
+        };
+        let (plugin, pane_id) = (pane.plugin.clone(), pane.id.clone());
+        let Some(tx) = self.plugin_keys.as_ref() else {
+            return false;
+        };
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        if tx
+            .send(PluginKeyRequest {
+                plugin,
+                pane: pane_id,
+                key,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        reply_rx.recv_timeout(PLUGIN_KEY_TIMEOUT).unwrap_or(false)
+    }
+
+    /// Show or hide the plugin pane.
+    ///
+    /// Visibility is kernel state, not the plugin's: the manifest only seeds
+    /// it, and a user's choice is persisted per pane so it survives a restart
+    /// — unlike v1, which resets every panel's visibility on each launch.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn toggle_plugin_pane(&mut self) {
+        let Some(pane) = self.plugin_panes.first_mut() else {
+            // Nothing declared a pane; silently a no-op rather than an error,
+            // since the key is bound whether or not a plugin is installed.
+            return;
+        };
+        pane.visible = !pane.visible;
+        let (plugin, id, visible) = (pane.plugin.clone(), pane.id.clone(), pane.visible);
+        if let Err(e) = self.db.set_plugin_pane_visible(&plugin, &id, visible) {
+            tracing::warn!("cannot persist plugin pane visibility: {e}");
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Without the plugin feature there is no pane to toggle.
+    #[cfg(not(feature = "plugins"))]
+    pub(crate) fn toggle_plugin_pane(&mut self) {}
+
+    /// The plugin pane that can take focus, if any.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn focusable_plugin_pane(&self) -> Option<&crate::plugin::PluginPane> {
+        self.plugin_panes.iter().find(|p| p.is_focusable())
+    }
+
+    /// Whether a plugin pane should occupy a slot in the right column.
+    ///
+    /// A pane exists only for a *running* plugin, so this is false whenever no
+    /// plugin is installed, none started, or the feature is compiled out — and
+    /// the layout is then byte-identical to a build without the plugin host.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn show_plugin_pane(&self) -> bool {
+        self.plugin_panes.iter().any(|p| p.visible)
+    }
+
+    /// Without the plugin feature there is never a pane to place.
+    #[cfg(not(feature = "plugins"))]
+    pub(crate) fn show_plugin_pane(&self) -> bool {
+        false
+    }
+
+    /// Replace the plugin panes, reporting whether what the user sees changed.
+    ///
+    /// The caller marks the UI dirty only when this returns true: a plugin that
+    /// re-renders to the same tree must not cost a repaint, or one installed
+    /// plugin would undo the demand-driven loop for everyone.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn set_plugin_panes(&mut self, mut panes: Vec<crate::plugin::PluginPane>) -> bool {
+        // The manifest only seeds visibility; a stored choice outranks it, so
+        // a pane the user hid stays hidden across restarts.
+        for pane in &mut panes {
+            if let Ok(Some(stored)) = self.db.get_plugin_pane_visible(&pane.plugin, &pane.id) {
+                pane.visible = stored;
+            }
+        }
+        if self.plugin_panes == panes {
+            return false;
+        }
+        self.plugin_panes = panes;
+        true
+    }
+
     /// Compute the panel layout for `area` from the current panel visibility
     /// and feature flags — the single funnel into `layout::compute_layout`,
     /// so the view, mouse routing, and content sizing can never disagree.
     pub(crate) fn layout_for(&self, area: Rect) -> layout::PanelAreas {
         layout::compute_layout(
             area,
-            self.show_session_list,
-            self.show_info_panel,
-            self.show_tasks_panel,
-            // The review's changed-files list lives in the file-viewer column, so
-            // force that column present while a review is open.
-            self.show_file_viewer || self.active_review().is_some(),
-            self.global_search.active,
-            self.features.automations,
-            self.automation_ui.cached_automations.len(),
-            // Carve the transient status row whenever there's a message to show
-            // (a status/error toast, the live sync spinner, or a spawn in
-            // flight) — must match what `render_status_message_row` renders so
-            // the row is never empty.
-            self.worktree_sync.in_progress
-                || self.pending_spawn.is_some()
-                || self.status_message.is_some(),
+            layout::LayoutParams {
+                show_session_list: self.show_session_list,
+                show_info_panel: self.show_info_panel,
+                show_tasks_panel: self.show_tasks_panel,
+                // The review's changed-files list lives in the file-viewer
+                // column, so force that column present while a review is open.
+                show_file_viewer: self.show_file_viewer || self.active_review().is_some(),
+                show_plugin_pane: self.show_plugin_pane(),
+                show_global_search: self.global_search.active,
+                show_automations_pane: self.features.automations,
+                automation_count: self.automation_ui.cached_automations.len(),
+                // Carve the transient status row whenever there's a message to
+                // show (a status/error toast, the live sync spinner, or a spawn
+                // in flight) — must match what `render_status_message_row`
+                // renders so the row is never empty.
+                show_status_row: self.worktree_sync.in_progress
+                    || self.pending_spawn.is_some()
+                    || self.status_message.is_some(),
+            },
         )
     }
 

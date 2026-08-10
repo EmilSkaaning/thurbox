@@ -37,6 +37,8 @@ pub enum Action {
     ToggleShell,
     /// Toggle the native code-review view for the active session.
     ToggleReview,
+    /// Show/hide the plugin-contributed pane (v2 plugin host).
+    TogglePluginPane,
     ForkSession,
     RestartSession,
     UndoDelete,
@@ -143,6 +145,7 @@ impl Action {
             Action::StartSync,
             Action::ToggleShell,
             Action::ToggleReview,
+            Action::TogglePluginPane,
             Action::ForkSession,
             Action::RestartSession,
             Action::UndoDelete,
@@ -210,6 +213,7 @@ impl Action {
             Action::StartSync => "Sync worktrees",
             Action::ToggleShell => "Toggle shell view",
             Action::ToggleReview => "Toggle code review",
+            Action::TogglePluginPane => "Toggle plugin pane",
             Action::ForkSession => "Fork session",
             Action::RestartSession => "Restart session",
             Action::UndoDelete => "Undo delete",
@@ -398,6 +402,8 @@ impl Action {
             // and toggles the review only from non-terminal panes. F7 is the
             // in-terminal escape hatch. Fully rebindable.
             Action::ToggleReview => vec![KeyChord::ctrl('x'), KeyChord::function(7)],
+            // F10: no bare Ctrl+letter, so it reaches a focused terminal too.
+            Action::TogglePluginPane => vec![KeyChord::function(10)],
             Action::ForkSession => vec![KeyChord::ctrl('f')],
             Action::RestartSession => vec![KeyChord::ctrl('r')],
             Action::UndoDelete => vec![KeyChord::ctrl('z')],
@@ -568,6 +574,7 @@ pub fn help_sections() -> Vec<(&'static str, Vec<Action>)> {
                 QuitApp,
                 ToggleShell,
                 ToggleReview,
+                TogglePluginPane,
                 ToggleHelp,
                 ToggleInfoPanel,
                 ToggleFileViewer,
@@ -1363,6 +1370,7 @@ mod tests {
                 Action::StartSync => 0,
                 Action::ToggleShell => 0,
                 Action::ToggleReview => 0,
+                Action::TogglePluginPane => 0,
                 Action::ForkSession => 0,
                 Action::RestartSession => 0,
                 Action::UndoDelete => 0,
@@ -1420,7 +1428,7 @@ mod tests {
         }
         // The listed variants must equal Action::all().len(). If you add
         // a variant, update both `Action::all()` and the match above.
-        const EXPECTED: usize = 61;
+        const EXPECTED: usize = 62;
         assert_eq!(Action::all().len(), EXPECTED);
         for a in Action::all() {
             classify(*a);

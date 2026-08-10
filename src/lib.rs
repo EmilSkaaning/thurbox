@@ -8,6 +8,8 @@ pub(crate) mod fuzzy;
 pub mod git;
 pub mod notifications;
 pub mod paths;
+#[cfg(feature = "plugins")]
+pub mod plugin;
 pub mod session;
 pub mod session_ops;
 pub mod shell;

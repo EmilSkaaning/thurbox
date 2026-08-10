@@ -94,7 +94,10 @@ const MODULE_RULES: &[ModuleRules] = &[
             "paths",
             "notifications",
         ],
-        allowed_path_only: &["agent"],
+        // `plugin` joins `agent` as path-only: starting Luau VMs from a
+        // short-lived headless command is exactly the kind of side-effect
+        // dependency that should be conspicuous at each call site.
+        allowed_path_only: &["agent", "plugin"],
     },
     // Leaf utilities.
     ModuleRules {
@@ -132,6 +135,17 @@ const MODULE_RULES: &[ModuleRules] = &[
     ModuleRules {
         name: "clipboard",
         allowed: &["session"],
+        allowed_path_only: &[],
+    },
+    // v2 plugin host (`plugins` feature): Luau VMs, discovery, lifecycle, and
+    // capability enforcement. Reads manifests from `session` and resolves the
+    // plugin directory through `paths`. Deliberately reaches nothing else —
+    // `ui`/`app` would put plugin execution on the render path, and
+    // `agent`/`git`/`storage` are powers a plugin may only receive through a
+    // declared capability's binding, added with the change that introduces it.
+    ModuleRules {
+        name: "plugin",
+        allowed: &["session", "paths"],
         allowed_path_only: &[],
     },
 ];
@@ -262,7 +276,7 @@ fn strip_comments_and_strings(src: &str) -> String {
                 if bytes.get(j) == Some(&b'"') {
                     let hashes = j - (i + 1);
                     let mut close = vec![b'"'];
-                    close.extend(std::iter::repeat(b'#').take(hashes));
+                    close.extend(std::iter::repeat_n(b'#', hashes));
                     i = j + 1;
                     while i < bytes.len() && bytes[i..].len() >= close.len() {
                         if bytes[i..i + close.len()] == close[..] {

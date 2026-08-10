@@ -4,10 +4,15 @@ pub mod extension_def;
 pub mod host_def;
 pub mod keybindings;
 pub mod message;
+pub mod plugin_manifest;
 pub mod review;
 pub mod settings;
 pub mod task;
 pub mod theme_config;
+// The plugin view tree is v2 surface: pure data, but it exists only to
+// describe what a plugin draws, so stable builds do not carry it.
+#[cfg(feature = "plugins")]
+pub mod view_tree;
 
 pub use agent_def::{AgentDef, AgentRegistry};
 pub use automation::{

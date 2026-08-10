@@ -1,5 +1,10 @@
 //! Key/value settings stored in the `metadata` table.
 
+/// Metadata key holding one plugin pane's visibility.
+fn plugin_pane_visible_key(plugin: &str, pane: &str) -> String {
+    format!("plugin_pane_visible.{plugin}.{pane}")
+}
+
 use rusqlite::{params, OptionalExtension};
 
 use super::Database;
@@ -102,6 +107,44 @@ impl Database {
                 params![THEME_KEY, name],
             )?;
         }
+        Ok(())
+    }
+
+    /// Read a plugin pane's stored visibility.
+    ///
+    /// `None` means the user has never chosen, so the manifest's seed decides.
+    /// Keyed on `<plugin>.<pane>` rather than an index so a choice survives
+    /// installing another plugin.
+    pub fn get_plugin_pane_visible(
+        &self,
+        plugin: &str,
+        pane: &str,
+    ) -> rusqlite::Result<Option<bool>> {
+        let key = plugin_pane_visible_key(plugin, pane);
+        let raw: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                params![key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(raw.map(|v| v == "1"))
+    }
+
+    /// Persist a plugin pane's visibility.
+    pub fn set_plugin_pane_visible(
+        &self,
+        plugin: &str,
+        pane: &str,
+        visible: bool,
+    ) -> rusqlite::Result<()> {
+        let key = plugin_pane_visible_key(plugin, pane);
+        self.conn.execute(
+            "INSERT INTO metadata (key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, if visible { "1" } else { "0" }],
+        )?;
         Ok(())
     }
 
@@ -276,6 +319,45 @@ mod tests {
 
         db.set_editor_command("").unwrap();
         assert_eq!(db.get_editor_command().unwrap(), None);
+    }
+
+    #[test]
+    fn plugin_pane_visible_falls_back_when_unset() {
+        let db = Database::open_in_memory().unwrap();
+        assert_eq!(db.get_plugin_pane_visible("demo", "board").unwrap(), None);
+    }
+
+    #[test]
+    fn plugin_pane_visible_round_trips() {
+        let db = Database::open_in_memory().unwrap();
+        db.set_plugin_pane_visible("demo", "board", false).unwrap();
+        assert_eq!(
+            db.get_plugin_pane_visible("demo", "board").unwrap(),
+            Some(false)
+        );
+        db.set_plugin_pane_visible("demo", "board", true).unwrap();
+        assert_eq!(
+            db.get_plugin_pane_visible("demo", "board").unwrap(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn plugin_pane_visibility_is_keyed_per_pane() {
+        // A choice must survive installing another plugin, which an index
+        // would not.
+        let db = Database::open_in_memory().unwrap();
+        db.set_plugin_pane_visible("a", "board", false).unwrap();
+        db.set_plugin_pane_visible("b", "board", true).unwrap();
+        assert_eq!(
+            db.get_plugin_pane_visible("a", "board").unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            db.get_plugin_pane_visible("b", "board").unwrap(),
+            Some(true)
+        );
+        assert_eq!(db.get_plugin_pane_visible("a", "other").unwrap(), None);
     }
 
     #[test]

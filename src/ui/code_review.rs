@@ -295,7 +295,7 @@ fn render_rows(
         // Selection off the bottom (only possible when wrapping inflates rows):
         // scroll down one logical row and rebuild.
         let overflows =
-            wrap && selected_first.map_or(true, |f| f >= height) && state.scroll < state.selected;
+            wrap && selected_first.is_none_or(|f| f >= height) && state.scroll < state.selected;
         if overflows {
             state.scroll += 1;
             continue;

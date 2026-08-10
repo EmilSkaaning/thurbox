@@ -14,6 +14,16 @@ description = "A TUI for orchestrating multiple coding-agent CLI sessions in per
 repository = "https://github.com/Thurbeen/thurbox"
 keywords = ["tui", "agent", "tmux", "git", "cli"]
 categories = ["command-line-utilities"]
+# Floor for the default feature set. `ratatui 0.30` is the binding constraint;
+# the `plugins` feature needs 1.88 (mlua), which cargo cannot express per
+# feature — the plugin CI job pins a toolchain that satisfies it.
+rust-version = "1.86"
+
+# v2 plugin host. Absent from stable release builds: enabling it embeds a Luau
+# VM and pulls a C toolchain in through mlua's vendored Luau sources.
+[features]
+default = []
+plugins = ["dep:mlua"]
 
 [dependencies]
 # TUI framework
@@ -72,6 +82,12 @@ serde_json = "1"
 # CLI argument parsing (thurbox-cli)
 clap = { version = "4", features = ["derive"] }
 
+# Luau runtime for the v2 plugin host (`plugins` feature). `send` is
+# deliberately NOT enabled: leaving `Lua` as `!Send` makes "a VM is only ever
+# touched by its owning thread" a compile error rather than a review rule, which
+# is what keeps plugin execution off the render loop.
+mlua = { version = "0.12", features = ["luau", "vendored"], optional = true }
+
 # Date/time + cron scheduling (automations)
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 chrono-tz = "0.10"
@@ -124,6 +140,7 @@ strip = false
 insta = { version = "1.48.0", default-features = false }
 
 # Property/fuzz testing — proves thurbox's terminal pipeline is byte- and
+# render-transparent (control_mode transport + terminal_view rendering). Runs in
 # render-transparent (control_mode transport + terminal_view rendering). Runs in
 # the normal `cargo nextest --all`.
 proptest = "1"

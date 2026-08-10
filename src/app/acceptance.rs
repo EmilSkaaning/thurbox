@@ -3158,6 +3158,8 @@ fn assert_invariants(app: &App, ctx: &str) {
 
     // Focus only ever rests on a surface that exists.
     match app.focus {
+        #[cfg(feature = "plugins")]
+        InputFocus::PluginPane => {}
         InputFocus::TaskList | InputFocus::TaskEditor => assert!(
             app.features.tasks && app.show_tasks_panel,
             "[{ctx}] focus {:?} but the tasks panel is hidden",
@@ -3608,4 +3610,214 @@ fn theme_picker_slash_is_not_query_text() {
         panic!("expected the theme picker");
     };
     assert_eq!(tp.filter_query(), "nord", "a second / must not type");
+}
+
+/// A plugin pane must reach the screen from a cached view tree, without the
+/// render path ever calling into a plugin — the whole point of the split
+/// between `plugin` (produces trees) and `ui` (draws them).
+#[cfg(feature = "plugins")]
+#[test]
+fn plugin_pane_renders_its_tree_in_a_real_frame() {
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::view_tree::{StyleToken, TextStyle, ViewNode};
+
+    let mut h = Harness::new(160, 40, 1);
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, true);
+
+    // Nothing rendered yet: the pane says so rather than showing an empty box.
+    h.app.set_plugin_panes(vec![pane.clone()]);
+    let loading = h.render();
+    assert!(loading.contains("Demo"), "pane title is drawn:\n{loading}");
+    assert!(
+        loading.contains("loading"),
+        "loading state is drawn:\n{loading}"
+    );
+
+    // A successful render replaces it with the plugin's own content.
+    pane.apply(Ok(ViewNode::List(vec![
+        ViewNode::styled(
+            "PLUGIN HEADING",
+            TextStyle {
+                token: Some(StyleToken::Accent),
+                bold: true,
+            },
+        ),
+        ViewNode::Divider,
+        ViewNode::text("a plugin drew this"),
+    ])));
+    h.app.set_plugin_panes(vec![pane.clone()]);
+    let drawn = h.render();
+    assert!(drawn.contains("PLUGIN HEADING"), "{drawn}");
+    assert!(drawn.contains("a plugin drew this"), "{drawn}");
+    assert!(!drawn.contains("loading"), "{drawn}");
+
+    // A later failure keeps the last good content and flags the error in the
+    // title, rather than blanking the pane.
+    pane.apply(Err("render exploded".to_string()));
+    h.app.set_plugin_panes(vec![pane]);
+    let stale = h.render();
+    assert!(
+        stale.contains("a plugin drew this"),
+        "content must survive a failed render:\n{stale}"
+    );
+    assert!(stale.contains("error"), "the failure is surfaced:\n{stale}");
+}
+
+/// With no plugin panes the layout must be byte-identical to a build that has
+/// no plugin host at all — the guarantee that installing nothing costs nothing.
+#[cfg(feature = "plugins")]
+#[test]
+fn no_plugin_panes_means_no_layout_change() {
+    let mut h = Harness::new(160, 40, 1);
+    let before = h.render();
+    h.app.set_plugin_panes(Vec::new());
+    assert_eq!(h.render(), before);
+    assert!(!h.app.show_plugin_pane());
+}
+
+/// A pane whose tree does not change must not dirty the UI: one installed
+/// plugin cannot be allowed to return the app to painting every tick.
+#[cfg(feature = "plugins")]
+#[test]
+fn an_unchanged_plugin_tree_does_not_request_a_repaint() {
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::view_tree::ViewNode;
+
+    let mut h = Harness::new(160, 40, 1);
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, true);
+    pane.apply(Ok(ViewNode::text("steady")));
+
+    assert!(
+        h.app.set_plugin_panes(vec![pane.clone()]),
+        "first set changes"
+    );
+    assert!(
+        !h.app.set_plugin_panes(vec![pane]),
+        "an identical pane set must not report a change"
+    );
+}
+
+/// The pane toggle is kernel state: it hides and shows, persists the choice,
+/// and a hidden pane leaves a layout identical to having no plugin at all.
+#[cfg(feature = "plugins")]
+#[test]
+fn plugin_pane_toggles_and_persists() {
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::view_tree::ViewNode;
+
+    let mut h = Harness::new(160, 40, 1);
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, true);
+    pane.apply(Ok(ViewNode::text("PLUGIN BODY")));
+    h.app.set_plugin_panes(vec![pane]);
+
+    let shown = h.render();
+    assert!(shown.contains("PLUGIN BODY"), "{shown}");
+
+    h.app.toggle_plugin_pane();
+    let hidden = h.render();
+    assert!(
+        !hidden.contains("PLUGIN BODY"),
+        "toggle must hide it:\n{hidden}"
+    );
+    assert!(!h.app.show_plugin_pane());
+
+    // The choice is persisted, so re-publishing the same pane set (as the
+    // render worker does every cycle) must not resurrect it.
+    let mut fresh =
+        crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, true);
+    fresh.apply(Ok(ViewNode::text("PLUGIN BODY")));
+    h.app.set_plugin_panes(vec![fresh]);
+    assert!(
+        !h.app.show_plugin_pane(),
+        "a stored choice must outrank the manifest seed"
+    );
+
+    h.app.toggle_plugin_pane();
+    assert!(h.app.show_plugin_pane(), "toggling back shows it again");
+}
+
+/// A hidden plugin pane must cost no layout space at all.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_hidden_plugin_pane_leaves_the_layout_untouched() {
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let mut h = Harness::new(160, 40, 1);
+    let baseline = h.render();
+
+    let pane = crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, false);
+    h.app.set_plugin_panes(vec![pane]);
+
+    assert!(!h.app.show_plugin_pane());
+    assert_eq!(h.render(), baseline);
+}
+
+/// Toggling with nothing installed is a no-op, not an error — the key is bound
+/// whether or not a plugin declares a pane.
+#[cfg(feature = "plugins")]
+#[test]
+fn toggling_with_no_plugin_pane_is_a_no_op() {
+    let mut h = Harness::new(160, 40, 1);
+    let before = h.render();
+    h.app.toggle_plugin_pane();
+    assert_eq!(h.render(), before);
+}
+
+/// Focus reaches a plugin pane only when its plugin asked for input — a
+/// read-only pane stays visible but unfocusable, so cycling never lands
+/// somewhere that ignores every key.
+#[cfg(feature = "plugins")]
+#[test]
+fn focus_ring_includes_a_plugin_pane_only_when_it_takes_input() {
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let mut h = Harness::new(160, 40, 1);
+
+    let mut readonly =
+        crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, true);
+    readonly.accepts_input = false;
+    h.app.set_plugin_panes(vec![readonly]);
+    assert!(h.app.focusable_plugin_pane().is_none());
+
+    let mut interactive =
+        crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, true);
+    interactive.accepts_input = true;
+    h.app.set_plugin_panes(vec![interactive]);
+    assert!(h.app.focusable_plugin_pane().is_some());
+}
+
+/// A hidden pane is never focusable, however its plugin is declared.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_hidden_plugin_pane_is_not_focusable() {
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let mut h = Harness::new(160, 40, 1);
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, false);
+    pane.accepts_input = true;
+    h.app.set_plugin_panes(vec![pane]);
+
+    assert!(h.app.focusable_plugin_pane().is_none());
+}
+
+/// With no worker attached, offering a key must report "not consumed" rather
+/// than blocking — the fallback that keeps a missing plugin host harmless.
+#[cfg(feature = "plugins")]
+#[test]
+fn offering_a_key_without_a_worker_does_not_block() {
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let mut h = Harness::new(160, 40, 1);
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, true);
+    pane.accepts_input = true;
+    h.app.set_plugin_panes(vec![pane]);
+
+    let started = std::time::Instant::now();
+    assert!(!h.app.offer_key_to_plugin("j".to_string()));
+    assert!(started.elapsed() < std::time::Duration::from_millis(500));
 }

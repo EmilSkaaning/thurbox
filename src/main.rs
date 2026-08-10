@@ -339,9 +339,24 @@ async fn main() -> Result<()> {
     arm_automation_heartbeat();
     startup.heartbeat_ms = t_phase.elapsed().as_millis();
 
+    // v2 plugin host. Started detached and never awaited here: loading a plugin
+    // runs its `init`, which may consume its whole interrupt budget, and the
+    // first frame must not wait behind arbitrary plugin code. `App` holds no
+    // reference — nothing renders a plugin yet, so the host stays out of the
+    // model until there is a surface that reads it.
+    #[cfg(feature = "plugins")]
+    let plugin_host =
+        thurbox::plugin::PluginHost::start_detached(thurbox::plugin::ExecutionBounds::default());
+
     // Hand the phase breakdown to the app so the published perf snapshot
     // (`thurbox-cli perf`) can show boot cost alongside the runtime stats.
     app.set_startup_phases(startup.as_json());
+
+    // Once the host finishes starting, adopt its panes and begin the render
+    // loop that keeps them fed. Both happen off the UI thread; `app` only ever
+    // receives finished trees.
+    #[cfg(feature = "plugins")]
+    let plugin_stop = spawn_plugin_render_loop(&mut app, plugin_host);
 
     let res = run_loop(&mut terminal, &mut app, process_start, startup).await;
 
@@ -354,8 +369,151 @@ async fn main() -> Result<()> {
     // early-error returns) still restore correctly.
     restore_terminal();
     app.shutdown();
+
+    // Collect the plugin host and stop it, but only for as long as that is
+    // free: a plugin still wedged in `init` would otherwise hold the process
+    // open, which is the failure the per-plugin shutdown budget already
+    // refuses. An absent host means startup never finished — nothing to stop.
+    // Tell the plugin worker to wind down; it stops every running plugin on
+    // its way out. Deliberately not joined — a plugin wedged in its own code
+    // must never hold the process open, the same rule the per-plugin shutdown
+    // budget already applies.
+    #[cfg(feature = "plugins")]
+    {
+        plugin_stop.store(true, Ordering::Relaxed);
+        std::thread::sleep(PLUGIN_SHUTDOWN_WAIT);
+    }
+
     res
 }
+
+/// Adopt the started host's panes and keep them rendered.
+///
+/// The worker **owns** the host: it takes it from the startup channel, feeds
+/// `App` a stream of pane events, and stops every plugin on its way out. `App`
+/// receives only finished trees, so no plugin call can happen on the thread
+/// that draws.
+///
+/// Returns the flag that tells the worker to stop.
+#[cfg(feature = "plugins")]
+fn spawn_plugin_render_loop(
+    app: &mut App,
+    started: std::sync::mpsc::Receiver<thurbox::plugin::PluginHost>,
+) -> Arc<AtomicBool> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_worker = Arc::clone(&stop);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (key_tx, key_rx) = std::sync::mpsc::channel::<thurbox::app::PluginKeyRequest>();
+    app.set_plugin_channels(rx, key_tx);
+
+    std::thread::Builder::new()
+        .name("thurbox-plugin-render".to_string())
+        .spawn(move || {
+            // Blocks until startup finishes. Nothing on the UI thread waits on
+            // this; the pane simply does not exist until it arrives.
+            let Ok(mut host) = started.recv() else {
+                return;
+            };
+            if tx
+                .send(thurbox::app::PluginUiEvent::Panes(host.panes()))
+                .is_err()
+            {
+                return;
+            }
+
+            let mut stamps = host.source_stamps();
+            while !stop_worker.load(Ordering::Relaxed) {
+                // Hot reload: a plugin whose entry file moved is rebuilt from
+                // its current source. Polled on this cycle rather than through
+                // a filesystem-notification dependency — the bottleneck is the
+                // human typing, and polling degrades predictably on network
+                // filesystems where notifications are least reliable.
+                let current = host.source_stamps();
+                if current != stamps {
+                    for (name, stamp) in &current {
+                        let changed = stamps
+                            .iter()
+                            .find(|(n, _)| n == name)
+                            .is_none_or(|(_, old)| old != stamp);
+                        if changed {
+                            tracing::info!(plugin = %name, "source changed, reloading");
+                            let _ = host.reload(name);
+                        }
+                    }
+                    stamps = host.source_stamps();
+                    // Panes may have appeared or vanished with the reload.
+                    if tx
+                        .send(thurbox::app::PluginUiEvent::Panes(host.panes()))
+                        .is_err()
+                    {
+                        host.stop_all();
+                        return;
+                    }
+                }
+
+                for (plugin, pane, result) in host.render_all_panes_collected() {
+                    if tx
+                        .send(thurbox::app::PluginUiEvent::Rendered {
+                            plugin,
+                            pane,
+                            result,
+                        })
+                        .is_err()
+                    {
+                        host.stop_all();
+                        return;
+                    }
+                }
+                // Wait out the render interval by *serving keys*, rather than
+                // sleeping through it: a focused pane's keypress must be
+                // answered immediately, and the UI thread is waiting on it. A
+                // stop is noticed within one slice for the same reason.
+                for _ in 0..PLUGIN_RENDER_SLICES {
+                    if stop_worker.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    match key_rx.recv_timeout(PLUGIN_RENDER_SLICE) {
+                        Ok(req) => {
+                            let consumed = host
+                                .send_key(
+                                    &req.plugin,
+                                    &req.pane,
+                                    &req.key,
+                                    thurbox::app::PLUGIN_KEY_TIMEOUT,
+                                )
+                                .unwrap_or(false);
+                            let _ = req.reply.send(consumed);
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        // The UI is gone.
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            host.stop_all();
+                            return;
+                        }
+                    }
+                }
+            }
+            host.stop_all();
+        })
+        .ok();
+
+    stop
+}
+
+/// One slice of the re-render interval; the worker checks for a stop between
+/// slices so shutdown is not held up by the polling cadence.
+#[cfg(feature = "plugins")]
+const PLUGIN_RENDER_SLICE: Duration = Duration::from_millis(100);
+
+/// Slices per re-render interval (10 × 100 ms = 1 s).
+#[cfg(feature = "plugins")]
+const PLUGIN_RENDER_SLICES: usize = 10;
+
+/// Grace period after signalling the plugin worker to stop, so plugins get a
+/// chance to shut down cleanly. Anything still running past it is abandoned;
+/// its threads die with the process.
+#[cfg(feature = "plugins")]
+const PLUGIN_SHUTDOWN_WAIT: Duration = Duration::from_millis(300);
 
 /// Bring up the session backends and load every config file (settings, hosts,
 /// agents, custom themes), publishing the process-wide state each reader needs.

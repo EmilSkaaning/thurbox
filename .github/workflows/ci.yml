@@ -197,6 +197,50 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo test --test architecture_rules
 
+  # The v2 plugin host is behind the `plugins` Cargo feature and absent from
+  # every other job's build, so without this nothing would compile it. It needs
+  # a newer toolchain than the crate's own `rust-version` (mlua declares 1.88)
+  # and a C compiler for mlua's vendored Luau sources — cargo cannot express a
+  # per-feature MSRV, so the requirement is pinned here instead.
+  plugins:
+    name: Plugin Host (feature-gated)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.88.0
+          components: clippy
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
+        with:
+          tool: cargo-nextest
+      # Type-check the bundled Luau plugins. `docs/v2/` asks for the Luau
+      # toolchain before Luau ships; without this the `.luau` files in the
+      # binary are checked by nothing.
+      - name: Install luau-analyze
+        run: |
+          set -euo pipefail
+          curl -fsSL -o luau.zip \
+            https://github.com/luau-lang/luau/releases/download/0.663/luau-ubuntu.zip
+          unzip -q luau.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/luau-analyze"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Type-check bundled Luau plugins
+        run: ./scripts/dev/lint-luau.sh
+      - run: cargo clippy --all-targets --features plugins -- -D warnings
+      - run: cargo nextest run --all --features plugins --profile ci
+      # Stable builds must not gain the runtime: if mlua ever leaks out of the
+      # optional dependency, this is where it surfaces.
+      - name: Assert the default build excludes the plugin runtime
+        run: |
+          if cargo tree --edges normal | grep -q mlua; then
+            echo "::error::mlua reached the default dependency tree"
+            exit 1
+          fi
+
   tui-smoke:
     name: TUI Smoke Test
     needs: changes

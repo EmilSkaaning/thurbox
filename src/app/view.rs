@@ -154,6 +154,8 @@ impl App {
         self.render_automations_pane(frame, areas.automations_panel);
         self.render_info_panel(frame, areas.info_panel);
         self.render_tasks_panel(frame, areas.tasks_panel);
+        #[cfg(feature = "plugins")]
+        self.render_plugin_pane(frame, areas.plugin_pane);
         self.render_file_viewer(frame, areas.file_viewer);
         self.render_central_pane(frame, areas.terminal);
         if let Some(search_area) = areas.global_search {
@@ -324,7 +326,7 @@ impl App {
         let stale = self
             .cached_session_order
             .as_ref()
-            .map_or(true, |(cached, _)| *cached != sig);
+            .is_none_or(|(cached, _)| *cached != sig);
         if stale {
             self.metrics.bump(|p| &mut p.ordered_sessions_rebuilds);
             let infos: Vec<&SessionInfo> = self.sessions.iter().map(|s| &s.info).collect();
@@ -527,6 +529,58 @@ impl App {
     }
 
     /// Render the tasks panel column (when present).
+    /// Draw the first plugin pane into its slot.
+    ///
+    /// Paints from the tree already cached on the pane — this never calls into
+    /// a plugin, and could not: the view tree is pure data in `session` with no
+    /// reference back to a VM.
+    #[cfg(feature = "plugins")]
+    fn render_plugin_pane(&mut self, frame: &mut Frame, area: Option<Rect>) {
+        use crate::ui::{focus_block, FocusLevel};
+
+        let (Some(area), Some(pane)) = (area, self.plugin_panes.iter().find(|p| p.visible)) else {
+            return;
+        };
+
+        // An error is shown in the title rather than over the content, so a
+        // failing render keeps the last good tree readable underneath it.
+        let title = match pane.error() {
+            Some(_) => format!(" {} (error) ", pane.title),
+            None => format!(" {} ", pane.title),
+        };
+        let block = focus_block(&title, FocusLevel::Inactive);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let palette = crate::ui::theme::current();
+        match pane.tree() {
+            Some(tree) => {
+                crate::ui::plugin_pane::render_tree(tree, inner, &palette, frame.buffer_mut())
+            }
+            None => {
+                // Never rendered: say which, rather than showing an empty box
+                // the user cannot tell from a working-but-quiet plugin.
+                let msg = match pane.error() {
+                    Some(e) => crate::session::view_tree::ViewNode::styled(
+                        format!("failed: {e}"),
+                        crate::session::view_tree::TextStyle {
+                            token: Some(crate::session::view_tree::StyleToken::Danger),
+                            bold: false,
+                        },
+                    ),
+                    None => crate::session::view_tree::ViewNode::styled(
+                        "loading…",
+                        crate::session::view_tree::TextStyle {
+                            token: Some(crate::session::view_tree::StyleToken::Muted),
+                            bold: false,
+                        },
+                    ),
+                };
+                crate::ui::plugin_pane::render_tree(&msg, inner, &palette, frame.buffer_mut());
+            }
+        }
+    }
+
     fn render_tasks_panel(&mut self, frame: &mut Frame, area: Option<Rect>) {
         let Some(area) = area else {
             return;
@@ -1014,6 +1068,8 @@ impl App {
         let is_shell_view = self.active_terminal_view() == TerminalView::Shell;
         let focus_label = match self.focus {
             InputFocus::SessionList => "Sessions",
+            #[cfg(feature = "plugins")]
+            InputFocus::PluginPane => "Plugin",
             InputFocus::Automations => "Automations",
             InputFocus::AutomationEditor => "Edit Automation",
             InputFocus::AutomationRunHistory => "Run history",
