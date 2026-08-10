@@ -9,6 +9,8 @@ pub mod plugin_manifest;
 pub mod plugin_store;
 pub mod review;
 pub mod settings;
+#[cfg(feature = "plugins")]
+pub mod spawn_contribution;
 pub mod task;
 pub mod theme_config;
 // The plugin view tree is v2 surface: pure data, but it exists only to
