@@ -1,0 +1,107 @@
+schema: spec-driven
+
+context: |
+  # Thurbox — project context
+
+  ## What it is
+  Thurbox is a multi-session coding-agent TUI orchestrator. It runs multiple
+  coding-agent CLIs (Claude Code, Codex, opencode, aider, …) inside persistent
+  tmux sessions, rendered as terminal panels via ratatui + tui-term. Sessions
+  survive crashes and restarts because tmux keeps the processes alive.
+  Thurbox is agent-neutral: agents are declared as data in `agents.toml`; the
+  binary knows only how to launch a CLI with the right `command + args`.
+
+  ## Tech stack
+  - Rust (edition 2021, MSRV 1.75), async runtime tokio (multi-threaded)
+  - ratatui + tui-term + vt100 for rendering; crossterm for terminal I/O
+  - SQLite (rusqlite) for persistence at `~/.local/share/thurbox/thurbox.db`
+  - tmux (>= 3.2) / psmux (Windows) as the session backend, driven over
+    control mode; transports are local, SSH, and WSL
+  - Two binaries: `thurbox` (TUI) and `thurbox-cli` (headless)
+  - Task entrypoint is `just`; the dev environment is a Nix flake
+
+  ## Architecture (The Elm Architecture)
+  `Event → Message → update(model, msg) → view(model) → Frame`
+
+  Module dependency rules are enforced by `tests/architecture_rules.rs` as an
+  allowlist — every module under `src/` must declare which crate modules it may
+  reference, in any form (`use`, `pub use`, fully-qualified `crate::…` paths):
+
+      session  ← pure data types, no crate-internal references
+      agent    ← session (+ paths/shell utils; NEVER ui, git, app)
+      ui       ← session + app model/view state (NEVER agent or git)
+      app      ← coordinator, imports all modules
+
+  A new module fails the test until its place in the architecture is declared.
+
+  ## v2 — what this OpenSpec repo is for
+  v2 turns the TUI inside out: instead of a Rust binary that owns every pane,
+  thurbox becomes a **plugin host** — a minimal Rust kernel plus a Luau plugin
+  layer that loads at runtime and reloads without recompiling.
+
+  The kernel keeps what is genuinely hard and genuinely shared: session
+  lifecycle, backends, git, storage, the event loop, the layout solver, the
+  theme, the keymap, and the frame. Everything a user sees and argues about —
+  which panes exist, what they show, how they behave — moves into plugins.
+
+  The v1 problem this solves: `src/app/mod.rs` is ~14.6k lines and adding one
+  pane means touching ~10 parallel tables (`App` fields, `InputFocus`,
+  `Action`, `KeyContext`, `FeatureFlags`, `PanelAreas`, `ClickAction`,
+  `SettingsField`, `focus_ring`, snapshots). Nobody outside the project can add
+  a pane, and v1's `extensions/` system reaches agents but never the UI.
+
+  Constraints that shape every v2 change:
+  - Single-binary install is preserved; bundled plugins ship inside the binary
+    and are enabled by default, so a fresh launch looks like v1.
+  - Plugin runtime is Luau only, in-process, one VM + thread per plugin. No
+    WASM guests, no native plugin code (a segfault would not be containable).
+  - Plugins declare capabilities; the host enforces them.
+  - The render loop is demand-driven (paint only when dirty, 250 ms floor).
+    Plugins must not defeat it — perf is a spec'd requirement, not a hope.
+  - v2 lands on `main` behind a compile-time Cargo feature gate; v1 keeps
+    releasing on its normal cadence throughout. No long-lived v2 branch.
+
+  `docs/v2/` on the `thurbox-v2` branch holds an earlier prose design set. It
+  is **loose reference only** — v2 is being re-derived spec-first here. Do not
+  treat it as authoritative or port it wholesale.
+
+  ## Conventions
+  - Conventional Commits, enforced by cocogitto. Types: feat, fix, perf,
+    refactor, docs, style, test, chore, ci, build, revert. Scopes: api, cli,
+    ui, git, core, docs, deps, config, mcp.
+  - Comments explain **why**, never what. A stale comment is worse than none.
+    No TODO/FIXME/HACK markers, no commented-out code.
+  - rustfmt at 100 cols (comments wrapped at 80). Clippy runs with
+    `-D warnings`. Markdown is linted with rumdl, shell with shellcheck.
+  - Tests: `cargo nextest run --all`. The TUI has an in-process acceptance
+    harness (`src/app/acceptance.rs`) with insta snapshots and a seeded
+    invariant monkey test.
+  - If a code change invalidates or extends a documented decision, the doc is
+    updated in the same change.
+
+rules:
+  proposal:
+    - State the v1 behavior being replaced or extended, not just the v2 goal.
+    - Always include a "Non-goals" section.
+    - Name the compile-time gate or feature flag the work lands behind.
+  specs:
+    - Requirements must be falsifiable — a reviewer can point at a test.
+    - Performance requirements carry a number and the way it is measured.
+  design:
+    - Record rejected alternatives with the reason, not just the choice.
+    - State which module owns each new type, and check it against the
+      architecture rules allowlist in `tests/architecture_rules.rs`.
+  tasks:
+    - Every task names the files it touches.
+    - Include the verification command for each task group (`just lint`,
+      `cargo nextest run -E 'test(name)'`, …).
+
+operations:
+  apply:
+    guidance:
+      - Run `just lint` and `cargo nextest run --all` before marking a task
+        group done; report failures with their output rather than summarizing.
+      - Keep changes behind the v2 feature gate until the spec says otherwise.
+  archive:
+    guidance:
+      - Confirm the delta specs landed in `openspec/specs/` before archiving.

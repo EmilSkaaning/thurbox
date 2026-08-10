@@ -1,5 +1,10 @@
 [global]
-exclude = [".git", ".claude", ".pi"]
+# `.claude`, `.pi` and `.opencode` are agent-tool scaffolding we do not author.
+# `openspec/` is owned by the OpenSpec CLI: its artifacts start at `##` by
+# template (the delta parser keys on `## ADDED Requirements` / `### Requirement:`
+# headings, so an inserted H1 would change how a change archives), and
+# `openspec validate --strict` is what checks them.
+exclude = [".git", ".claude", ".pi", ".opencode", "openspec"]
 
 [MD013]
 line_length = 100
