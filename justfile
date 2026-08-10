@@ -29,7 +29,7 @@ fmt:
     cargo fmt --all
     npm run fmt:website
 
-# Lint everything CI lints (Rust + deny + markdown + shell).
+# Lint everything CI lints (Rust + deny + markdown + shell + workflows).
 lint:
     cargo fmt --all -- --check
     cargo clippy --all-targets --all-features -- -D warnings
@@ -37,6 +37,7 @@ lint:
     cargo deny check bans licenses sources
     rumdl check .
     ./scripts/dev/lint-luau.sh
+    ./scripts/dev/lint-workflows.sh
     git ls-files -z '*.sh' | xargs -0 shellcheck
 
 # Architecture-rule + doc checks.

@@ -261,6 +261,21 @@ platforms it installs onto; it errors cleanly on any other);
 `cd.yml`) and extracts it with the built-in `Expand-Archive` (no tar needed).
 ARM64 Windows installs the x86_64 build (runs under x64 emulation).
 
+**Version resolution accepts only `v<major>.<minor>.<patch>` when nothing is
+pinned.** The API path (`releases/latest`) excludes prereleases, but the scrape
+fallback reads the releases page, which lists them — so both paths filter
+through one stated rule per installer (`STABLE_TAG_RE`/`is_stable_version` +
+`select_stable_tag` in `install.sh`, `$StableTagPattern` + `Get-StableTag` in
+`install.ps1`), and the scrape takes the first *stable* tag in page order rather
+than the first tag. Without it a nightly published as a prerelease resolves as a
+stable install: `install.sh`'s old `[0-9.]` class truncated
+`v2.0.0-nightly.20260808` to a nonexistent `v2.0.0` (404 at asset download),
+and `install.ps1` accepted the whole tag and installed the nightly. An
+explicitly pinned `VERSION`/`-Version` is passed through **unfiltered** — that
+is the supported way to install a nightly on purpose. Regression-tested with
+releases-page fixtures in `scripts/install.bats` and
+`scripts/install.Tests.ps1`.
+
 **`install.sh` (POSIX `sh`) specifics:**
 
 - Colorized output (auto-disabled when stderr is not a TTY, `NO_COLOR` is set,
@@ -336,6 +351,7 @@ npm run fmt:website                  # Auto-fix formatting (Prettier)
 ```bash
 cargo test --test architecture_rules                      # Arch rules
 cargo test --test teardown_gate                           # v2 teardown inventory
+./scripts/dev/lint-workflows.sh                           # Release-delivery invariants
 cargo deny check advisories                               # Advisories
 cargo deny check bans licenses sources                    # Dep policy
 ```
@@ -348,6 +364,28 @@ source, so implementing a replacement makes the gate ask you to re-verdict its
 row rather than letting a stale table wave the deletion through. Today it blocks
 every unit: the built-in hooks wiring is still delivered by the installer the
 teardown deletes, and no pane has a bundled plugin to become the default.
+
+`scripts/dev/lint-workflows.sh` is the allowlist for the **workflow files** —
+the one structural check that reads `.github/` rather than `src/`. It enforces
+four release-delivery invariants, each cheap to check and expensive to discover
+broken: (1) `cd.yml`'s `push` trigger carries exactly `branches: [main]` and no
+other key (parsed structurally, so a `tags:` beside the branch list fails where a
+grep would pass); (2) `cd.yml` never asks for the plugin feature —
+`--features plugins`, `--features=plugins`, `--all-features`, or a `features`
+list — since a v1 release binary containing the v2 runtime voids the whole point
+of the compile-time gate (whole-line comments are stripped, so `cd.yml` may
+document the rule; **Stage C deletes this check** rather than switching it off,
+so the flip is a visible line in a diff); (3) `nightly.yml` runs no
+package-channel publish — no `publish-*` job, none of the four channel secrets,
+no `choco push`/`wingetcreate`/tap/AUR tooling — because Chocolatey and winget
+are moderated and a nightly there burns a human review; (4) every nightly release
+is marked `prerelease: true` (or `--prerelease` for `gh release create`), because
+an unmarked one becomes `releases/latest` and every unpinned installer resolves
+to it. Invariants 3 and 4 report `not applicable` while `nightly.yml` is absent
+— the check landed **before** that workflow on purpose, so the first one is born
+gated. The checker itself is fixture-tested (`scripts/dev/lint-workflows.bats`,
+run in the same CI job ahead of the tree check) since a checker that passes
+everything would otherwise pass the tree too.
 
 ## Release Process
 
@@ -2592,6 +2630,11 @@ For rationale behind decisions, see `docs/`:
   the checklist for adding a new built-in
 - `docs/PERFORMANCE.md` — Render/tick performance: demand-driven redraw,
   perf counters, the session-order cache, and how to measure
+- `docs/KERNEL-BOUNDARY.md` — Which of `App`'s 85 fields are kernel state (58),
+  pane state that leaves with a plugin (11), and kernel-owned work a pane merely
+  requests (16), with the split cases (`modal` by variant, `active_index` vs
+  `session_list_state`, `cached_session_order` vs kernel session navigation)
+  named as decisions. A map, not a refactor — nothing moved to produce it
 
 **Rule**: If a code change invalidates or extends a documented
 decision, update the relevant doc in the same PR.

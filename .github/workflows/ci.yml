@@ -37,6 +37,7 @@ jobs:
       website: ${{ steps.filter.outputs.website || steps.all.outputs.all }}
       install_sh: ${{ steps.filter.outputs.install_sh || steps.all.outputs.all }}
       install_ps: ${{ steps.filter.outputs.install_ps || steps.all.outputs.all }}
+      workflows: ${{ steps.filter.outputs.workflows || steps.all.outputs.all }}
     steps:
       # A merge queue entry already contains exactly the PR's changes; validate
       # the whole suite against it rather than diffing (paths-filter has no PR
@@ -84,6 +85,11 @@ jobs:
               - 'scripts/install.ps1'
               - 'scripts/install.Tests.ps1'
               - '.github/workflows/ci.yml'
+            workflows:
+              - '.github/**'
+              - 'scripts/dev/lint-workflows.sh'
+              - 'scripts/dev/lint-workflows.bats'
+              - 'justfile'
 
   check:
     name: Check
@@ -362,6 +368,27 @@ jobs:
           $cfg.Output.Verbosity = 'Detailed'
           Invoke-Pester -Configuration $cfg
 
+  # The release-delivery invariants: cd.yml releases only from `main` and never
+  # with the plugin feature, and (once it exists) nightly.yml publishes to no
+  # moderated package channel and marks every release a prerelease. Each is one
+  # line from being false, invisible in review, and discovered only by a user who
+  # installed the wrong thing — so it gates rather than advises.
+  workflow-lint:
+    name: Workflow Invariants
+    needs: changes
+    if: needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install bats-core
+        run: sudo apt-get update && sudo apt-get install -y bats
+      # The fixture suite first: a broken checker that reports success on every
+      # input would otherwise pass the tree check below.
+      - name: Test the invariant checker against fixtures
+        run: bats scripts/dev/lint-workflows.bats
+      - name: Check the release-delivery invariants
+        run: ./scripts/dev/lint-workflows.sh
+
   shellcheck:
     name: ShellCheck
     needs: changes
@@ -470,6 +497,7 @@ jobs:
       - markdown-lint
       - install-script
       - install-script-ps
+      - workflow-lint
       - shellcheck
       - website-lint
       - sonarqube

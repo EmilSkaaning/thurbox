@@ -82,23 +82,48 @@ function Get-Target {
 }
 
 # --- Version resolution -----------------------------------------------------
+
+# A stable release tag and nothing else. Nightlies ship as GitHub prereleases
+# and the releases page lists them, so a guessed version must be filtered or a
+# user asking for stable gets a v2 nightly. Stated once, applied to every guess.
+$script:StableTagPattern = '^v\d+\.\d+\.\d+$'
+
+# Newest stable tag linked on a releases page. Candidates are extracted
+# permissively then filtered by the pattern above, so a prerelease is skipped
+# rather than accepted whole - the old pattern took the first tag it found,
+# which on a page led by a nightly was the nightly. Page order is GitHub's
+# newest-first. Pure, so the Pester suite drives it with a page fixture.
+function Get-StableTag {
+    param([string]$PageContent)
+    foreach ($m in [regex]::Matches($PageContent, 'releases/tag/(v[0-9A-Za-z.\-+]+)')) {
+        $tag = $m.Groups[1].Value
+        if ($tag -match $script:StableTagPattern) { return $tag }
+    }
+    return $null
+}
+
 function Get-LatestVersion {
+    # An explicit pin is an instruction, not a guess, so it is never filtered:
+    # installing a nightly on purpose has to stay possible.
     if ($Version) { return $Version }
 
-    # GitHub API first.
+    # GitHub API first. releases/latest already excludes prereleases, but the
+    # rule is applied here too so the guarantee is the installer's own rather
+    # than a remote endpoint's - a refused answer just falls through to the
+    # scrape, which resolves the same stable tag.
     try {
         $rel = Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/$Repo/releases/latest" `
             -Headers @{ 'User-Agent' = 'thurbox-installer' }
-        if ($rel.tag_name) { return $rel.tag_name }
+        if ($rel.tag_name -and $rel.tag_name -match $script:StableTagPattern) { return $rel.tag_name }
     } catch {
         Write-Step "GitHub API unavailable ($($_.Exception.Message)); scraping releases page..."
     }
 
-    # Fallback: scrape the releases page for the newest tag.
+    # Fallback: scrape the releases page for the newest stable tag.
     try {
         $page = Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/$Repo/releases"
-        $m = [regex]::Match($page.Content, 'releases/tag/(v[0-9][0-9A-Za-z.\-+]*)')
-        if ($m.Success) { return $m.Groups[1].Value }
+        $tag = Get-StableTag -PageContent $page.Content
+        if ($tag) { return $tag }
     } catch {
         Write-Verbose "Releases-page scrape failed: $($_.Exception.Message)"
     }
