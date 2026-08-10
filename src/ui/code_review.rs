@@ -9,9 +9,11 @@ use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::code_review::{CodeReviewState, ComposeState, ReviewButton, ReviewRow};
+use crate::session::overlay::{Align, CrossExtent, Overlay};
 use crate::session::review::{
     pair_hunk, Classification, CommentAnchor, DiffFile, DiffHunk, DiffLine, DiffLineKind, SidePair,
 };
+use crate::ui::overlay::OverlayLayer;
 use crate::ui::scrollbar::{self, ScrollbarGeom};
 use crate::ui::theme::Theme;
 use crate::ui::{focus_block, render_button_bar, ButtonSpec, FocusLevel, RowHitbox};
@@ -27,6 +29,10 @@ pub(crate) struct CodeReviewHits {
     /// Footer buttons paired with the action each triggers.
     pub buttons: Vec<(crate::ui::ButtonHit, ReviewButton)>,
     pub scrollbar: Option<ScrollbarGeom>,
+    /// This pane's overlay rects, **topmost first** — recorded ahead of `rows`
+    /// so a click on a floating box (the compose box) does not fall through to
+    /// the diff row underneath it. Empty unless something is anchored.
+    pub overlay: Vec<Rect>,
 }
 
 /// Theme color for a classification badge.
@@ -79,6 +85,7 @@ pub(crate) fn render(
             targets: Vec::new(),
             buttons: Vec::new(),
             scrollbar: None,
+            overlay: Vec::new(),
         };
     }
 
@@ -121,16 +128,23 @@ pub(crate) fn render(
     } else {
         render_rows(frame, diff_area, state)
     };
-    // The compose box floats inline at the selected line (its screen row from
-    // the hitboxes), not pinned to the bottom — GitHub-style line comments.
+    // The compose box floats at the selected line rather than being pinned to
+    // the bottom — GitHub-style line comments. It is an anchored overlay, so the
+    // prefer-below / flip-above / dock decision is the shared resolver's, not
+    // this renderer's.
+    let mut overlay = OverlayLayer::default();
     if composing {
         if let Some(comp) = state.compose.as_ref() {
-            let anchor_y = hits
+            // `None` when the anchored line has scrolled out of the viewport:
+            // there is no rect to sit against, and the resolver docks.
+            let target = hits
                 .0
                 .iter()
                 .find(|h| h.index == state.selected)
-                .map(|h| h.rect.y);
-            render_compose_inline(frame, diff_area, anchor_y, comp);
+                .map(|h| h.rect);
+            let rect = overlay.place(&compose_anchor(diff_area), target, diff_area);
+            frame.render_widget(Clear, rect);
+            render_compose(frame, rect, comp);
         }
     }
     let buttons = render_footer(frame, footer, composing, state.side_by_side, state.wrap);
@@ -140,6 +154,7 @@ pub(crate) fn render(
         targets,
         buttons,
         scrollbar: hits.1,
+        overlay: overlay.into_hit_order(),
     }
 }
 
@@ -1078,26 +1093,28 @@ fn build_file_tree(files: &[crate::session::review::DiffFile]) -> Vec<TreeRow> {
     rows
 }
 
-/// Place the compose box inline at the selected line: just below it when there's
-/// room, else just above it, else pinned to the bottom (selection off-screen).
-/// Clears the area first so the diff underneath doesn't bleed through.
-fn render_compose_inline(
-    frame: &mut Frame,
-    area: Rect,
-    anchor_y: Option<u16>,
-    comp: &ComposeState,
-) {
-    let h = area.height.clamp(3, 6);
-    let bottom = area.y + area.height;
-    let top = match anchor_y {
-        Some(ay) if ay + 1 + h <= bottom => ay + 1,
-        Some(ay) if ay >= area.y + h => ay - h,
-        _ => bottom.saturating_sub(h),
-    };
-    // Indent one column so the box reads as attached to the line above it.
-    let rect = Rect::new(area.x + 1, top, area.width.saturating_sub(2).max(1), h);
-    frame.render_widget(Clear, rect);
-    render_compose(frame, rect, comp);
+/// The compose box's anchor declaration: a full-width band attached to the
+/// selected line.
+///
+/// Where it actually lands — below the line, flipped above it, or docked at the
+/// diff area's bottom edge because neither fits or the line is off-screen — is
+/// [`Overlay::place`]'s answer, shared with every other floating surface.
+fn compose_anchor(diff_area: Rect) -> Overlay {
+    Overlay {
+        // The comment belongs to the line above it, the way a GitHub review
+        // comment does, and flips over the line when the pane's bottom is too
+        // close to fit it underneath.
+        side: crate::session::overlay::Side::Below,
+        flip: true,
+        // A border, the header line, and at least one body row; capped so a
+        // comment box never swallows the diff it is about.
+        main: diff_area.height.clamp(3, 6),
+        // Indented one column so the box reads as attached to the line above it.
+        cross: CrossExtent::Stretch { inset: 1 },
+        // Unused by a stretch, which spans the pane rather than aligning to the
+        // row.
+        align: Align::Start,
+    }
 }
 
 /// Render the in-view comment compose box.
@@ -1838,7 +1855,93 @@ mod tests {
             let hits = render(f, area, &mut state, FocusLevel::Focused, 0);
             // Footer still renders its buttons while composing.
             assert!(!hits.buttons.is_empty());
+            // The compose box is the pane's one overlay, so a click on it is
+            // hit-tested before the diff row it covers.
+            assert_eq!(hits.overlay.len(), 1);
+            let box_rect = hits.overlay[0];
+            let anchored_row = hits
+                .rows
+                .iter()
+                .find(|h| h.index == state.selected)
+                .expect("the anchored row is on screen");
+            assert_eq!(
+                box_rect.y,
+                anchored_row.rect.y + 1,
+                "the box sits on the row after the line it comments on"
+            );
         })
         .unwrap();
+    }
+
+    #[test]
+    fn renders_no_overlay_when_nothing_is_composed() {
+        let mut state = demo_state();
+        let mut term = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        term.draw(|f| {
+            let hits = render(
+                f,
+                Rect::new(0, 0, 100, 20),
+                &mut state,
+                FocusLevel::Focused,
+                0,
+            );
+            assert!(
+                hits.overlay.is_empty(),
+                "a pane with nothing anchored declares no overlay"
+            );
+        })
+        .unwrap();
+    }
+
+    /// The pre-port `render_compose_inline` placement, kept as the oracle the
+    /// anchored version must reproduce: below the line when it fits, above it
+    /// when that fits, else pinned to the bottom, inset one column.
+    fn legacy_compose_rect(area: Rect, anchor_y: Option<u16>) -> Rect {
+        let h = area.height.clamp(3, 6);
+        let bottom = area.y + area.height;
+        let top = match anchor_y {
+            Some(ay) if ay + 1 + h <= bottom => ay + 1,
+            Some(ay) if ay >= area.y + h => ay - h,
+            _ => bottom.saturating_sub(h),
+        };
+        Rect::new(area.x + 1, top, area.width.saturating_sub(2).max(1), h)
+    }
+
+    #[test]
+    fn compose_anchor_reproduces_the_legacy_inline_placement() {
+        // Widths from 2 and heights from 3 up: below that the legacy formula let
+        // the box escape its pane, which the anchor deliberately clamps instead
+        // (`compose_anchor_clamps_a_pane_too_short_for_the_box`).
+        for width in [2_u16, 3, 8, 60] {
+            for height in 3..24_u16 {
+                let area = Rect::new(4, 2, width, height);
+                let anchor = compose_anchor(area);
+                for y in area.y..area.y + area.height {
+                    let row = Rect::new(area.x, y, area.width, 1);
+                    assert_eq!(
+                        anchor.place(Some(row), area),
+                        legacy_compose_rect(area, Some(y)),
+                        "anchored at row {y} in {area:?}"
+                    );
+                }
+                assert_eq!(
+                    anchor.place(None, area),
+                    legacy_compose_rect(area, None),
+                    "anchored line off screen in {area:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compose_anchor_clamps_a_pane_too_short_for_the_box() {
+        // The one deliberate divergence: the legacy formula built a three-row box
+        // in a two-row pane and docked it at `bottom - 3`, painting a row above
+        // the pane. The anchor shrinks it to the pane instead.
+        let area = Rect::new(0, 4, 40, 2);
+        let legacy = legacy_compose_rect(area, Some(4));
+        assert!(legacy.y < area.y, "the legacy box escaped upward");
+        let placed = compose_anchor(area).place(Some(Rect::new(0, 4, 40, 1)), area);
+        assert_eq!((placed.y, placed.height), (4, 2));
     }
 }

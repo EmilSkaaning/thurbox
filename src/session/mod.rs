@@ -4,6 +4,7 @@ pub mod extension_def;
 pub mod host_def;
 pub mod keybindings;
 pub mod message;
+pub mod overlay;
 #[cfg(feature = "plugins")]
 pub mod plugin_command;
 pub mod plugin_manifest;

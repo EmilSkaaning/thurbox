@@ -791,6 +791,11 @@ pub(crate) enum ClickAction {
     /// Copy the current status-bar message to the clipboard (click the status
     /// row). Dispatched by `activate_click_target`.
     CopyStatus,
+    /// A pane's anchored overlay swallowed the click. Recorded ahead of that
+    /// pane's base-layer rows (`ui::overlay`), so pressing inside a floating box
+    /// cannot move the selection underneath it — the box would then be
+    /// commenting on one line while pointing at another.
+    OverlayCapture,
 }
 
 /// One clickable region rendered this frame: its rect plus what a click on it
@@ -3382,6 +3387,10 @@ impl App {
                 self.copy_status_to_clipboard();
                 true
             }
+            // The overlay is not a focus target and has no rows of its own yet,
+            // so its whole job here is to stop the click. Consuming it is the
+            // point, not a side effect it is missing.
+            ClickAction::OverlayCapture => true,
         }
     }
 

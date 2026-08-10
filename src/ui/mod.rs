@@ -15,6 +15,7 @@ pub mod info_panel;
 pub mod layout;
 pub mod links;
 pub mod markdown;
+pub mod overlay;
 pub mod perf_hud;
 #[cfg(feature = "plugins")]
 pub mod plugin_pane;

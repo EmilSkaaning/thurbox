@@ -846,8 +846,12 @@ impl App {
         else {
             return;
         };
-        // Row + button targets first (first match wins), then the whole-pane
-        // focus fallback.
+        // Overlay rects first — topmost first, ahead of the base layer they
+        // cover — then row + button targets (first match wins), then the
+        // whole-pane focus fallback.
+        for rect in hits.overlay {
+            self.record_click(rect, ClickAction::OverlayCapture);
+        }
         for h in hits.rows {
             self.record_click(h.rect, ClickAction::ReviewRow(h.index));
         }

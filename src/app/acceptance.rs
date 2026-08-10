@@ -2522,6 +2522,82 @@ fn side_by_side_click_records_column_side() {
     );
 }
 
+/// The compose box is an anchored overlay, so it is hit-tested **before** the
+/// diff rows it floats over: a click inside it is swallowed instead of selecting
+/// the row underneath. Before the overlay layer the click fell through, moving
+/// the selection while the box went on commenting on the line it was opened for.
+#[test]
+fn clicking_the_compose_overlay_does_not_move_the_diff_selection() {
+    use crate::app::code_review::ReviewRow;
+    let mut h = Harness::new(STD_COLS, STD_ROWS, 1);
+    let sid = h.app.sessions[0].info.id;
+    let mut cr = crate::app::code_review::CodeReviewState::for_test(sid, 6);
+    // Anchor the box to the first diff line, so the rows it covers are below it.
+    cr.selected = cr
+        .rows
+        .iter()
+        .position(|r| matches!(r, ReviewRow::Line(..)))
+        .expect("the fixture has diff lines");
+    h.app.code_reviews.insert(sid, cr);
+    h.app.focus = InputFocus::CodeReview;
+    h.app
+        .cr_button(crate::app::code_review::ReviewButton::Comment);
+    h.render();
+
+    let overlay = h
+        .app
+        .click_targets
+        .iter()
+        .find(|t| matches!(t.action, ClickAction::OverlayCapture))
+        .map(|t| t.rect)
+        .expect("the open compose box records an overlay target");
+    // A row target the box covers: the click hits both, and the overlay wins
+    // because it is recorded first.
+    let covered = h
+        .app
+        .click_targets
+        .iter()
+        .find(|t| {
+            matches!(t.action, ClickAction::ReviewRow(_))
+                && t.rect.y > overlay.y
+                && t.rect.y < overlay.y + overlay.height
+        })
+        .map(|t| (t.action, t.rect))
+        .expect("the compose box covers at least one diff row");
+    let (covered_action, covered_rect) = covered;
+    let selected = h.app.active_review().unwrap().selected;
+
+    h.app.update(AppMessage::MouseClick {
+        x: covered_rect.x + 2,
+        y: covered_rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(
+        h.app.active_review().unwrap().selected,
+        selected,
+        "a click inside the compose box leaves the selection alone"
+    );
+
+    // The same press with nothing anchored selects that row — so the assertion
+    // above is about the overlay, not about the row being unclickable.
+    h.app
+        .cr_button(crate::app::code_review::ReviewButton::Cancel);
+    h.render();
+    h.app.update(AppMessage::MouseClick {
+        x: covered_rect.x + 2,
+        y: covered_rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    let ClickAction::ReviewRow(index) = covered_action else {
+        unreachable!("filtered to review rows above");
+    };
+    assert_eq!(
+        h.app.active_review().unwrap().selected,
+        index,
+        "without the overlay the same click selects the row"
+    );
+}
+
 /// The review-target picker is mouse-driven too: clicking one of its entries
 /// dispatches the switch to that target, mirroring the keyboard Enter path.
 /// The rebuild itself runs on a background worker (ADR-P8) — its application
