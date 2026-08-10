@@ -11,8 +11,12 @@ porting it, with every claim traced to the code that makes it true. It is a
 worklist, not a design: each row is a gap someone has to close, with the
 cheapest honest closure named.
 
-Status of the audit: **one gap closed** (inline lines, commit `6e0c7cc`), **four
-open**. No bundled pane beyond `hello` exists yet.
+Status of the audit: **three gaps closed** (inline lines, commit `6e0c7cc`;
+style tokens and gauges, ADR-26), **one open in full** (§2) and **one half open**
+(§5). The info panel has now been **ported** — it renders through the view tree
+in every build — so the rows below are no longer predictions. Where a prediction
+was wrong, it says so. No *plugin*-authored pane beyond `hello` exists yet, and
+§2 is why the info panel is not one.
 
 ## 1. Closed: a line of differently-styled runs
 
@@ -58,7 +62,7 @@ Two properties have to be designed rather than assumed:
   — otherwise a plugin nobody is looking at costs the idle loop a rebuild every
   tick, which is the regression ADR-V11 exists to prevent.
 
-## 3. Open: five style tokens cannot address the palette the pane uses
+## 3. Closed: five style tokens cannot address the palette the pane uses
 
 `StyleToken` offers `accent`, `muted`, `danger`, `success`, `warning`, mapped in
 `ui::plugin_pane::token_color` onto `accent`, `text_muted`, `danger`,
@@ -72,15 +76,22 @@ all, and `danger` is a separate palette field from `status_blocked` — equal in
 the default theme, not equal by definition, and a custom theme may set either
 alone.
 
-**Cheapest honest closure**: tokens for the status roles, since a status dot is
-the one case where the token *is* the meaning and an approximation is wrong
-rather than merely different. `role_name`/`branch_name`/`text_secondary` are
-weaker cases — they are typographic conventions of one pane, and a plugin
-choosing `accent` for an agent name is a defensible reading, not a bug. Note
-the direction of the constraint: tokens exist so a plugin follows a theme
-switch, so the answer is never "let a plugin name a colour".
+**Closed by eleven more tokens** (ADR-26), each named for and resolving 1:1 onto
+the `ThemePalette` field it addresses: `secondary`, `role`, `branch`, `added`,
+`border`, and one per session status. The audit proposed closing only the status
+roles and calling the rest "weaker cases"; porting the pane showed that was the
+wrong line to draw. A weaker case still has to be *drawn*, and a pane that
+approximated `role_name` with `accent` would not have been byte-identical — so
+the criterion, not taste, decided it. The direction of the constraint held: no
+node may name a colour.
 
-## 4. Open: a gauge needs a width the tree does not carry
+Two overlaps are deliberate. `warning`/`status_working` and
+`success`/`status_idle` resolve alike today, because the first of each pair is a
+token a plugin picks for *its own* meaning and the second is the token for *the
+kernel's* session status. Collapsing them would leave a pane drawing status
+indicators picking `warning` for working and `status_blocked` for blocked.
+
+## 4. Closed: a gauge needs a width the tree does not carry
 
 `info_panel::render_gauge_lines` right-aligns its suffix by computing
 `padding = width - label - right` and sizes its bar to `width - 2`. Both need
@@ -100,7 +111,22 @@ width-dependent, which means a resize has to re-enter the VM before the frame
 that needs it, and a plugin that mis-measures produces a broken pane rather than
 a refused node. Prefer the node.
 
+**Closed by the node** (ADR-26). One thing the audit got wrong and the port
+found: a gauge is *not* reliably two rows. When `label + suffix` exceeds the
+width the padding is zero and v1's header **wrapped**, pushing the bar down — so
+the node's height is `header rows + 1`, not `2`. The first implementation clipped
+that header, and the differential test against the retained pre-port renderer
+caught it. That is the argument for writing the oracle rather than eyeballing the
+port.
+
+The pane now needs no width at all: `ui::info_panel::info_tree` takes no area,
+which `the_tree_carries_no_geometry` asserts. That, not the gauge itself, is the
+property a plugin would need.
+
 ## 5. Half closed: the layout seats N panes; the keyboard still reaches one
+
+Unchanged by the info-panel port: the pane is read-only and takes no keys, so it
+neither needed nor exercised this.
 
 **Closed.** The layout no longer hosts a single pane. `ui::layout` divides the
 screen with a workspace tree (ADR-24), the right column holds one region per
@@ -135,3 +161,21 @@ neither §3 nor §4.
 So the cheapest first bundled pane is not necessarily the first row of the
 table. That is a finding about the plan, not a proposal to change it — but the
 next person should weigh gap §4 before assuming "read-only" means "easy".
+
+Two further findings the port produced, for whoever ports the next pane.
+
+**A missing gap: nothing in the catalogue wrapped.** The audit listed geometry
+(§4) but not *reflow*. `ViewNode::Line` clips at one row by construction, while
+every row of the info panel was drawn by a `Paragraph` with `Wrap { trim: false }`
+— and it must be, since `Activity` and `Signal` carry agent-supplied text of
+unbounded length. Closed by `ViewNode::Paragraph` (ADR-26). The lesson
+generalises: the audit was written by reading what the *catalogue* offers, and
+the gap was in what the *pane* relies on. Reading the pane's ratatui calls, not
+the node list, is what finds these.
+
+**The pane still cannot be a plugin, and §2 is the sole reason.** Every rendering
+gap is closed; `info_tree` is geometry-free and could be produced by plugin code
+verbatim. What a plugin cannot do is *obtain the `SessionInfo`*. So the honest
+claim from this port is narrow — the catalogue can express this pane's rendering
+— and the next milestone for the info panel is a capability-gated session
+snapshot, not any further widening of the view tree.

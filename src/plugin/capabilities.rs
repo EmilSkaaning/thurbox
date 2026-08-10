@@ -176,7 +176,10 @@ fn build_ui_table(lua: &Lua) -> mlua::Result<Table> {
     // `line` shares the container shape but not the layout: its children are
     // packed at their own width on one row, which is what a `label: value` row
     // needs and what `row`'s equal shares cannot express.
-    for kind in ["row", "line", "column", "list"] {
+    // `paragraph` shares `line`'s inline children but wraps instead of clipping,
+    // so an unbounded value stays readable where a fixed-width row must not push
+    // its neighbours down.
+    for kind in ["row", "line", "paragraph", "column", "list"] {
         ui.set(
             kind,
             lua.create_function(move |lua, children: Option<Table>| {
@@ -221,6 +224,25 @@ fn build_ui_table(lua: &Lua) -> mlua::Result<Table> {
                 node.set("kind", "motion")?;
                 node.set("id", id)?;
                 node.set("motion", motion)?;
+                Ok(node)
+            },
+        )?,
+    )?;
+
+    // `ui.gauge(label, percent, suffix?)` — a labelled bar whose geometry the
+    // kernel resolves. It exists because a plugin never learns its pane's width,
+    // so it could not right-align a suffix or size a bar itself.
+    ui.set(
+        "gauge",
+        lua.create_function(
+            |lua, (label, percent, suffix): (String, f64, Option<String>)| {
+                let node = lua.create_table()?;
+                node.set("kind", "gauge")?;
+                node.set("label", label)?;
+                node.set("percent", percent)?;
+                if let Some(suffix) = suffix {
+                    node.set("suffix", suffix)?;
+                }
                 Ok(node)
             },
         )?,
@@ -355,7 +377,16 @@ mod tests {
         let module = build_module_table(&lua, "demo", &GrantedCapabilities::none(), None).unwrap();
         let ui: Table = module.get("ui").expect("ui table present");
         for name in [
-            "text", "row", "line", "column", "list", "divider", "spacer", "cycle",
+            "text",
+            "row",
+            "line",
+            "paragraph",
+            "column",
+            "list",
+            "divider",
+            "gauge",
+            "spacer",
+            "cycle",
         ] {
             assert!(ui.contains_key(name).unwrap(), "missing ui.{name}");
         }

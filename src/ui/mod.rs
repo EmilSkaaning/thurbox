@@ -17,7 +17,8 @@ pub mod links;
 pub mod markdown;
 pub mod overlay;
 pub mod perf_hud;
-#[cfg(feature = "plugins")]
+// Ungated with `session::view_tree`: this is the renderer for *any* view tree,
+// and `info_panel` is its first kernel-side caller.
 pub mod plugin_pane;
 pub mod project_list;
 pub mod repo_picker_modal;

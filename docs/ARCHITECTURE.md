@@ -1005,3 +1005,67 @@ Reachable only while composing in a pane under three rows tall, pinned by
 - *Escaping the pane rect* — wanted for a dropdown at a narrow pane's edge, and
   it needs cross-pane z-ordering plus an answer for the owning pane being hidden
   mid-interaction.
+
+## ADR-26: The view tree is the kernel's rendering IR, not plugin surface
+
+**Context.** Phase 0's last exit criterion asked for the info panel to render
+through `session::view_tree` with byte-identical snapshots. Attempting it
+surfaced a fact the plan had not stated: `session::view_tree`, `session::motion`
+and `ui::plugin_pane` were all `#[cfg(feature = "plugins")]`. A pane that
+rendered through the tree would therefore have had *two* renderers selected by a
+Cargo feature — which is precisely the divergence the byte-identity criterion
+exists to prevent, and it would have been invisible in the default build that
+users install.
+
+Porting also settled two gaps `docs/PHASE4-PANE-READINESS.md` had predicted and
+found a third the audit had missed.
+
+**Decision.**
+
+1. **Ungate the tree.** `session::view_tree`, `session::motion` and
+   `ui::plugin_pane` compile in every build. They reference neither `mlua` nor
+   `crate::plugin`, so `cargo tree --edges normal | grep -c mlua` stays `0` and
+   the dependency graph is byte-identical — the feature gated *visibility*, not
+   cost. `ui::plugin_pane` keeps its name: renaming carries no behaviour and
+   would have obscured the diff.
+2. **A `gauge` node** (audit §3 §4's "prefer the node"). Label, percentage,
+   optional suffix; the kernel resolves the flush-right placement and the bar
+   length from the area. Rejected: reporting the resolved rect back to a plugin —
+   it makes rendering width-dependent, so a resize must re-enter the VM before
+   the frame that needs it, which ADR-V11 forbids.
+3. **A `paragraph` node** that soft-wraps, beside `line` which clips. It is the
+   gap the audit missed. Rejected: a `wrap` flag on `line`, because `line`'s
+   specification *is* "clips rather than wraps" and a flag negating that makes the
+   requirement meaningless. Its height is the one in the catalogue that depends on
+   width, so `height_of` takes one.
+4. **Eleven more style tokens**, each named for and resolving 1:1 onto the
+   `ThemePalette` field it addresses, including one per session status. Rejected:
+   letting a node name a colour, which would end the property tokens exist for.
+
+**Consequences.**
+
+- The catalogue's rule is now explicit: a node may depend on its area (`gauge`,
+  `paragraph`, `divider`, `row`), but never on a *number a plugin was told*.
+- Byte-identity is a **test**, not a claim: the pre-port line builders are
+  retained under `#[cfg(test)]` as an oracle, and
+  `view_tree_render_matches_the_legacy_paragraph_cell_for_cell` compares the two
+  renderings cell by cell across 59 widths × 6 heights × 9 content variants. It
+  earned its keep immediately — it caught that v1's *gauge header* wraps when
+  label plus suffix overflow, pushing the bar down, which the first
+  implementation clipped.
+- One divergence is accepted and pinned: a handful of separator **spaces** now
+  carry a theme foreground where v1 left theirs unset. A space has no glyph and
+  neither sets a background, so the pixels are identical; reproducing it would
+  need a token meaning "the terminal's default foreground", the one thing the
+  token set exists to prevent.
+- A second is a fix: agent-supplied text (an OSC title, a notification body) is
+  now sanitized, where v1 passed a `\x1b` straight into a cell whose symbol
+  ratatui writes to the terminal verbatim.
+- `Paragraph::line_count` is behind ratatui's `unstable-rendered-line-info`
+  feature, now enabled. Measuring with the same widget that paints is what makes
+  the wrap identical by construction rather than by a reimplementation of
+  word-wrapping that would have to be tested into agreement.
+- **Audit §2 (no host binding reads kernel state) stays open**, and it is why
+  this pane is still not portable to a *plugin*: it receives its `SessionInfo` as
+  an argument. The proven claim is narrow — the catalogue can express this pane's
+  rendering, not that a third party could have written it.

@@ -943,9 +943,17 @@ overrides it) and **`command`** (list/describe/run: the typed, agent-callable
 plugin command registry — below; unlike `plugin list`, discovery here starts no
 plugin, since a command's id and schema are manifest facts).
 A plugin builds its pane from `require("@thurbox").ui`
-constructors (`text`/`row`/`line`/`column`/`list`/`divider`/`spacer`), styled by
-**theme token** (`accent`/`muted`/`danger`/`success`/`warning`) rather than by
-colour, so every plugin follows a theme switch. `row` and `line` differ in who
+constructors (`text`/`row`/`line`/`paragraph`/`column`/`list`/`divider`/`gauge`/
+`spacer`), styled by **theme token** rather than by colour, so every plugin
+follows a theme switch. The token set is the palette's *role* set —
+`accent`/`muted`/`danger`/`success`/`warning`/`secondary`/`role`/`branch`/
+`added`/`border` plus one per session status (`status_working`/`status_blocked`/
+`status_done`/`status_idle`/`status_error`/`status_unreachable`) — because a
+status indicator is the one case where the token *is* the meaning, and because a
+pane could not otherwise be drawn through the tree without reaching past it for a
+colour (ADR-26).
+
+`row` and `line` differ in who
 owns the widths: a `row` splits its area into **equal shares** (a plugin cannot
 request a width, so the kernel never arbitrates between requests), while a
 `line` packs its runs on one row at their **own** display width — the
@@ -954,9 +962,29 @@ truncate and a single `text` can only draw in one colour. A line holds only
 nodes whose width follows from their content (`text`, a `cycle`, a nested
 `line`, checked recursively through motion frames); anything else is a named
 conversion error, and a motion inside a line reserves its **widest** frame so
-an animation never shoves the rest of the row sideways. Overflow is clipped, not
-wrapped — `height_of` takes no width, and a wrapping node would be the first
-whose height depended on one. Pane **visibility is kernel
+an animation never shoves the rest of the row sideways. A line **clips**;
+`paragraph` is its soft-wrapping counterpart, taking the same children and
+occupying as many rows as the wrap needs — it is the one node whose height
+depends on the width it is given, which is why `height_of` takes one. Use `line`
+where a following row must not be pushed down, `paragraph` for text whose length
+you do not control. `gauge` (label, percent, optional suffix) draws a labelled bar
+whose geometry the **kernel** resolves — the flush-right suffix and the bar
+length — because a plugin is never told its pane's width; reporting the rect back
+instead would put a VM call on the resize path (ADR-26). Its header wraps when
+label plus suffix overflow, and the bar moves down with it.
+
+**The view tree is kernel surface, not plugin-only.** `session::view_tree`,
+`session::motion` and `ui::plugin_pane` are ungated: thurbox's **info panel**
+(`ui::info_panel::info_tree`) builds a `ViewNode` and is painted by the same
+renderer, in every build — the Phase 0 exit criterion, and the evidence that the
+catalogue can carry a real v1 pane. Neither module references `mlua` or
+`crate::plugin`, so a stable build pays nothing for them. The port is held to
+**byte identity** by keeping the pre-port line builders under `#[cfg(test)]` as an
+oracle and comparing the two renderings cell by cell across widths, heights and
+content variants (`view_tree_render_matches_the_legacy_paragraph_cell_for_cell`),
+plus a pinned whole-pane frame. What a plugin still cannot do is *read* the
+`SessionInfo` the pane renders (`docs/PHASE4-PANE-READINESS.md` §2), so the pane
+is expressible in the tree but not yet writable as a plugin. Pane **visibility is kernel
 state**: the manifest seeds it (`default_visible`), `F10`
 (rebindable `TogglePluginPane`) toggles it, and the choice is persisted per
 pane in `metadata` so it survives a restart — unlike v1's panel toggles, which

@@ -31,6 +31,17 @@ pub const MAX_TEXT_LEN: usize = 4096;
 /// unreadable on many of them and would stop matching the instant a user
 /// switched theme. A closed token set makes theme-following the only option a
 /// plugin has.
+///
+/// The set covers every *distinct* palette role thurbox's own panes draw with,
+/// which is what lets a pane be rendered through this tree without reaching
+/// past it for a colour. Two overlaps are deliberate: [`StyleToken::Warning`]
+/// and [`StyleToken::StatusWorking`] resolve alike today, as do
+/// [`StyleToken::Success`] and [`StyleToken::StatusIdle`]. The first pair of
+/// each is a token a plugin picks for *its own* meaning; the second is the
+/// token for *the kernel's* session status, where the token is the meaning and
+/// an approximation is wrong rather than merely different. Collapsing them
+/// would leave a pane drawing status indicators picking `warning` for working
+/// and `status_blocked` for blocked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StyleToken {
     /// The theme's accent — headings, selected rows.
@@ -43,6 +54,28 @@ pub enum StyleToken {
     Success,
     /// Something needs attention but is not an error.
     Warning,
+    /// Text one step below primary but above muted.
+    Secondary,
+    /// The name of an agent or other actor.
+    Role,
+    /// A git branch or repository name.
+    Branch,
+    /// An addition — inserted lines, a positive delta.
+    Added,
+    /// The colour a pane's own borders and rules are drawn in.
+    Border,
+    /// A session actively running.
+    StatusWorking,
+    /// A session waiting on the user.
+    StatusBlocked,
+    /// A session whose turn just finished.
+    StatusDone,
+    /// A session at rest.
+    StatusIdle,
+    /// A session that failed.
+    StatusError,
+    /// A session whose host cannot be reached.
+    StatusUnreachable,
 }
 
 impl StyleToken {
@@ -54,6 +87,17 @@ impl StyleToken {
             StyleToken::Danger => "danger",
             StyleToken::Success => "success",
             StyleToken::Warning => "warning",
+            StyleToken::Secondary => "secondary",
+            StyleToken::Role => "role",
+            StyleToken::Branch => "branch",
+            StyleToken::Added => "added",
+            StyleToken::Border => "border",
+            StyleToken::StatusWorking => "status_working",
+            StyleToken::StatusBlocked => "status_blocked",
+            StyleToken::StatusDone => "status_done",
+            StyleToken::StatusIdle => "status_idle",
+            StyleToken::StatusError => "status_error",
+            StyleToken::StatusUnreachable => "status_unreachable",
         }
     }
 
@@ -65,7 +109,32 @@ impl StyleToken {
             StyleToken::Danger,
             StyleToken::Success,
             StyleToken::Warning,
+            StyleToken::Secondary,
+            StyleToken::Role,
+            StyleToken::Branch,
+            StyleToken::Added,
+            StyleToken::Border,
+            StyleToken::StatusWorking,
+            StyleToken::StatusBlocked,
+            StyleToken::StatusDone,
+            StyleToken::StatusIdle,
+            StyleToken::StatusError,
+            StyleToken::StatusUnreachable,
         ]
+    }
+
+    /// The token that draws `status`, so a pane never maps statuses to colour
+    /// roles by hand and two panes cannot disagree about which colour a state
+    /// gets.
+    pub fn for_status(status: super::SessionStatus) -> StyleToken {
+        match status {
+            super::SessionStatus::Working => StyleToken::StatusWorking,
+            super::SessionStatus::Blocked => StyleToken::StatusBlocked,
+            super::SessionStatus::Done => StyleToken::StatusDone,
+            super::SessionStatus::Idle => StyleToken::StatusIdle,
+            super::SessionStatus::Error => StyleToken::StatusError,
+            super::SessionStatus::Unreachable => StyleToken::StatusUnreachable,
+        }
     }
 
     /// Parse a wire name, or `None` if the host does not define it.
@@ -81,6 +150,49 @@ pub struct TextStyle {
     pub token: Option<StyleToken>,
     /// Render bold.
     pub bold: bool,
+}
+
+/// A gauge's fill, as a percentage.
+///
+/// Wrapped rather than stored as a bare `f32` because [`ViewNode`] derives
+/// `Eq` and `Hash`, and that is load-bearing: an identical re-push must be
+/// recognised as unchanged so a motion elsewhere in the tree keeps its epoch.
+/// A bare float would take `Eq`/`Hash` off the whole enum.
+///
+/// Comparison is on the bit pattern, which is the right question here — two
+/// gauges are "the same node" exactly when the host would draw them
+/// identically.
+///
+/// Deliberately **not** normalised at construction: the renderer clamps at the
+/// moment of drawing, so a value out of range behaves as it always did rather
+/// than being rewritten on the way in.
+#[derive(Debug, Clone, Copy)]
+pub struct Percent(f32);
+
+impl Percent {
+    /// Carry `value` as a gauge percentage.
+    pub fn new(value: f32) -> Percent {
+        Percent(value)
+    }
+
+    /// The value as given.
+    pub fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl PartialEq for Percent {
+    fn eq(&self, other: &Percent) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for Percent {}
+
+impl std::hash::Hash for Percent {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
+    }
 }
 
 /// One node in a plugin's view tree.
@@ -113,6 +225,18 @@ pub enum ViewNode {
     /// Only children with an intrinsic width may appear here; see
     /// [`ViewNode::is_inlineable`].
     Line(Vec<ViewNode>),
+    /// Inline runs laid out left to right and **soft-wrapped** onto further
+    /// rows when they exceed the available width.
+    ///
+    /// The counterpart to [`ViewNode::Line`], which clips at one row. Both
+    /// exist because a pane needs both rules: a row of fixed-width fields must
+    /// not push its neighbours down, while agent-supplied prose of unbounded
+    /// length must stay readable. A paragraph's height is therefore a function
+    /// of the width it is given — the one node in the catalog of which that is
+    /// true.
+    ///
+    /// Admits exactly the children a line does; see [`ViewNode::is_inlineable`].
+    Paragraph(Vec<ViewNode>),
     /// Children laid out top to bottom.
     Column(Vec<ViewNode>),
     /// Children laid out top to bottom, one per line — a column that reads as
@@ -120,6 +244,22 @@ pub enum ViewNode {
     List(Vec<ViewNode>),
     /// A horizontal rule filling the available width.
     Divider,
+    /// A labelled progress bar, two rows tall, whose geometry the **kernel**
+    /// resolves from the area it is given.
+    ///
+    /// The node exists so that drawing one needs no access to a resolved pane
+    /// width. Reporting the rect back instead would make rendering
+    /// width-dependent — a resize would have to re-enter a plugin's VM before
+    /// the frame that needed it — and a plugin that mis-measured would produce a
+    /// broken pane rather than a refused node.
+    Gauge {
+        /// Drawn at the left of the header row.
+        label: String,
+        /// How full the bar is, clamped to 0–100 when drawn.
+        percent: Percent,
+        /// Flush-right header text; `None` draws the rounded percentage.
+        suffix: Option<String>,
+    },
     /// Blank vertical space.
     Spacer {
         /// How many lines to leave empty.
@@ -150,11 +290,18 @@ impl ViewNode {
     /// A node's children, or an empty slice for a leaf.
     pub fn children(&self) -> &[ViewNode] {
         match self {
-            ViewNode::Row(c) | ViewNode::Line(c) | ViewNode::Column(c) | ViewNode::List(c) => c,
+            ViewNode::Row(c)
+            | ViewNode::Line(c)
+            | ViewNode::Paragraph(c)
+            | ViewNode::Column(c)
+            | ViewNode::List(c) => c,
             // A motion's frames are its children: that is what makes them
             // count against the tree budget rather than escaping it.
             ViewNode::Motion { motion, .. } => motion.frames(),
-            ViewNode::Text { .. } | ViewNode::Divider | ViewNode::Spacer { .. } => &[],
+            ViewNode::Text { .. }
+            | ViewNode::Divider
+            | ViewNode::Gauge { .. }
+            | ViewNode::Spacer { .. } => &[],
         }
     }
 
@@ -209,10 +356,16 @@ impl ViewNode {
                 .frames()
                 .iter()
                 .find_map(ViewNode::first_non_inlineable),
+            // A paragraph's *children* are inlineable, but a paragraph is not:
+            // its height is however many rows the wrap needs, which is the one
+            // thing a one-row line cannot hold. A gauge likewise takes its width
+            // from its area rather than its content.
             ViewNode::Row(_)
+            | ViewNode::Paragraph(_)
             | ViewNode::Column(_)
             | ViewNode::List(_)
             | ViewNode::Divider
+            | ViewNode::Gauge { .. }
             | ViewNode::Spacer { .. } => Some(self.kind_name()),
         }
     }
@@ -223,9 +376,11 @@ impl ViewNode {
             ViewNode::Text { .. } => "text",
             ViewNode::Row(_) => "row",
             ViewNode::Line(_) => "line",
+            ViewNode::Paragraph(_) => "paragraph",
             ViewNode::Column(_) => "column",
             ViewNode::List(_) => "list",
             ViewNode::Divider => "divider",
+            ViewNode::Gauge { .. } => "gauge",
             ViewNode::Spacer { .. } => "spacer",
             ViewNode::Motion { .. } => "motion",
         }
@@ -244,6 +399,26 @@ impl ViewNode {
         ViewNode::Text {
             content: sanitize_text(&content.into()),
             style,
+        }
+    }
+
+    /// Build a text node in a colour role, unbolded — the shape most rows are.
+    pub fn token(content: impl Into<String>, token: StyleToken) -> ViewNode {
+        ViewNode::styled(
+            content,
+            TextStyle {
+                token: Some(token),
+                bold: false,
+            },
+        )
+    }
+
+    /// Build a gauge, sanitizing its label and suffix like any other text.
+    pub fn gauge(label: impl Into<String>, percent: f32, suffix: Option<String>) -> ViewNode {
+        ViewNode::Gauge {
+            label: sanitize_text(&label.into()),
+            percent: Percent::new(percent),
+            suffix: suffix.map(|s| sanitize_text(&s)),
         }
     }
 }

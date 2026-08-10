@@ -73,6 +73,15 @@ pub enum ViewError {
         /// The node kind that carried both.
         kind: String,
     },
+    /// A gauge's percentage was not a finite number. Refused rather than
+    /// clamped: NaN or an infinity means the plugin's own arithmetic went wrong,
+    /// and a bar silently drawn at 0% would hide that.
+    NonFinite {
+        /// The node kind that carried it.
+        kind: String,
+        /// The field that was not finite.
+        field: &'static str,
+    },
     /// A `line` child has no intrinsic width, so there is no honest column to
     /// lay it out at. Named rather than dropped: a plugin author who put a
     /// column in a line wrote a layout they meant, and a silently missing node
@@ -119,6 +128,10 @@ impl fmt::Display for ViewError {
                 f,
                 "view node `{kind}` declares motion and its own content; the \
                  motion's frames are the content"
+            ),
+            ViewError::NonFinite { kind, field } => write!(
+                f,
+                "view node `{kind}` field `{field}` must be a finite number"
             ),
             ViewError::NotInlineable { kind } => write!(
                 f,
@@ -220,7 +233,18 @@ fn convert(
             }
             Ok(ViewNode::Line(runs))
         }
+        "paragraph" => {
+            let runs = convert_children(table, &kind, depth, budget, path)?;
+            // Same admissibility rule as a line, asked of the converted child
+            // for the same reason: a motion's frames come back from the ordinary
+            // walk, which has no idea a paragraph is above it.
+            if let Some(kind) = runs.iter().find_map(ViewNode::first_non_inlineable) {
+                return Err(ViewError::NotInlineable { kind });
+            }
+            Ok(ViewNode::Paragraph(runs))
+        }
         "divider" => Ok(ViewNode::Divider),
+        "gauge" => convert_gauge(table, &kind),
         "spacer" => {
             let lines = match table.get::<Value>("lines") {
                 Ok(Value::Integer(n)) => n.clamp(0, u16::MAX as i64) as u16,
@@ -238,6 +262,69 @@ fn convert(
         }
         _ => Err(ViewError::UnknownKind(kind)),
     }
+}
+
+/// Convert a `gauge` node.
+///
+/// The label is required — an unlabelled bar tells a reader nothing — while the
+/// suffix is optional, since the host draws the rounded percentage without one.
+fn convert_gauge(table: &Table, kind: &str) -> Result<ViewNode, ViewError> {
+    let label = match table.get::<Value>("label") {
+        Ok(Value::String(s)) => s.to_string_lossy().to_string(),
+        Ok(Value::Nil) => {
+            return Err(ViewError::MissingField {
+                kind: kind.to_string(),
+                field: "label",
+            })
+        }
+        _ => {
+            return Err(ViewError::BadField {
+                kind: kind.to_string(),
+                field: "label",
+                expected: "a string",
+            })
+        }
+    };
+
+    let percent = match table.get::<Value>("percent") {
+        Ok(Value::Number(n)) => n,
+        Ok(Value::Integer(n)) => n as f64,
+        Ok(Value::Nil) => {
+            return Err(ViewError::MissingField {
+                kind: kind.to_string(),
+                field: "percent",
+            })
+        }
+        _ => {
+            return Err(ViewError::BadField {
+                kind: kind.to_string(),
+                field: "percent",
+                expected: "a number",
+            })
+        }
+    };
+    if !percent.is_finite() {
+        return Err(ViewError::NonFinite {
+            kind: kind.to_string(),
+            field: "percent",
+        });
+    }
+
+    let suffix = match table.get::<Value>("suffix") {
+        Ok(Value::String(s)) => Some(s.to_string_lossy().to_string()),
+        Ok(Value::Nil) | Err(_) => None,
+        Ok(_) => {
+            return Err(ViewError::BadField {
+                kind: kind.to_string(),
+                field: "suffix",
+                expected: "a string",
+            })
+        }
+    };
+
+    // Clamping is the renderer's, not conversion's: the node records what the
+    // plugin asked for, and the paint decides what fits.
+    Ok(ViewNode::gauge(label, percent as f32, suffix))
 }
 
 /// Convert a `text` node.
@@ -470,6 +557,96 @@ mod tests {
     fn a_text_node_converts() {
         let node = convert_src(r#"return { kind = "text", content = "hello" }"#).unwrap();
         assert_eq!(node, ViewNode::text("hello"));
+    }
+
+    #[test]
+    fn a_gauge_converts() {
+        let node =
+            convert_src(r#"return { kind = "gauge", label = "CPU", percent = 42.5 }"#).unwrap();
+        assert_eq!(node, ViewNode::gauge("CPU", 42.5, None));
+
+        let with_suffix = convert_src(
+            r#"return { kind = "gauge", label = "RAM", percent = 50, suffix = "8/16 GB" }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            with_suffix,
+            ViewNode::gauge("RAM", 50.0, Some("8/16 GB".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_gauge_needs_a_label_and_a_percentage() {
+        assert_eq!(
+            convert_src(r#"return { kind = "gauge", percent = 1 }"#),
+            Err(ViewError::MissingField {
+                kind: "gauge".to_string(),
+                field: "label"
+            })
+        );
+        assert_eq!(
+            convert_src(r#"return { kind = "gauge", label = "x" }"#),
+            Err(ViewError::MissingField {
+                kind: "gauge".to_string(),
+                field: "percent"
+            })
+        );
+        assert_eq!(
+            convert_src(r#"return { kind = "gauge", label = "x", percent = "half" }"#),
+            Err(ViewError::BadField {
+                kind: "gauge".to_string(),
+                field: "percent",
+                expected: "a number"
+            })
+        );
+    }
+
+    #[test]
+    fn a_gauge_percentage_must_be_finite() {
+        // Refused rather than clamped: a NaN means the plugin's own arithmetic
+        // went wrong, and a bar silently drawn at 0% would hide that.
+        let err = convert_src(r#"return { kind = "gauge", label = "x", percent = 0/0 }"#)
+            .expect_err("a NaN percentage is refused");
+        assert_eq!(
+            err,
+            ViewError::NonFinite {
+                kind: "gauge".to_string(),
+                field: "percent"
+            }
+        );
+        assert!(err.to_string().contains("finite"), "{err}");
+
+        assert!(convert_src(r#"return { kind = "gauge", label = "x", percent = 1/0 }"#).is_err());
+    }
+
+    #[test]
+    fn a_paragraph_converts_and_admits_only_inline_children() {
+        let node = convert_src(
+            r#"return { kind = "paragraph", children = { { kind = "text", content = "hi" } } }"#,
+        )
+        .unwrap();
+        assert_eq!(node, ViewNode::Paragraph(vec![ViewNode::text("hi")]));
+
+        // Same rule as a line, for the same reason: a column has no intrinsic
+        // width, so there is no honest column to place it at.
+        assert_eq!(
+            convert_src(r#"return { kind = "paragraph", children = { { kind = "column" } } }"#),
+            Err(ViewError::NotInlineable { kind: "column" })
+        );
+    }
+
+    #[test]
+    fn neither_new_kind_may_sit_inside_a_line() {
+        for child in [
+            r#"{ kind = "paragraph" }"#,
+            r#"{ kind = "gauge", label = "x", percent = 1 }"#,
+        ] {
+            let src = format!(r#"return {{ kind = "line", children = {{ {child} }} }}"#);
+            assert!(
+                matches!(convert_src(&src), Err(ViewError::NotInlineable { .. })),
+                "{child} must be refused inside a line"
+            );
+        }
     }
 
     #[test]

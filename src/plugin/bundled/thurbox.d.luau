@@ -5,7 +5,15 @@
 -- (`src/plugin/capabilities.rs`). Keep the two in step — this file is what a
 -- plugin author's tooling reads.
 
-export type StyleToken = "accent" | "muted" | "danger" | "success" | "warning"
+-- Colour roles, resolved against the active theme at paint time. The
+-- `status_*` family exists because a status indicator is the one case where
+-- the token *is* the meaning, so an approximation would be wrong rather than
+-- merely different.
+export type StyleToken =
+    "accent" | "muted" | "danger" | "success" | "warning"
+    | "secondary" | "role" | "branch" | "added" | "border"
+    | "status_working" | "status_blocked" | "status_done"
+    | "status_idle" | "status_error" | "status_unreachable"
 
 export type ViewNode = {
     kind: string,
@@ -16,6 +24,10 @@ export type ViewNode = {
     children: { ViewNode }?,
     lines: number?,
     motion: Motion?,
+    -- `gauge` only.
+    label: string?,
+    percent: number?,
+    suffix: string?,
 }
 
 -- Motion the *kernel* drives: the plugin supplies the frames once and never
@@ -39,7 +51,16 @@ export type Ui = {
     line: (children: { ViewNode }?) -> ViewNode,
     column: (children: { ViewNode }?) -> ViewNode,
     list: (children: { ViewNode }?) -> ViewNode,
+    -- Like `line`, but soft-wraps onto further rows instead of clipping at the
+    -- pane edge. Use it for text whose length you do not control; use `line`
+    -- when a following row must not be pushed down. Same admissible children.
+    paragraph: (children: { ViewNode }?) -> ViewNode,
     divider: () -> ViewNode,
+    -- A labelled bar, two rows tall: the label at the left with `suffix` (or the
+    -- rounded percentage) flush right, then the bar. The host resolves the
+    -- geometry from the pane's width, which a plugin is never told. `percent` is
+    -- clamped to 0-100 when drawn and must be a finite number.
+    gauge: (label: string, percent: number, suffix: string?) -> ViewNode,
     spacer: (lines: number?) -> ViewNode,
     -- An animation the kernel evaluates on its own clock. The `id` keys its
     -- phase, so re-pushing the same cycle under the same id continues it

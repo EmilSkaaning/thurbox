@@ -1,0 +1,50 @@
+---
+source: src/ui/info_panel.rs
+expression: "draw_panel(40, 46)"
+---
+┌ Info ────────────────────────────────┐
+│Name: fix-osc52-tmux                  │
+│Status: ◆ Blocked                     │
+│Agent: claude                         │
+│Parent: lead-session                  │
+│Host:  ⇅ devbox                       │
+│Hooks: degraded — stripped for psmux  │
+│host                                  │
+│Activity: Editing                     │
+│src/agent/control_mode.rs to fix the  │
+│subscription                          │
+│Signal:   needs approval              │
+│Repos: thurbox/fix/osc52              │
+│       docs-site                      │
+│       reference                      │
+│Changes: 3 files +120 / -8            │
+│Sync:    ↑2 ↓1                        │
+│CPU                                12%│
+│[█████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]│
+│RAM  256.0 MB                         │
+│──────────────────────────────────────│
+│Agent (Opus v1.2.3)                   │
+│Cost:    $0.0423                      │
+│Time:    1m 23s  (api 45s)            │
+│Tokens:  15.2k in / 2.4k out          │
+│Context                   84.0k/200.0k│
+│[███████████████░░░░░░░░░░░░░░░░░░░░░]│
+│Lines:   +120 / -8                    │
+│Cache:   9.2k read / 1.0k created     │
+│──────────────────────────────────────│
+│Usage (max · devbox)                  │
+│5h                                 42%│
+│[███████████████░░░░░░░░░░░░░░░░░░░░░]│
+│Week                               18%│
+│[██████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]│
+│──────────────────────────────────────│
+│System                                │
+│CPU                                37%│
+│[█████████████░░░░░░░░░░░░░░░░░░░░░░░]│
+│RAM                        8.0/16.0 GB│
+│[██████████████████░░░░░░░░░░░░░░░░░░]│
+│Disk  500.0 MB (thurbox dir)          │
+│──────────────────────────────────────│
+│Automations (2)                       │
+│5m  flow-tick                         │
+└──────────────────────────────────────┘

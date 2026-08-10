@@ -1,4 +1,11 @@
-//! Rendering a plugin's [`ViewNode`] tree into a pane.
+//! Rendering a [`ViewNode`] tree into a pane.
+//!
+//! Named for the pane kind it was written for, but **not** limited to one: since
+//! Phase 0's exit criterion this is also how thurbox's own
+//! [`crate::ui::info_panel`] is painted, and it compiles in every build rather
+//! than only with the plugin host. The name is kept as a deliberate
+//! non-decision — renaming it carries no behaviour and would have obscured the
+//! diff that ungated it.
 //!
 //! `ui` renders the view tree without ever seeing `crate::plugin` — the tree
 //! is pure data in `session`, so the renderer has no path back to a VM and
@@ -11,7 +18,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::{Paragraph, Widget, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use crate::session::motion::FrameTable;
@@ -30,6 +37,20 @@ pub fn token_color(token: StyleToken, palette: &ThemePalette) -> Color {
         StyleToken::Danger => palette.danger,
         StyleToken::Success => palette.status_idle,
         StyleToken::Warning => palette.status_working,
+        StyleToken::Secondary => palette.text_secondary,
+        StyleToken::Role => palette.role_name,
+        StyleToken::Branch => palette.branch_name,
+        // `tool_allowed` rather than `diff_added`: this is the green thurbox's
+        // own panes draw an insertion count in, and the two are separate
+        // palette fields a custom theme may set independently.
+        StyleToken::Added => palette.tool_allowed,
+        StyleToken::Border => palette.border_unfocused,
+        StyleToken::StatusWorking => palette.status_working,
+        StyleToken::StatusBlocked => palette.status_blocked,
+        StyleToken::StatusDone => palette.status_done,
+        StyleToken::StatusIdle => palette.status_idle,
+        StyleToken::StatusError => palette.status_error,
+        StyleToken::StatusUnreachable => palette.status_unreachable,
     }
 }
 
@@ -46,28 +67,90 @@ fn text_style(style: TextStyle, palette: &ThemePalette) -> Style {
     s
 }
 
-/// How many terminal rows a node needs.
+/// How many terminal rows a node needs at `width`.
 ///
 /// Text is one line and does not wrap — a plugin splits lines by returning
-/// separate nodes — so height is independent of width. When wrapping arrives
-/// this grows a width parameter; until then taking one would be a lie.
+/// separate nodes. [`ViewNode::Paragraph`] is the one kind whose height depends
+/// on the width it is given, and it is why this takes a width at all: a
+/// paragraph that wrapped onto three rows while being allocated one would
+/// overdraw the sibling below it.
 ///
 /// A motion takes the **tallest** of its frames rather than the height of the
 /// frame currently showing: a height that changed per frame would shove every
 /// sibling up and down as the animation ran, which is a worse artifact than
 /// the blank row a short frame leaves.
-fn height_of(node: &ViewNode) -> u16 {
+fn height_of(node: &ViewNode, width: u16, palette: &ThemePalette, frames: &FrameTable) -> u16 {
     match node {
         // A line is one row whatever it holds: it clips rather than wraps, so
         // its height does not depend on the width it is given.
         ViewNode::Text { .. } | ViewNode::Divider | ViewNode::Line(_) => 1,
+        // Header rows plus the bar's one row. The header is normally one row,
+        // but a label and suffix that together overflow the width wrap — and the
+        // bar has to move down with them rather than being drawn over the
+        // overflow.
+        ViewNode::Gauge {
+            label,
+            percent,
+            suffix,
+        } => gauge_header_rows(label, percent.get(), suffix.as_deref(), width, palette) + 1,
         ViewNode::Spacer { lines } => *lines,
-        ViewNode::Row(children) => children.iter().map(height_of).max().unwrap_or(0),
-        ViewNode::Column(children) | ViewNode::List(children) => {
-            children.iter().map(height_of).sum::<u16>()
+        ViewNode::Paragraph(runs) => {
+            if width == 0 {
+                return 0;
+            }
+            let mut spans = Vec::new();
+            inline_spans(runs, palette, frames, &mut spans);
+            // Measured by the same widget that will draw it, so the height and
+            // the paint can never disagree about where the wrap falls.
+            wrapped_paragraph(spans)
+                .line_count(width)
+                .min(u16::MAX as usize) as u16
         }
-        ViewNode::Motion { motion, .. } => motion.frames().iter().map(height_of).max().unwrap_or(0),
+        ViewNode::Row(children) => row_cells(children, width)
+            .iter()
+            .zip(children)
+            .map(|(cell, child)| height_of(child, cell.width, palette, frames))
+            .max()
+            .unwrap_or(0),
+        ViewNode::Column(children) | ViewNode::List(children) => children
+            .iter()
+            .map(|c| height_of(c, width, palette, frames))
+            .sum::<u16>(),
+        ViewNode::Motion { motion, .. } => motion
+            .frames()
+            .iter()
+            .map(|f| height_of(f, width, palette, frames))
+            .max()
+            .unwrap_or(0),
     }
+}
+
+/// The equal-share cells a [`ViewNode::Row`] divides `width` into.
+///
+/// Shared by the height walk and the paint so the two split identically; a
+/// hand-rolled `width / n` would drift from `Layout`'s remainder distribution.
+fn row_cells(children: &[ViewNode], width: u16) -> std::rc::Rc<[Rect]> {
+    let constraints: Vec<Constraint> = children
+        .iter()
+        .map(|_| Constraint::Ratio(1, children.len().max(1) as u32))
+        .collect();
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(constraints)
+        .split(Rect {
+            x: 0,
+            y: 0,
+            width,
+            height: 1,
+        })
+}
+
+/// The widget a [`ViewNode::Paragraph`] is both measured and drawn with.
+///
+/// `trim: false` keeps leading whitespace on a wrapped row, which is what makes
+/// an indented continuation line up under the value it continues.
+fn wrapped_paragraph(spans: Vec<Span<'_>>) -> Paragraph<'_> {
+    Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false })
 }
 
 /// Terminal columns a node occupies inside a [`ViewNode::Line`].
@@ -90,9 +173,11 @@ fn inline_width(node: &ViewNode) -> usize {
         // Refused at conversion, so unreachable from a plugin; zero is the only
         // honest answer for a node whose width comes from its area.
         ViewNode::Row(_)
+        | ViewNode::Paragraph(_)
         | ViewNode::Column(_)
         | ViewNode::List(_)
         | ViewNode::Divider
+        | ViewNode::Gauge { .. }
         | ViewNode::Spacer { .. } => 0,
     }
 }
@@ -131,12 +216,114 @@ fn inline_spans<'a>(
             }
             // Refused at conversion; drawing nothing is the safe residual.
             ViewNode::Row(_)
+            | ViewNode::Paragraph(_)
             | ViewNode::Column(_)
             | ViewNode::List(_)
             | ViewNode::Divider
+            | ViewNode::Gauge { .. }
             | ViewNode::Spacer { .. } => {}
         }
     }
+}
+
+/// A gauge's header row: the label at the left, the suffix (or the rounded
+/// percentage) flush right.
+///
+/// The flush-right placement is the kernel's, which is the whole reason the node
+/// exists — nothing that draws a gauge needs to know how wide its pane resolved
+/// to. When the label and the right-hand text together exceed the width the
+/// padding is zero and the line **overflows**, which is why the header is drawn
+/// wrapped rather than as one row.
+///
+/// The percentage is clamped **here**, at the moment of drawing, rather than
+/// when the node was built — so a metric that momentarily overshoots draws a
+/// full bar instead of failing the pane.
+fn gauge_header(
+    label: &str,
+    clamped: f32,
+    suffix: Option<&str>,
+    width: usize,
+    palette: &ThemePalette,
+) -> Line<'static> {
+    let right_text = suffix
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{clamped:.0}%"));
+    let padding = width.saturating_sub(label.chars().count() + right_text.chars().count());
+    Line::from(vec![
+        Span::styled(label.to_string(), Style::default().fg(palette.text_muted)),
+        Span::raw(" ".repeat(padding)),
+        Span::styled(right_text, Style::default().fg(palette.text_primary)),
+    ])
+}
+
+/// Rows a gauge's header takes at `width` — more than one only when the label
+/// plus the right-hand text overflow it.
+fn gauge_header_rows(
+    label: &str,
+    percent: f32,
+    suffix: Option<&str>,
+    width: u16,
+    palette: &ThemePalette,
+) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+    let header = gauge_header(
+        label,
+        percent.clamp(0.0, 100.0),
+        suffix,
+        width as usize,
+        palette,
+    );
+    wrapped_paragraph(header.spans)
+        .line_count(width)
+        .max(1)
+        .min(u16::MAX as usize) as u16
+}
+
+/// Draw a [`ViewNode::Gauge`]: its header, then the bar on the row below
+/// whatever the header took.
+fn render_gauge(
+    label: &str,
+    percent: f32,
+    suffix: Option<&str>,
+    area: Rect,
+    palette: &ThemePalette,
+    buf: &mut ratatui::buffer::Buffer,
+) {
+    let width = area.width as usize;
+    let clamped = percent.clamp(0.0, 100.0);
+    let header_rows = gauge_header_rows(label, percent, suffix, area.width, palette);
+    let header = gauge_header(label, clamped, suffix, width, palette);
+    wrapped_paragraph(header.spans).render(
+        Rect {
+            height: header_rows.min(area.height),
+            ..area
+        },
+        buf,
+    );
+
+    // The bar owns the row after the header. A gauge clipped shorter than that
+    // simply has none.
+    if area.height <= header_rows {
+        return;
+    }
+    let area = Rect {
+        y: area.y.saturating_add(header_rows),
+        height: area.height - header_rows,
+        ..area
+    };
+    let bar_width = width.saturating_sub(2);
+    let filled = ((clamped / 100.0) * bar_width as f32).round() as usize;
+    let empty = bar_width.saturating_sub(filled);
+    let muted = Style::default().fg(palette.text_muted);
+    let bar_line = Line::from(vec![
+        Span::styled("[", muted),
+        Span::styled("█".repeat(filled), Style::default().fg(palette.accent)),
+        Span::styled("░".repeat(empty), muted),
+        Span::styled("]", muted),
+    ]);
+    Paragraph::new(bar_line).render(Rect { height: 1, ..area }, buf);
 }
 
 /// Draw a view tree into `area`.
@@ -179,22 +366,38 @@ pub fn render_tree(
             inline_spans(runs, palette, frames, &mut spans);
             Paragraph::new(Line::from(spans)).render(area, buf);
         }
+        ViewNode::Paragraph(runs) => {
+            let mut spans = Vec::new();
+            inline_spans(runs, palette, frames, &mut spans);
+            // Overflow wraps onto further rows and is clipped by `area`'s
+            // bottom, so a paragraph given fewer rows than it wants loses its
+            // tail rather than painting over a sibling.
+            wrapped_paragraph(spans).render(area, buf);
+        }
+        ViewNode::Gauge {
+            label,
+            percent,
+            suffix,
+        } => render_gauge(label, percent.get(), suffix.as_deref(), area, palette, buf),
         ViewNode::Row(children) => {
             if children.is_empty() {
                 return;
             }
             // Equal shares: a plugin cannot specify widths, so the kernel does
             // not have to arbitrate between competing requests.
-            let constraints: Vec<Constraint> = children
-                .iter()
-                .map(|_| Constraint::Ratio(1, children.len() as u32))
-                .collect();
-            let cells = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints(constraints)
-                .split(area);
-            for (child, cell) in children.iter().zip(cells.iter()) {
-                render_tree(child, *cell, palette, frames, buf);
+            for (child, cell) in children.iter().zip(row_cells(children, area.width).iter()) {
+                render_tree(
+                    child,
+                    Rect {
+                        x: area.x.saturating_add(cell.x),
+                        y: area.y,
+                        width: cell.width,
+                        height: area.height,
+                    },
+                    palette,
+                    frames,
+                    buf,
+                );
             }
         }
         ViewNode::Column(children) | ViewNode::List(children) => {
@@ -204,7 +407,7 @@ pub fn render_tree(
                 if y >= bottom {
                     break;
                 }
-                let want = height_of(child);
+                let want = height_of(child, area.width, palette, frames);
                 let height = want.min(bottom - y);
                 if height == 0 {
                     continue;
@@ -443,6 +646,144 @@ mod tests {
         assert_eq!(draw(&tree, 6, 2), vec!["aaaabb", "next"]);
     }
 
+    // ── paragraph: the node that wraps ──
+
+    #[test]
+    fn a_paragraph_wraps_instead_of_clipping() {
+        // The same content a line would have clipped (see the test above).
+        let tree = ViewNode::Paragraph(vec![ViewNode::text("aaaa"), ViewNode::text("bbbb")]);
+        // No break opportunity inside the run, so the wrap falls at the width.
+        assert_eq!(draw(&tree, 6, 2), vec!["aaaabb", "bb"]);
+    }
+
+    #[test]
+    fn a_wrapping_paragraph_does_not_overdraw_its_sibling() {
+        // The reason `height_of` takes a width at all: allocate one row here and
+        // `next` would be painted over by the wrap.
+        let tree = ViewNode::List(vec![
+            ViewNode::Paragraph(vec![ViewNode::text("one two three four")]),
+            ViewNode::text("next"),
+        ]);
+        assert_eq!(
+            draw(&tree, 6, 5),
+            vec!["one", "two", "three", "four", "next"]
+        );
+    }
+
+    #[test]
+    fn a_paragraph_that_fits_is_one_row() {
+        let tree = ViewNode::List(vec![
+            ViewNode::Paragraph(vec![ViewNode::text("short")]),
+            ViewNode::text("next"),
+        ]);
+        assert_eq!(draw(&tree, 20, 2), vec!["short", "next"]);
+    }
+
+    #[test]
+    fn a_paragraph_is_truncated_by_the_bottom_of_its_area() {
+        let tree = ViewNode::Paragraph(vec![ViewNode::text("one two three")]);
+        // Wants three rows, given two: the tail is dropped, not overflowed.
+        assert_eq!(draw(&tree, 5, 2), vec!["one", "two"]);
+    }
+
+    #[test]
+    fn runs_in_a_paragraph_keep_their_styles_across_the_wrap() {
+        let p = palette();
+        let tree = ViewNode::Paragraph(vec![
+            ViewNode::styled(
+                "L: ",
+                TextStyle {
+                    token: Some(StyleToken::Muted),
+                    bold: false,
+                },
+            ),
+            ViewNode::text("wrapping value"),
+        ]);
+        let rect = area(8, 3);
+        let mut buf = Buffer::empty(rect);
+        render_tree(&tree, rect, &p, &FrameTable::default(), &mut buf);
+        assert_eq!(buf[(0, 0)].fg, p.text_muted, "the label keeps its token");
+        // The wrapped remainder belongs to the value run, not the label.
+        assert_eq!(buf[(0, 1)].fg, p.text_primary);
+    }
+
+    // ── gauge: the node the kernel resolves geometry for ──
+
+    #[test]
+    fn a_gauge_puts_its_suffix_flush_right_and_fills_its_bar() {
+        let tree = ViewNode::gauge("RAM", 50.0, Some("8/16 GB".to_string()));
+        let rows = draw(&tree, 20, 2);
+        assert_eq!(rows[0], "RAM          8/16 GB", "flush right");
+        // 20 wide: brackets plus an 18-cell bar, half filled.
+        assert_eq!(rows[1].chars().count(), 20);
+        assert_eq!(rows[1].matches('█').count(), 9);
+        assert_eq!(rows[1].matches('░').count(), 9);
+    }
+
+    #[test]
+    fn a_gauge_without_a_suffix_shows_its_percentage() {
+        // Flush right in a 12-wide area: "CPU", six spaces, then "37%".
+        assert_eq!(
+            draw(&ViewNode::gauge("CPU", 37.0, None), 12, 1),
+            vec!["CPU      37%"]
+        );
+    }
+
+    #[test]
+    fn a_gauge_clamps_out_of_range_percentages() {
+        let over = draw(&ViewNode::gauge("CPU", 150.0, None), 12, 2);
+        assert!(over[0].contains("100%"));
+        assert_eq!(over[1].matches('░').count(), 0, "a full bar");
+        let under = draw(&ViewNode::gauge("CPU", -10.0, None), 12, 2);
+        assert!(under[0].contains("0%"));
+        assert_eq!(under[1].matches('█').count(), 0, "an empty bar");
+    }
+
+    #[test]
+    fn a_gauge_reserves_two_rows_so_a_sibling_follows_its_bar() {
+        let tree = ViewNode::List(vec![
+            ViewNode::gauge("CPU", 50.0, None),
+            ViewNode::text("after"),
+        ]);
+        assert_eq!(draw(&tree, 12, 3)[2], "after");
+    }
+
+    #[test]
+    fn a_gauge_whose_header_overflows_pushes_its_bar_down() {
+        // The case the info panel's differential sweep found: label plus suffix
+        // exceed the width, so the header wraps and the bar must follow it rather
+        // than being painted over the overflow.
+        let tree = ViewNode::List(vec![
+            ViewNode::gauge("Context", 7.0, None),
+            ViewNode::text("after"),
+        ]);
+        let rows = draw(&tree, 6, 4);
+        assert_eq!(rows[0], "Contex");
+        assert_eq!(rows[1], "t7%");
+        assert!(rows[2].starts_with('['), "the bar is on the third row");
+        assert_eq!(rows[3], "after", "and the sibling after that");
+    }
+
+    #[test]
+    fn neither_new_node_is_inlineable() {
+        // Both take their width from their area, and a paragraph its height from
+        // the wrap, so a one-row line cannot hold either.
+        for node in [ViewNode::Paragraph(vec![]), ViewNode::gauge("x", 0.0, None)] {
+            assert!(!node.is_inlineable(), "{}", node.kind_name());
+            assert_eq!(inline_width(&node), 0);
+        }
+    }
+
+    #[test]
+    fn two_identical_gauges_compare_equal() {
+        // Load-bearing: an identical re-push must keep a motion's epoch, which
+        // needs the whole tree to stay comparable despite carrying a float.
+        let a = ViewNode::gauge("CPU", 42.5, Some("s".into()));
+        let b = ViewNode::gauge("CPU", 42.5, Some("s".into()));
+        assert_eq!(a, b);
+        assert_ne!(a, ViewNode::gauge("CPU", 42.6, Some("s".into())));
+    }
+
     #[test]
     fn an_empty_line_draws_nothing() {
         assert_eq!(draw(&ViewNode::Line(vec![]), 5, 1), vec![""]);
@@ -451,7 +792,7 @@ mod tests {
     #[test]
     fn a_line_is_one_row_high() {
         let tree = ViewNode::Line(vec![ViewNode::text("a"), ViewNode::text("b")]);
-        assert_eq!(height_of(&tree), 1);
+        assert_eq!(height_of(&tree, 10, &palette(), &FrameTable::default()), 1);
     }
 
     #[test]
@@ -509,6 +850,6 @@ mod tests {
             ViewNode::Row(vec![ViewNode::text("b"), ViewNode::text("c")]),
         ]);
         // 1 + 3 + max(1, 1)
-        assert_eq!(height_of(&tree), 5);
+        assert_eq!(height_of(&tree, 10, &palette(), &FrameTable::default()), 5);
     }
 }

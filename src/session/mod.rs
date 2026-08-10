@@ -17,11 +17,14 @@ pub mod spawn_contribution;
 pub mod task;
 pub mod theme_config;
 pub mod workspace_tree;
-// The plugin view tree is v2 surface: pure data, but it exists only to
-// describe what a plugin draws, so stable builds do not carry it.
-#[cfg(feature = "plugins")]
+// The view tree is **not** plugin-gated, though it began as plugin surface. It
+// is now the kernel's own rendering IR: `ui::info_panel` builds one and
+// `ui::plugin_pane` paints it, in every build. Gating it would mean the info
+// panel had two renderers selected by a Cargo feature — which is exactly the
+// divergence Phase 0's byte-identity criterion exists to prevent. Neither module
+// references `mlua` or `crate::plugin`, so carrying them costs a stable build no
+// dependency (see `docs/ARCHITECTURE.md` ADR-26).
 pub mod motion;
-#[cfg(feature = "plugins")]
 pub mod view_tree;
 
 pub use agent_def::{AgentDef, AgentRegistry};
