@@ -486,6 +486,10 @@ jobs:
       - fmt
       - clippy
       - nextest
+      # The v2 plugin host's own leg. MIGRATION.md Phase 0 asks for it
+      # "required rather than advisory" — without it here the job can fail red
+      # while the gate still reports green, so a plugins-only break merges.
+      - plugins
       - acceptance
       - architecture
       - windows-clippy
