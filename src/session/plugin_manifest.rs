@@ -155,6 +155,140 @@ fn default_true() -> bool {
     true
 }
 
+/// What kind of value a command argument carries.
+///
+/// Three scalars, and no container. Each extra type is a validation rule, a
+/// JSON-Schema mapping, a command-line coercion and a Lua conversion that must
+/// agree in four places forever, and a structured argument removes the reason
+/// flags exist — a caller that wants a shape passes the whole argument object
+/// as JSON, and a command that needs one takes a string and parses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArgType {
+    /// Any text.
+    String,
+    /// A signed integer.
+    Integer,
+    /// `true` or `false`.
+    Boolean,
+}
+
+impl ArgType {
+    /// The wire name used in a manifest, which is also the JSON Schema type.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ArgType::String => "string",
+            ArgType::Integer => "integer",
+            ArgType::Boolean => "boolean",
+        }
+    }
+
+    /// Every type the host recognizes, for error messages.
+    pub fn all() -> &'static [ArgType] {
+        &[ArgType::String, ArgType::Integer, ArgType::Boolean]
+    }
+}
+
+impl fmt::Display for ArgType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Which piece of the caller's injected identity fills an argument.
+///
+/// Thurbox injects `THURBOX_SESSION` and `THURBOX_TASK` into every session it
+/// spawns, so an agent invoking a command already proves what it is. This is
+/// how that reaches an argument: the agent operates thurbox in terms of what it
+/// wants rather than ids it would have to scrape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IdentityDefault {
+    /// The session the caller is running inside.
+    Session,
+    /// The task that spawned the caller's session.
+    Task,
+}
+
+impl IdentityDefault {
+    /// The wire name used in a manifest.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IdentityDefault::Session => "session",
+            IdentityDefault::Task => "task",
+        }
+    }
+
+    /// Every source the host recognizes, for error messages.
+    pub fn all() -> &'static [IdentityDefault] {
+        &[IdentityDefault::Session, IdentityDefault::Task]
+    }
+}
+
+impl fmt::Display for IdentityDefault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Whether a caller running inside a thurbox session may invoke a command.
+///
+/// Two values, not three: the design's middle `confirm` policy queues a prompt
+/// in the TUI and blocks the invocation until a human answers, which needs a
+/// cross-process request/answer channel that does not exist. Until it does,
+/// accepting the word would either run unprompted or always fail — so it is a
+/// manifest error naming what exists instead.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentPolicy {
+    /// Runs immediately for any caller.
+    #[default]
+    Allow,
+    /// User-only: refused when invoked from inside a session.
+    Deny,
+}
+
+impl AgentPolicy {
+    /// The wire name used in a manifest.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentPolicy::Allow => "allow",
+            AgentPolicy::Deny => "deny",
+        }
+    }
+
+    /// Every policy the host implements, for error messages.
+    pub fn all() -> &'static [AgentPolicy] {
+        &[AgentPolicy::Allow, AgentPolicy::Deny]
+    }
+}
+
+impl fmt::Display for AgentPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One typed argument of a command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandArgDecl {
+    /// Unique within its command. An identifier, because it is typed as a flag.
+    pub name: String,
+    /// What kind of value it carries.
+    #[serde(rename = "type")]
+    pub ty: ArgType,
+    /// Whether an invocation must supply it.
+    #[serde(default)]
+    pub required: bool,
+    /// One-line documentation, surfaced in the argument schema.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Fill from the caller's identity when the invocation omits it.
+    #[serde(default)]
+    pub default_from: Option<IdentityDefault>,
+}
+
 /// A command a plugin contributes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -164,6 +298,64 @@ pub struct CommandDecl {
     /// Human-readable title. Defaults to the id when absent.
     #[serde(default)]
     pub title: Option<String>,
+    /// Longer description, surfaced by `thurbox-cli command describe`.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Typed arguments, in declaration order.
+    #[serde(default)]
+    pub args: Vec<CommandArgDecl>,
+    /// Whether a caller running inside a session may invoke it.
+    ///
+    /// Defaults to true: a command no surface can reach is useless, and the
+    /// capability set — not this flag — is what bounds what a command can do.
+    #[serde(default = "default_true")]
+    pub agent_callable: bool,
+    /// The caller policy for an invocation from inside a session.
+    #[serde(default)]
+    pub agent_policy: AgentPolicy,
+}
+
+impl CommandDecl {
+    /// Title for a command, falling back to its id.
+    pub fn display_title(&self) -> &str {
+        self.title.as_deref().unwrap_or(&self.id)
+    }
+
+    /// Check the rules serde cannot express about this command's arguments.
+    fn validate_args(&self) -> Result<(), ManifestErrorKind> {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for arg in &self.args {
+            validate_identifier(&arg.name).map_err(|reason| ManifestErrorKind::Identifier {
+                field: "command argument",
+                value: arg.name.clone(),
+                reason,
+            })?;
+            if RESERVED_ARG_NAMES.contains(&arg.name.as_str()) {
+                return Err(ManifestErrorKind::ReservedArgName {
+                    command: self.id.clone(),
+                    arg: arg.name.clone(),
+                });
+            }
+            if !seen.insert(arg.name.as_str()) {
+                return Err(ManifestErrorKind::DuplicateArg {
+                    command: self.id.clone(),
+                    arg: arg.name.clone(),
+                });
+            }
+            // An identity default carries a session or task id, so a non-string
+            // argument could not hold what the host would put there. Caught
+            // here, where the error names its own fix, rather than at an
+            // invocation that silently ignored the declaration.
+            if arg.default_from.is_some() && arg.ty != ArgType::String {
+                return Err(ManifestErrorKind::IdentityDefaultType {
+                    command: self.id.clone(),
+                    arg: arg.name.clone(),
+                    ty: arg.ty,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A `thurbox-cli` verb a plugin contributes.
@@ -282,6 +474,7 @@ pub struct PluginManifest {
 /// depending on dispatch order, so the collision is refused at manifest
 /// validation instead — the kernel's surface is not negotiable.
 pub const RESERVED_CLI_VERBS: &[&str] = &[
+    "command",
     "editor",
     "session",
     "automation",
@@ -300,6 +493,16 @@ pub const RESERVED_CLI_VERBS: &[&str] = &[
     "plugin",
     "help",
 ];
+
+/// Command argument names `thurbox-cli` cannot deliver.
+///
+/// These are its global output-format flags. They are declared `global = true`,
+/// so clap matches `--json` / `--pretty` / `--text` before a plugin command's
+/// arguments start collecting — an argument by one of these names would never
+/// receive its value however the user typed it. Refused at validation for the
+/// same reason a reserved CLI verb is: a declaration the host could not honour
+/// should fail where the error names its own fix.
+pub const RESERVED_ARG_NAMES: &[&str] = &["json", "pretty", "text"];
 
 impl PluginManifest {
     /// The capabilities one half is granted: the shared set plus that half's.
@@ -359,6 +562,30 @@ pub enum ManifestErrorKind {
         kind: &'static str,
         /// The id declared twice.
         id: String,
+    },
+    /// One command declares the same argument name twice.
+    DuplicateArg {
+        /// The command declaring it.
+        command: String,
+        /// The repeated argument name.
+        arg: String,
+    },
+    /// An argument name is one `thurbox-cli` claims as a global flag.
+    ReservedArgName {
+        /// The command declaring it.
+        command: String,
+        /// The offending argument name.
+        arg: String,
+    },
+    /// An argument asks to be filled from the caller's identity but is not a
+    /// string, so the id that would fill it could never be represented.
+    IdentityDefaultType {
+        /// The command declaring it.
+        command: String,
+        /// The offending argument.
+        arg: String,
+        /// The type it declared.
+        ty: ArgType,
     },
     /// A CLI verb would shadow a kernel subcommand.
     ReservedCliVerb {
@@ -436,6 +663,20 @@ impl fmt::Display for ManifestError {
             ManifestErrorKind::DuplicateId { kind, id } => {
                 write!(f, "duplicate {kind} id `{id}`")
             }
+            ManifestErrorKind::DuplicateArg { command, arg } => {
+                write!(f, "command `{command}` declares argument `{arg}` twice")
+            }
+            ManifestErrorKind::ReservedArgName { command, arg } => write!(
+                f,
+                "command `{command}` argument `{arg}` collides with the global \
+                 `--{arg}` output flag, which thurbox-cli consumes first"
+            ),
+            ManifestErrorKind::IdentityDefaultType { command, arg, ty } => write!(
+                f,
+                "command `{command}` argument `{arg}` is `{ty}`, but an identity \
+                 default fills an id, so it is only allowed on `{}`",
+                ArgType::String
+            ),
             ManifestErrorKind::ReservedCliVerb { verb } => {
                 write!(f, "cli verb `{verb}` is reserved by thurbox itself")
             }
@@ -560,6 +801,10 @@ impl PluginManifest {
         check_ids("pane", self.panes.iter().map(|p| p.id.as_str()))?;
         check_ids("command", self.commands.iter().map(|c| c.id.as_str()))?;
         check_ids("keybinding", self.keybindings.iter().map(|k| k.id.as_str()))?;
+
+        for command in &self.commands {
+            command.validate_args()?;
+        }
 
         Ok(())
     }
@@ -1119,5 +1364,252 @@ mod tests {
     fn error_display_names_the_path() {
         let e = parse("api_version = 1").expect_err("invalid");
         assert!(e.to_string().starts_with("/plugins/demo/plugin.toml: "));
+    }
+
+    #[test]
+    fn a_fully_specified_command_validates() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            [[commands]]
+            id = "note"
+            title = "Attach a note"
+            description = "Attach a note to the calling session"
+            agent_callable = true
+            agent_policy = "deny"
+            [[commands.args]]
+            name = "body"
+            type = "string"
+            required = true
+            description = "the note body"
+            [[commands.args]]
+            name = "session"
+            type = "string"
+            default_from = "session"
+        "#;
+        let m = parse(text).expect("valid");
+        let c = &m.commands[0];
+        assert_eq!(c.display_title(), "Attach a note");
+        assert_eq!(
+            c.description.as_deref(),
+            Some("Attach a note to the calling session")
+        );
+        assert_eq!(c.agent_policy, AgentPolicy::Deny);
+        assert!(c.agent_callable);
+        assert_eq!(c.args.len(), 2);
+        assert_eq!(c.args[0].ty, ArgType::String);
+        assert!(c.args[0].required);
+        assert!(!c.args[1].required);
+        assert_eq!(c.args[1].default_from, Some(IdentityDefault::Session));
+    }
+
+    #[test]
+    fn a_minimal_command_is_agent_callable_and_allowed() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            [[commands]]
+            id = "refresh"
+        "#;
+        let c = &parse(text).expect("valid").commands[0];
+        // The capability set bounds what a command can do; this flag only
+        // bounds who may ask, so defaulting it closed would hide every command
+        // from the surface it exists for.
+        assert!(c.agent_callable);
+        assert_eq!(c.agent_policy, AgentPolicy::Allow);
+        assert_eq!(c.display_title(), "refresh");
+        assert!(c.args.is_empty());
+    }
+
+    #[test]
+    fn an_unimplemented_policy_is_rejected_naming_the_ones_that_exist() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            [[commands]]
+            id = "wipe"
+            agent_policy = "confirm"
+        "#;
+        let e = parse(text).expect_err("confirm is not implemented");
+        let msg = match e.kind {
+            ManifestErrorKind::Syntax(m) => m,
+            other => panic!("expected a syntax error, got {other:?}"),
+        };
+        assert!(msg.contains("confirm"), "{msg}");
+        for policy in AgentPolicy::all() {
+            assert!(msg.contains(policy.as_str()), "{msg} should name {policy}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_argument_type_is_rejected_naming_the_ones_that_exist() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            [[commands]]
+            id = "note"
+            [[commands.args]]
+            name = "tags"
+            type = "array"
+        "#;
+        let e = parse(text).expect_err("array is not a type");
+        let msg = match e.kind {
+            ManifestErrorKind::Syntax(m) => m,
+            other => panic!("expected a syntax error, got {other:?}"),
+        };
+        for ty in ArgType::all() {
+            assert!(msg.contains(ty.as_str()), "{msg} should name {ty}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_identity_source_is_rejected_naming_the_ones_that_exist() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            [[commands]]
+            id = "note"
+            [[commands.args]]
+            name = "who"
+            type = "string"
+            default_from = "user"
+        "#;
+        let e = parse(text).expect_err("there is no user identity");
+        let msg = match e.kind {
+            ManifestErrorKind::Syntax(m) => m,
+            other => panic!("expected a syntax error, got {other:?}"),
+        };
+        for source in IdentityDefault::all() {
+            assert!(msg.contains(source.as_str()), "{msg} should name {source}");
+        }
+    }
+
+    #[test]
+    fn a_repeated_argument_name_is_rejected() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            [[commands]]
+            id = "note"
+            [[commands.args]]
+            name = "body"
+            type = "string"
+            [[commands.args]]
+            name = "body"
+            type = "integer"
+        "#;
+        let e = parse(text).expect_err("duplicate argument");
+        assert_eq!(
+            e.kind,
+            ManifestErrorKind::DuplicateArg {
+                command: "note".to_string(),
+                arg: "body".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_malformed_argument_name_is_rejected() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            [[commands]]
+            id = "note"
+            [[commands.args]]
+            name = "Body"
+            type = "string"
+        "#;
+        let e = parse(text).expect_err("an argument name is an identifier");
+        match e.kind {
+            ManifestErrorKind::Identifier {
+                field: "command argument",
+                ref value,
+                reason,
+            } => {
+                assert_eq!(value, "Body");
+                assert_eq!(reason, IdentifierProblem::BadFirstChar);
+            }
+            other => panic!("expected an identifier error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_identity_default_on_a_non_string_is_rejected() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            [[commands]]
+            id = "note"
+            [[commands.args]]
+            name = "session"
+            type = "integer"
+            default_from = "session"
+        "#;
+        let e = parse(text).expect_err("an id is not an integer");
+        assert_eq!(
+            e.kind,
+            ManifestErrorKind::IdentityDefaultType {
+                command: "note".to_string(),
+                arg: "session".to_string(),
+                ty: ArgType::Integer,
+            }
+        );
+        assert!(e.to_string().contains("string"), "{e}");
+    }
+
+    #[test]
+    fn an_argument_named_after_a_global_output_flag_is_rejected() {
+        // clap matches the global `--json`/`--pretty`/`--text` before a
+        // command's arguments collect, so such an argument could never be
+        // delivered however the user typed it.
+        for name in RESERVED_ARG_NAMES {
+            let text = format!(
+                "name = \"demo\"\napi_version = 1\n[[commands]]\nid = \"note\"\n\
+                 [[commands.args]]\nname = \"{name}\"\ntype = \"string\"\n"
+            );
+            let e = parse(&text).unwrap_err();
+            assert_eq!(
+                e.kind,
+                ManifestErrorKind::ReservedArgName {
+                    command: "note".to_string(),
+                    arg: (*name).to_string(),
+                },
+                "`{name}` must be refused"
+            );
+            assert!(e.to_string().contains(&format!("--{name}")), "{e}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_key_inside_a_command_is_rejected() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            [[commands]]
+            id = "note"
+            returns = "object"
+        "#;
+        // `returns` is in the design but nothing would validate it, so it is
+        // not a manifest key: an author gets an error rather than a promise the
+        // host does not keep.
+        let e = parse(text).expect_err("returns is not a command key");
+        assert!(matches!(e.kind, ManifestErrorKind::Syntax(ref m) if m.contains("returns")));
+    }
+
+    #[test]
+    fn the_command_subcommand_is_reserved_from_plugin_verbs() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            [[cli]]
+            name = "command"
+        "#;
+        let e = parse(text).expect_err("the kernel dispatches `command`");
+        assert_eq!(
+            e.kind,
+            ManifestErrorKind::ReservedCliVerb {
+                verb: "command".to_string(),
+            }
+        );
     }
 }
