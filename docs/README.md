@@ -13,6 +13,7 @@ event loop), see [`CLAUDE.md`](../CLAUDE.md).
 | [FEATURES.md](FEATURES.md) | Feature-level design | Altering keybindings, lifecycle, layout, or UX |
 | [ORCHESTRATION.md](ORCHESTRATION.md) | The control-plane pattern for running sessions across many repos | Changing the session/message/extension surface the pattern relies on |
 | [CONFIG.md](CONFIG.md) | Every config file / env var / DB setting in one place | Adding/changing a config file, env var, or DB setting |
+| [PHASE4-PANE-READINESS.md](PHASE4-PANE-READINESS.md) | Audit of what a bundled plugin pane still cannot express, traced to the code | Closing one of its gaps, or finding a new one while porting a pane |
 
 ## Keeping Docs Current
 
