@@ -22,6 +22,7 @@ use std::time::Duration;
 use mlua::{Lua, LuaOptions, StdLib, Table, Value, VmState};
 
 use crate::plugin::capabilities::{build_module_table, GrantedCapabilities};
+use crate::session::plugin_command::{ArgValue, BoundArgs};
 use crate::session::view_tree::ViewNode;
 
 /// File a plugin's view half is loaded from, at the root of its directory.
@@ -414,6 +415,72 @@ impl PluginVm {
         })
     }
 
+    /// Run one of the plugin's declared commands.
+    ///
+    /// Dispatched through a `commands` table keyed by the manifest-local id
+    /// rather than a single `run(id, args)` hook: the table is type-checkable in
+    /// `thurbox.d.luau`, makes "declared but not implemented" a precise error
+    /// naming the command, and spares every plugin a dispatch ladder.
+    fn run_command(
+        &self,
+        entry: &str,
+        args: &BoundArgs,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        let module: Table = self
+            .lua
+            .named_registry_value(MODULE_REGISTRY_KEY)
+            .map_err(|e| classify(&e))?;
+
+        let commands: Value = module.get("commands").map_err(|e| classify(&e))?;
+        let table = match commands {
+            Value::Table(t) => t,
+            Value::Nil => {
+                return Err(RuntimeError::Runtime(
+                    "plugin declares commands but exports no `commands` table".to_string(),
+                ))
+            }
+            other => {
+                return Err(RuntimeError::BadEntryValue(format!(
+                    "commands = {}",
+                    other.type_name()
+                )))
+            }
+        };
+
+        let handler: Value = table.get(entry).map_err(|e| classify(&e))?;
+        let func = match handler {
+            Value::Function(f) => f,
+            _ => {
+                return Err(RuntimeError::Runtime(format!(
+                    "plugin's `commands` table has no handler for `{entry}`"
+                )))
+            }
+        };
+
+        let lua_args = self.lua.create_table().map_err(|e| classify(&e))?;
+        for (name, value) in args {
+            let converted = match value {
+                ArgValue::String(s) => Value::String(
+                    self.lua
+                        .create_string(s.as_str())
+                        .map_err(|e| classify(&e))?,
+                ),
+                ArgValue::Integer(i) => Value::Integer(*i),
+                ArgValue::Boolean(b) => Value::Boolean(*b),
+            };
+            lua_args
+                .set(name.as_str(), converted)
+                .map_err(|e| classify(&e))?;
+        }
+
+        self.arm();
+        let out: Value = func.call(lua_args).map_err(|e| classify(&e))?;
+        // Converted here, on the plugin's own thread, so a pathological
+        // structure is walked inside the VM's bounds — the same reason the view
+        // tree is converted here.
+        crate::plugin::commands::to_json(&out).map_err(|e| RuntimeError::Runtime(format!("{e}")))
+    }
+
     /// Evaluate a chunk and render its result.
     ///
     /// A host-side diagnostic: it is how the lifecycle's tests observe a VM's
@@ -485,6 +552,11 @@ enum Request {
     Key(String, String, Sender<Result<bool, RuntimeError>>),
     Named(String, Sender<Result<bool, RuntimeError>>),
     Verb(String, Vec<String>, Sender<Result<String, RuntimeError>>),
+    Command(
+        String,
+        BoundArgs,
+        Sender<Result<serde_json::Value, RuntimeError>>,
+    ),
     Stop(Sender<()>),
 }
 
@@ -614,6 +686,17 @@ impl PluginThread {
         self.round_trip(move |reply| Request::Verb(owned_verb, owned_args, reply))
     }
 
+    /// Run one of the plugin's declared commands.
+    pub fn run_command(
+        &self,
+        entry: &str,
+        args: &BoundArgs,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        let owned_entry = entry.to_string();
+        let owned_args = args.clone();
+        self.round_trip(move |reply| Request::Command(owned_entry, owned_args, reply))
+    }
+
     /// Call a named no-argument function on the plugin's module.
     pub fn call_named(&self, name: &str) -> Result<bool, RuntimeError> {
         let owned = name.to_string();
@@ -738,6 +821,16 @@ fn serve(vm: PluginVm, requests: Receiver<Request>) {
             Request::Verb(verb, args, reply) => {
                 let result = match vm.as_ref() {
                     Some(v) => v.run_verb(&verb, &args),
+                    None => Err(RuntimeError::Terminated),
+                };
+                if result.as_ref().err().is_some_and(RuntimeError::is_fatal) {
+                    vm = None;
+                }
+                let _ = reply.send(result);
+            }
+            Request::Command(entry, args, reply) => {
+                let result = match vm.as_ref() {
+                    Some(v) => v.run_command(&entry, &args),
                     None => Err(RuntimeError::Terminated),
                 };
                 if result.as_ref().err().is_some_and(RuntimeError::is_fatal) {

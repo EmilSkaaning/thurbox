@@ -192,6 +192,24 @@ impl ServiceHost {
             .run_verb(verb, args)
     }
 
+    /// Run one of a plugin's declared commands against its service.
+    ///
+    /// Commands go to the service half for the reason CLI verbs do: a command an
+    /// agent should be able to drive has to work with the TUI closed, and the
+    /// view half has no host without one.
+    pub fn run_command(
+        &self,
+        plugin: &str,
+        entry: &str,
+        args: &crate::session::plugin_command::BoundArgs,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        self.running
+            .get(plugin)
+            .ok_or(RuntimeError::ThreadGone)?
+            .thread
+            .run_command(entry, args)
+    }
+
     /// Evaluate a chunk inside a running service's VM (host-side diagnostic).
     pub fn eval(&self, plugin: &str, source: &str) -> Result<String, RuntimeError> {
         self.running
@@ -499,6 +517,152 @@ mod tests {
                 .unwrap(),
             "nil"
         );
+    }
+
+    /// Start a service-only plugin and run one of its commands.
+    fn run_command(
+        root: &Path,
+        name: &str,
+        entry: &str,
+        args: &crate::session::plugin_command::BoundArgs,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        let lock = FakeLock::named("cli");
+        let mut host = ServiceHost::new(bounds());
+        host.start(&discovered(root, name), &lock, None)
+            .expect("service starts");
+        let result = host.run_command(name, entry, args);
+        host.stop_all(&lock);
+        result
+    }
+
+    #[test]
+    fn a_command_runs_against_the_service_half_and_returns() {
+        use crate::session::plugin_command::{ArgValue, BoundArgs};
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(
+            tmp.path(),
+            "notes",
+            "[service]\n[[commands]]\nid = \"add\"\n",
+            None,
+            Some(
+                "return { commands = { add = function(args) \
+                 return { id = args.text, weight = args.weight, pinned = args.pinned } \
+                 end } }",
+            ),
+        );
+
+        let args = BoundArgs::from([
+            ("text".to_string(), ArgValue::String("hi".to_string())),
+            ("weight".to_string(), ArgValue::Integer(3)),
+            ("pinned".to_string(), ArgValue::Boolean(true)),
+        ]);
+        // Each argument arrives with its declared type, not as a string.
+        assert_eq!(
+            run_command(tmp.path(), "notes", "add", &args).expect("runs"),
+            serde_json::json!({ "id": "hi", "weight": 3, "pinned": true })
+        );
+    }
+
+    #[test]
+    fn a_command_returning_nothing_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(
+            tmp.path(),
+            "quiet",
+            "[service]\n[[commands]]\nid = \"go\"\n",
+            None,
+            Some("return { commands = { go = function() end } }"),
+        );
+        assert_eq!(
+            run_command(
+                tmp.path(),
+                "quiet",
+                "go",
+                &crate::session::plugin_command::BoundArgs::new()
+            ),
+            Ok(serde_json::Value::Null)
+        );
+    }
+
+    #[test]
+    fn a_declared_but_unimplemented_command_names_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(
+            tmp.path(),
+            "half",
+            "[service]\n[[commands]]\nid = \"missing\"\n",
+            None,
+            Some("return { commands = { other = function() end } }"),
+        );
+        let err = run_command(
+            tmp.path(),
+            "half",
+            "missing",
+            &crate::session::plugin_command::BoundArgs::new(),
+        )
+        .expect_err("no handler");
+        assert!(err.to_string().contains("missing"), "{err}");
+    }
+
+    #[test]
+    fn a_service_exporting_no_commands_table_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(
+            tmp.path(),
+            "bare",
+            "[service]\n[[commands]]\nid = \"go\"\n",
+            None,
+            Some("return {}"),
+        );
+        let err = run_command(
+            tmp.path(),
+            "bare",
+            "go",
+            &crate::session::plugin_command::BoundArgs::new(),
+        )
+        .expect_err("nothing to dispatch to");
+        assert!(err.to_string().contains("commands"), "{err}");
+    }
+
+    #[test]
+    fn a_failing_command_reports_its_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(
+            tmp.path(),
+            "angry",
+            "[service]\n[[commands]]\nid = \"go\"\n",
+            None,
+            Some("return { commands = { go = function() error('kaboom') end } }"),
+        );
+        let err = run_command(
+            tmp.path(),
+            "angry",
+            "go",
+            &crate::session::plugin_command::BoundArgs::new(),
+        )
+        .expect_err("the plugin threw");
+        assert!(err.to_string().contains("kaboom"), "{err}");
+    }
+
+    #[test]
+    fn an_unrepresentable_result_is_refused_not_silently_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(
+            tmp.path(),
+            "closure",
+            "[service]\n[[commands]]\nid = \"go\"\n",
+            None,
+            Some("return { commands = { go = function() return function() end end } }"),
+        );
+        let err = run_command(
+            tmp.path(),
+            "closure",
+            "go",
+            &crate::session::plugin_command::BoundArgs::new(),
+        )
+        .expect_err("a closure is not JSON");
+        assert!(err.to_string().contains("function"), "{err}");
     }
 
     #[test]

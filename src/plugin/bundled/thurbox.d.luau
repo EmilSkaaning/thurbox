@@ -68,6 +68,27 @@ export type Thurbox = {
 export type Plugin = {
     init: (() -> ())?,
     render: ((paneId: string) -> ViewNode)?,
+    onKey: ((paneId: string, key: string) -> boolean)?,
+}
+
+-- A command's bound arguments: one entry per argument the manifest declared,
+-- already validated and carrying its declared type (string / number / boolean).
+-- An optional argument the caller omitted is simply absent.
+export type CommandArgs = { [string]: any }
+
+-- What a plugin's `service.luau` returns — the headless half, hosted with or
+-- without a TUI.
+--
+-- `commands` is keyed by the *local* command id from the manifest (thurbox
+-- namespaces it as `<plugin>.<id>` everywhere a user or an agent sees it). A
+-- declared command with no entry here is an error naming it, not a silent
+-- no-op. The returned value is converted to JSON, so return scalars, arrays, or
+-- tables of them — not a function.
+export type Service = {
+    init: (() -> ())?,
+    tick: (() -> ())?,
+    run: ((verb: string, args: { string }) -> any)?,
+    commands: { [string]: (args: CommandArgs) -> any }?,
 }
 
 -- The analyser only needs the *shape*; the real table is built by the host at
