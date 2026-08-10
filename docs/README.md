@@ -14,6 +14,7 @@ event loop), see [`CLAUDE.md`](../CLAUDE.md).
 | [ORCHESTRATION.md](ORCHESTRATION.md) | The control-plane pattern for running sessions across many repos | Changing the session/message/extension surface the pattern relies on |
 | [CONFIG.md](CONFIG.md) | Every config file / env var / DB setting in one place | Adding/changing a config file, env var, or DB setting |
 | [PHASE4-PANE-READINESS.md](PHASE4-PANE-READINESS.md) | Audit of what a bundled plugin pane still cannot express, traced to the code | Closing one of its gaps, or finding a new one while porting a pane |
+| [PHASE6-TEARDOWN-READINESS.md](PHASE6-TEARDOWN-READINESS.md) | What the v2 teardown may not delete yet, and the worklist that unblocks it | Landing a replacement the teardown waits on (`tests/teardown_gate.rs` will say so) |
 
 ## Keeping Docs Current
 
