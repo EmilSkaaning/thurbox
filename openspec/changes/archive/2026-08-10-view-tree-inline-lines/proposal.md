@@ -3,7 +3,7 @@
 ## Why
 
 The session-list frame-budget spike (recorded as `docs/SPIKE-SESSION-LIST.md`
-on the branch that ran it, `worktree-wf_7f714cee-4bf-1`) cleared every
+recorded in `docs/SPIKE-SESSION-LIST.md`) cleared every
 protocol bar and then found a blocker that has nothing to do with cost: **the
 node catalog cannot express a single line of text carrying more than one
 style.**
