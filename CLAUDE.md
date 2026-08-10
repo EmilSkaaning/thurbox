@@ -335,9 +335,19 @@ npm run fmt:website                  # Auto-fix formatting (Prettier)
 
 ```bash
 cargo test --test architecture_rules                      # Arch rules
+cargo test --test teardown_gate                           # v2 teardown inventory
 cargo deny check advisories                               # Advisories
 cargo deny check bans licenses sources                    # Dep policy
 ```
+
+`teardown_gate` is the allowlist for **deletions** (ADR-23): it records what
+v2's final phase removes — the v1 extension system and each native pane — next
+to the v1 capabilities that must not be lost, and refuses a deletion whose
+replacement does not exist yet. Each capability's verdict is re-derived from the
+source, so implementing a replacement makes the gate ask you to re-verdict its
+row rather than letting a stale table wave the deletion through. Today it blocks
+every unit: the built-in hooks wiring is still delivered by the installer the
+teardown deletes, and no pane has a bundled plugin to become the default.
 
 ## Release Process
 

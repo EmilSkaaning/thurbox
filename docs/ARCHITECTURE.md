@@ -837,3 +837,44 @@ readability gain.
   coupling; behavior stays `impl App`, only pure logic moves.
 - *One big relocation PR* — unreviewable and merge-hostile; the value is
   in independently-reviewable, test-green increments.
+
+---
+
+## ADR-23: The v2 teardown inventory is a test, not a document
+
+**Choice**: What v2's final phase deletes — the v1 extension system
+(ADR-20, ADR-21) and each native pane — is recorded in
+`tests/teardown_gate.rs` as two tables: one row per v1 capability that
+must survive, carrying the v2 home it is promised, a recorded verdict on
+whether that home exists, and a **probe** that re-derives the verdict from
+the source tree; and one row per deletion unit, listing the paths and
+in-source markers it comprises plus the capability ids that must be ready
+first. A listed path or marker may not disappear while any of its unit's
+requirements is unready, and a recorded verdict that disagrees with its
+probe fails.
+
+**Why**: the teardown's dangerous failure is silent. A half-deleted pane
+is caught by the compiler; a *cleanly* deleted pane, or a deleted built-in
+hooks installer, compiles and ships — and what stops working is agent
+status reporting (`working`/`blocked`/`done`) for every agent, which is
+core product behavior delivered *by* the installer the same teardown
+removes. A readiness verdict is also a fact about a build, and a fact in a
+markdown table expires without telling anyone: probing the tree means
+implementing a replacement forces the row that depends on it to be
+revisited, so the inventory cannot decay into a rubber stamp. The gate is
+a source-level check, so it needs no plugin feature and means the same
+thing in both Cargo configurations — the same allowlist shape
+`tests/architecture_rules.rs` already uses.
+
+**Rejected**:
+
+- *Prose in the migration plan* — the analysis lives there either way; the
+  gate is what survives contact with a session that reads a phase label
+  first and starts deleting.
+- *Per-file requirement mapping* (e.g. `json_merge.rs` needs only the
+  hooks and config-dir rows) — defensible, but it is a judgement made on
+  behalf of whoever does the deletion. The extension system is deleted as
+  one unit, so the unit requires the whole set and a narrower claim has to
+  be argued in the table, with its reasons attached.
+- *A checklist in the PR template* — unenforced, and invisible to the
+  agent sessions that do most of this work.
