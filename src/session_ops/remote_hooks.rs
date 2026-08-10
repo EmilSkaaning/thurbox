@@ -521,6 +521,16 @@ mod tests {
         let def: crate::session::ExtensionDef =
             toml::from_str(builtin_hooks::MANIFEST).expect("manifest parses");
 
+        // The payload the *local* install writes for this wiring, resolved by the
+        // `source` filename the manifest names. Comparing it against the remote
+        // table's constant is what stops the two paths shipping different hook
+        // content to the same destination — a divergence whose only symptom is a
+        // remote session's status dot never moving.
+        let local_payload = |source: &str| -> &'static str {
+            builtin_hooks::embedded_asset(source)
+                .unwrap_or_else(|| panic!("manifest names `{source}`, which is not embedded"))
+        };
+
         let agent_for_path = |path: &str| -> &'static str {
             if path.contains(".codex") {
                 "codex"
@@ -552,6 +562,11 @@ mod tests {
                 m.requires_dir.as_deref(),
                 "{agent} requires_dir drifted"
             );
+            assert_eq!(
+                asset.payload,
+                local_payload(m.source_path()),
+                "{agent} payload drifted from the manifest's source"
+            );
             covered += 1;
         }
         for f in &def.external_files {
@@ -564,10 +579,22 @@ mod tests {
                 f.requires_dir.as_deref(),
                 "{agent} requires_dir drifted"
             );
+            assert_eq!(
+                asset.payload,
+                local_payload(f.source_path()),
+                "{agent} payload drifted from the manifest's source"
+            );
             covered += 1;
         }
         // Every table entry is reachable from the manifest (no orphan assets).
         assert_eq!(covered, 7, "manifest wiring count changed — sync the table");
+        // claude's payload lands under the extension home and reaches a host
+        // through its `--settings` arg rather than this table, but it is the same
+        // kind of promise: nothing in the manifest may name a file the binary does
+        // not carry.
+        for file in &def.files {
+            let _ = local_payload(file.source_path());
+        }
         // claude/aider stay arg-handled.
         assert!(remote_asset_for("claude").is_none());
         assert!(remote_asset_for("aider").is_none());

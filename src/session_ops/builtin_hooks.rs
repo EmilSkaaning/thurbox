@@ -35,6 +35,38 @@ pub(crate) const COPILOT_HOOKS: &str = include_str!("../../extensions/hooks/copi
 pub(crate) const PI_STATUS: &str = include_str!("../../extensions/hooks/pi-status.ts");
 pub(crate) const OMP_STATUS: &str = include_str!("../../extensions/hooks/omp-status.ts");
 
+/// Every embedded asset, as `(filename, contents)`.
+///
+/// The filename is what a manifest wiring names in its `source`, which makes this
+/// table the one place the two delivery paths meet: [`materialize_source`] writes
+/// these files for the local install, and `remote_hooks` ships the same constants
+/// to a host. Resolving a wiring's `source` through here is what lets a test
+/// assert the two halves carry byte-identical payloads
+/// (`remote_assets_stay_in_sync_with_embedded_manifest`) — without it, a manifest
+/// row repointed at another file would silently ship different hook content
+/// locally and remotely.
+pub(crate) const EMBEDDED_ASSETS: &[(&str, &str)] = &[
+    ("extension.toml", MANIFEST),
+    ("claude.json", CLAUDE_SETTINGS),
+    ("opencode-status.js", OPENCODE_PLUGIN),
+    ("antigravity-hooks.json", ANTIGRAVITY_HOOKS),
+    ("codex-hooks.json", CODEX_HOOKS),
+    ("vibe-hooks.toml", VIBE_HOOKS),
+    ("copilot-hooks.json", COPILOT_HOOKS),
+    ("pi-status.ts", PI_STATUS),
+    ("omp-status.ts", OMP_STATUS),
+];
+
+/// The embedded contents of `name`, or `None` when nothing ships under that
+/// filename.
+#[cfg(test)]
+pub(crate) fn embedded_asset(name: &str) -> Option<&'static str> {
+    EMBEDDED_ASSETS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, contents)| *contents)
+}
+
 /// Marker prefix of every thurbox-managed hook command; the state word
 /// (`working`/`blocked`/`done`/`idle`) follows it directly.
 const SIGNAL_MARKER: &str = "thurbox-cli session signal --state ";
@@ -152,18 +184,7 @@ fn materialize_source() -> Result<PathBuf, String> {
         .ok_or("cannot resolve builtin-extensions dir")?;
     let dir = base.join(HOOKS_EXTENSION_NAME);
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    let writes = [
-        ("extension.toml", MANIFEST),
-        ("claude.json", CLAUDE_SETTINGS),
-        ("opencode-status.js", OPENCODE_PLUGIN),
-        ("antigravity-hooks.json", ANTIGRAVITY_HOOKS),
-        ("codex-hooks.json", CODEX_HOOKS),
-        ("vibe-hooks.toml", VIBE_HOOKS),
-        ("copilot-hooks.json", COPILOT_HOOKS),
-        ("pi-status.ts", PI_STATUS),
-        ("omp-status.ts", OMP_STATUS),
-    ];
-    for (name, contents) in writes {
+    for (name, contents) in EMBEDDED_ASSETS.iter().copied() {
         let path = dir.join(name);
         // Skip the write when unchanged — this runs on every startup + 60s tick.
         if std::fs::read_to_string(&path).is_ok_and(|c| c == contents) {
