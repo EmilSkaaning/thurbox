@@ -100,6 +100,19 @@ pub enum ViewNode {
     },
     /// Children laid out left to right.
     Row(Vec<ViewNode>),
+    /// Children packed left to right on **one** row, each at its own intrinsic
+    /// width.
+    ///
+    /// The inline counterpart of [`ViewNode::Row`]: a row *divides* an area
+    /// into equal shares, a line *composes* a sentence out of runs. Both exist
+    /// because a `label: value` line — the shape most of thurbox's own panes
+    /// are built from — needs several styles on one row at natural widths,
+    /// which equal shares cannot give and a single [`ViewNode::Text`] cannot
+    /// style.
+    ///
+    /// Only children with an intrinsic width may appear here; see
+    /// [`ViewNode::is_inlineable`].
+    Line(Vec<ViewNode>),
     /// Children laid out top to bottom.
     Column(Vec<ViewNode>),
     /// Children laid out top to bottom, one per line — a column that reads as
@@ -137,7 +150,7 @@ impl ViewNode {
     /// A node's children, or an empty slice for a leaf.
     pub fn children(&self) -> &[ViewNode] {
         match self {
-            ViewNode::Row(c) | ViewNode::Column(c) | ViewNode::List(c) => c,
+            ViewNode::Row(c) | ViewNode::Line(c) | ViewNode::Column(c) | ViewNode::List(c) => c,
             // A motion's frames are its children: that is what makes them
             // count against the tree budget rather than escaping it.
             ViewNode::Motion { motion, .. } => motion.frames(),
@@ -162,6 +175,60 @@ impl ViewNode {
             .map(ViewNode::depth)
             .max()
             .unwrap_or(0)
+    }
+
+    /// Whether this node can be laid out inside a [`ViewNode::Line`].
+    ///
+    /// A line places each child at the width its content needs, so a child is
+    /// admissible exactly when its width follows from its content: a text run,
+    /// a nested line, or a motion whose every frame is itself inlineable. A
+    /// column, list, divider or spacer has no such width — a divider fills
+    /// whatever it is given and a spacer is vertical — so it is refused rather
+    /// than measured as zero and silently dropped.
+    ///
+    /// Asking the finished node, rather than threading an "inside a line" flag
+    /// through conversion, is what makes the rule hold through a motion frame:
+    /// frames are converted by the ordinary walk, which knows nothing about the
+    /// line above it. It also fails safe — a node kind added later is not
+    /// inlineable until someone says it is.
+    pub fn is_inlineable(&self) -> bool {
+        self.first_non_inlineable().is_none()
+    }
+
+    /// The kind of the first node in this subtree that cannot be laid out
+    /// inline, or `None` when the whole subtree can.
+    ///
+    /// Returns the *offending* kind rather than this node's own, so the error a
+    /// plugin author reads names the column they nested inside an animation
+    /// rather than the animation that carried it.
+    pub fn first_non_inlineable(&self) -> Option<&'static str> {
+        match self {
+            ViewNode::Text { .. } => None,
+            ViewNode::Line(children) => children.iter().find_map(ViewNode::first_non_inlineable),
+            ViewNode::Motion { motion, .. } => motion
+                .frames()
+                .iter()
+                .find_map(ViewNode::first_non_inlineable),
+            ViewNode::Row(_)
+            | ViewNode::Column(_)
+            | ViewNode::List(_)
+            | ViewNode::Divider
+            | ViewNode::Spacer { .. } => Some(self.kind_name()),
+        }
+    }
+
+    /// The node kind's wire name, for an error that has to name it.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            ViewNode::Text { .. } => "text",
+            ViewNode::Row(_) => "row",
+            ViewNode::Line(_) => "line",
+            ViewNode::Column(_) => "column",
+            ViewNode::List(_) => "list",
+            ViewNode::Divider => "divider",
+            ViewNode::Spacer { .. } => "spacer",
+            ViewNode::Motion { .. } => "motion",
+        }
     }
 
     /// Build a plain text node with no styling.
@@ -240,6 +307,89 @@ mod tests {
         let wrapped = ViewNode::Column(vec![motion]);
         assert_eq!(wrapped.node_count(), 6);
         assert_eq!(wrapped.depth(), 4);
+    }
+
+    /// A line's runs are ordinary children, so nothing about it lets a plugin
+    /// carry content past the tree budget.
+    #[test]
+    fn a_lines_runs_count_toward_the_tree_bounds() {
+        let line = ViewNode::Line(vec![
+            ViewNode::text("dot"),
+            ViewNode::text("name"),
+            ViewNode::Line(vec![ViewNode::text("nested")]),
+        ]);
+        // 1 line + 2 runs + (1 nested line + its run).
+        assert_eq!(line.node_count(), 5);
+        assert_eq!(line.depth(), 3);
+    }
+
+    #[test]
+    fn text_and_nested_lines_are_inlineable() {
+        assert!(ViewNode::text("run").is_inlineable());
+        assert!(ViewNode::Line(vec![]).is_inlineable());
+        assert!(ViewNode::Line(vec![ViewNode::text("a"), ViewNode::text("b")]).is_inlineable());
+    }
+
+    #[test]
+    fn nodes_without_an_intrinsic_width_are_not_inlineable() {
+        // Each of these would have to be measured against the area it is given
+        // rather than against its own content, which is what a line cannot do.
+        for node in [
+            ViewNode::Row(vec![]),
+            ViewNode::Column(vec![]),
+            ViewNode::List(vec![]),
+            ViewNode::Divider,
+            ViewNode::Spacer { lines: 1 },
+        ] {
+            assert!(!node.is_inlineable(), "{}", node.kind_name());
+            assert_eq!(node.first_non_inlineable(), Some(node.kind_name()));
+        }
+    }
+
+    #[test]
+    fn a_motion_is_inlineable_exactly_when_its_frames_are() {
+        let text_frames = ViewNode::Motion {
+            key: "k".to_string(),
+            keyed_by_id: true,
+            motion: super::super::motion::Motion::cycle(
+                vec![ViewNode::text("."), ViewNode::text("..")],
+                8,
+                true,
+            ),
+        };
+        assert!(text_frames.is_inlineable());
+
+        // The rule has to hold through a frame, or a plugin would reach a line
+        // with a column by wrapping it in an animation.
+        let column_frame = ViewNode::Motion {
+            key: "k".to_string(),
+            keyed_by_id: true,
+            motion: super::super::motion::Motion::cycle(
+                vec![
+                    ViewNode::text("."),
+                    ViewNode::Column(vec![ViewNode::text("..")]),
+                ],
+                8,
+                true,
+            ),
+        };
+        assert!(!column_frame.is_inlineable());
+        assert_eq!(
+            column_frame.first_non_inlineable(),
+            Some("column"),
+            "the error must name the column, not the motion carrying it"
+        );
+    }
+
+    #[test]
+    fn every_kind_names_itself() {
+        assert_eq!(ViewNode::text("x").kind_name(), "text");
+        assert_eq!(ViewNode::Line(vec![]).kind_name(), "line");
+        assert_eq!(ViewNode::Row(vec![]).kind_name(), "row");
+        assert_eq!(ViewNode::Column(vec![]).kind_name(), "column");
+        assert_eq!(ViewNode::List(vec![]).kind_name(), "list");
+        assert_eq!(ViewNode::Divider.kind_name(), "divider");
+        assert_eq!(ViewNode::Spacer { lines: 1 }.kind_name(), "spacer");
     }
 
     #[test]

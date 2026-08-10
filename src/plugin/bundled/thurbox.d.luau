@@ -31,6 +31,12 @@ export type Motion = {
 export type Ui = {
     text: (content: string | number, style: StyleToken?, bold: boolean?) -> ViewNode,
     row: (children: { ViewNode }?) -> ViewNode,
+    -- One row of runs, each at its own width — a `label: value` line. Unlike
+    -- `row`, which splits its area into equal shares, and unlike a single
+    -- `text`, which carries one style. Holds only `text`, `cycle`, or a nested
+    -- `line`; anything else is rejected, since its width would come from the
+    -- area rather than from its content. Overflow is clipped, not wrapped.
+    line: (children: { ViewNode }?) -> ViewNode,
     column: (children: { ViewNode }?) -> ViewNode,
     list: (children: { ViewNode }?) -> ViewNode,
     divider: () -> ViewNode,

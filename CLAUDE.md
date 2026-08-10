@@ -892,9 +892,20 @@ Plugins live in `~/.config/thurbox/plugins/<name>/` as a `plugin.toml` plus an
 `init.luau`; the bundled `hello` plugin is materialized to
 `~/.local/share/thurbox/builtin-plugins/`, and a user plugin of the same name
 overrides it). A plugin builds its pane from `require("@thurbox").ui`
-constructors (`text`/`row`/`column`/`list`/`divider`/`spacer`), styled by
+constructors (`text`/`row`/`line`/`column`/`list`/`divider`/`spacer`), styled by
 **theme token** (`accent`/`muted`/`danger`/`success`/`warning`) rather than by
-colour, so every plugin follows a theme switch. Pane **visibility is kernel
+colour, so every plugin follows a theme switch. `row` and `line` differ in who
+owns the widths: a `row` splits its area into **equal shares** (a plugin cannot
+request a width, so the kernel never arbitrates between requests), while a
+`line` packs its runs on one row at their **own** display width — the
+`label: value` shape thurbox's own panes are built from, which equal shares
+truncate and a single `text` can only draw in one colour. A line holds only
+nodes whose width follows from their content (`text`, a `cycle`, a nested
+`line`, checked recursively through motion frames); anything else is a named
+conversion error, and a motion inside a line reserves its **widest** frame so
+an animation never shoves the rest of the row sideways. Overflow is clipped, not
+wrapped — `height_of` takes no width, and a wrapping node would be the first
+whose height depended on one. Pane **visibility is kernel
 state**: the manifest seeds it (`default_visible`), `F10`
 (rebindable `TogglePluginPane`) toggles it, and the choice is persisted per
 pane in `metadata` so it survives a restart — unlike v1's panel toggles, which

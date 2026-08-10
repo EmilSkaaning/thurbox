@@ -12,6 +12,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
+use unicode_width::UnicodeWidthStr;
 
 use crate::session::motion::FrameTable;
 use crate::session::theme_config::ThemePalette;
@@ -57,13 +58,84 @@ fn text_style(style: TextStyle, palette: &ThemePalette) -> Style {
 /// the blank row a short frame leaves.
 fn height_of(node: &ViewNode) -> u16 {
     match node {
-        ViewNode::Text { .. } | ViewNode::Divider => 1,
+        // A line is one row whatever it holds: it clips rather than wraps, so
+        // its height does not depend on the width it is given.
+        ViewNode::Text { .. } | ViewNode::Divider | ViewNode::Line(_) => 1,
         ViewNode::Spacer { lines } => *lines,
         ViewNode::Row(children) => children.iter().map(height_of).max().unwrap_or(0),
         ViewNode::Column(children) | ViewNode::List(children) => {
             children.iter().map(height_of).sum::<u16>()
         }
         ViewNode::Motion { motion, .. } => motion.frames().iter().map(height_of).max().unwrap_or(0),
+    }
+}
+
+/// Terminal columns a node occupies inside a [`ViewNode::Line`].
+///
+/// Measured in **display** width, not characters: a CJK glyph or a wide emoji
+/// takes two cells, and counting characters would leave every run after it one
+/// column adrift.
+///
+/// A motion reports its **widest** frame rather than the frame showing. A
+/// per-frame width would move every run to its right whenever the frame
+/// changed, which reads as the pane redrawing wrongly rather than as an
+/// animation — the same reason [`height_of`] takes the tallest frame.
+fn inline_width(node: &ViewNode) -> usize {
+    match node {
+        ViewNode::Text { content, .. } => UnicodeWidthStr::width(content.as_str()),
+        ViewNode::Line(runs) => runs.iter().map(inline_width).sum(),
+        ViewNode::Motion { motion, .. } => {
+            motion.frames().iter().map(inline_width).max().unwrap_or(0)
+        }
+        // Refused at conversion, so unreachable from a plugin; zero is the only
+        // honest answer for a node whose width comes from its area.
+        ViewNode::Row(_)
+        | ViewNode::Column(_)
+        | ViewNode::List(_)
+        | ViewNode::Divider
+        | ViewNode::Spacer { .. } => 0,
+    }
+}
+
+/// Flatten a line's runs into spans, in order, padding each to the width it
+/// reserved.
+///
+/// Padding only ever applies to a motion (a text run occupies exactly its own
+/// width), and it goes on the right so the *start* of an animation stays fixed
+/// — that is the column the eye tracks.
+fn inline_spans<'a>(
+    runs: &'a [ViewNode],
+    palette: &ThemePalette,
+    frames: &FrameTable,
+    out: &mut Vec<Span<'a>>,
+) {
+    for run in runs {
+        match run {
+            ViewNode::Text { content, style } => {
+                out.push(Span::styled(content.clone(), text_style(*style, palette)));
+            }
+            ViewNode::Line(nested) => inline_spans(nested, palette, frames, out),
+            ViewNode::Motion { key, motion, .. } => {
+                let reserved = inline_width(run);
+                let index = frames
+                    .frame(key)
+                    .min(motion.frames().len().saturating_sub(1));
+                let before = out.len();
+                if let Some(frame) = motion.frames().get(index) {
+                    inline_spans(std::slice::from_ref(frame), palette, frames, out);
+                }
+                let drawn: usize = out[before..].iter().map(|s| s.content.width()).sum();
+                if let Some(pad) = reserved.checked_sub(drawn).filter(|p| *p > 0) {
+                    out.push(Span::raw(" ".repeat(pad)));
+                }
+            }
+            // Refused at conversion; drawing nothing is the safe residual.
+            ViewNode::Row(_)
+            | ViewNode::Column(_)
+            | ViewNode::List(_)
+            | ViewNode::Divider
+            | ViewNode::Spacer { .. } => {}
+        }
     }
 }
 
@@ -99,6 +171,14 @@ pub fn render_tree(
         }
         // Nothing to draw; the space it occupies is the point.
         ViewNode::Spacer { .. } => {}
+        ViewNode::Line(runs) => {
+            // One `Paragraph` of consecutive spans, so overflow is clipped by
+            // the terminal at the pane edge exactly as an over-long text node
+            // is — there is no wrap, so nothing below it moves.
+            let mut spans = Vec::new();
+            inline_spans(runs, palette, frames, &mut spans);
+            Paragraph::new(Line::from(spans)).render(area, buf);
+        }
         ViewNode::Row(children) => {
             if children.is_empty() {
                 return;
@@ -288,6 +368,136 @@ mod tests {
             token_color(StyleToken::Accent, &dark),
             token_color(StyleToken::Accent, &light),
             "a plugin must follow a theme switch without knowing"
+        );
+    }
+
+    /// Render a tree with a frame table and return the styled cells of one row,
+    /// as `(symbol, fg)` pairs — the shape needed to prove two runs kept
+    /// different styles on one line.
+    fn draw_styled(node: &ViewNode, w: u16, frames: &FrameTable) -> Vec<(String, Color)> {
+        let rect = area(w, 1);
+        let mut buf = Buffer::empty(rect);
+        render_tree(node, rect, &palette(), frames, &mut buf);
+        (0..w)
+            .map(|x| {
+                let cell = &buf[(x, 0)];
+                (cell.symbol().to_string(), cell.fg)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_line_packs_runs_at_their_own_width() {
+        // The whole point: `row` would have given each of these half the area,
+        // truncating the second to two columns.
+        let tree = ViewNode::Line(vec![ViewNode::text("ab"), ViewNode::text("cdefgh")]);
+        assert_eq!(draw(&tree, 12, 1), vec!["abcdefgh"]);
+    }
+
+    #[test]
+    fn a_one_column_run_does_not_get_an_equal_share() {
+        let tree = ViewNode::Line(vec![
+            ViewNode::text("*"),
+            ViewNode::text("twenty-characters-x"),
+        ]);
+        let cells = draw_styled(&tree, 40, &FrameTable::default());
+        assert_eq!(cells[0].0, "*");
+        assert_eq!(cells[1].0, "t", "the second run starts at column 1");
+    }
+
+    #[test]
+    fn runs_in_a_line_keep_their_own_styles() {
+        let p = palette();
+        let tree = ViewNode::Line(vec![
+            ViewNode::styled(
+                "L:",
+                TextStyle {
+                    token: Some(StyleToken::Muted),
+                    bold: false,
+                },
+            ),
+            ViewNode::styled(
+                "V",
+                TextStyle {
+                    token: Some(StyleToken::Accent),
+                    bold: false,
+                },
+            ),
+        ]);
+        let cells = draw_styled(&tree, 10, &FrameTable::default());
+        assert_eq!(cells[0].1, p.text_muted);
+        assert_eq!(cells[2].1, p.accent);
+        assert_ne!(
+            cells[0].1, cells[2].1,
+            "one pre-composed text node could not have done this"
+        );
+    }
+
+    #[test]
+    fn a_line_longer_than_the_pane_is_clipped_not_wrapped() {
+        let tree = ViewNode::List(vec![
+            ViewNode::Line(vec![ViewNode::text("aaaa"), ViewNode::text("bbbb")]),
+            ViewNode::text("next"),
+        ]);
+        // The overflowing run must not push `next` off its row.
+        assert_eq!(draw(&tree, 6, 2), vec!["aaaabb", "next"]);
+    }
+
+    #[test]
+    fn an_empty_line_draws_nothing() {
+        assert_eq!(draw(&ViewNode::Line(vec![]), 5, 1), vec![""]);
+    }
+
+    #[test]
+    fn a_line_is_one_row_high() {
+        let tree = ViewNode::Line(vec![ViewNode::text("a"), ViewNode::text("b")]);
+        assert_eq!(height_of(&tree), 1);
+    }
+
+    #[test]
+    fn a_run_after_a_motion_stays_put_across_frames() {
+        // A motion reserves its widest frame, so the narrow frame is padded and
+        // the following run's column does not depend on which frame shows.
+        let motion = ViewNode::Motion {
+            key: "dot".to_string(),
+            keyed_by_id: true,
+            motion: crate::session::motion::Motion::cycle(
+                vec![ViewNode::text("."), ViewNode::text("...")],
+                8,
+                true,
+            ),
+        };
+        let tree = ViewNode::Line(vec![motion, ViewNode::text("|end")]);
+
+        let mut first = FrameTable::default();
+        first.set("dot", 0);
+        let mut second = FrameTable::default();
+        second.set("dot", 1);
+
+        let a = draw_styled(&tree, 12, &first);
+        let b = draw_styled(&tree, 12, &second);
+        let bar = |cells: &[(String, Color)]| {
+            cells
+                .iter()
+                .position(|(s, _)| s == "|")
+                .expect("the following run is drawn")
+        };
+        assert_eq!(bar(&a), 3, "the narrow frame is padded to the widest");
+        assert_eq!(bar(&b), bar(&a), "advancing a frame must not move siblings");
+    }
+
+    #[test]
+    fn inline_width_counts_display_columns_not_characters() {
+        // A CJK glyph is two cells; counting characters would leave every run
+        // after it one column adrift.
+        assert_eq!(inline_width(&ViewNode::text("字")), 2);
+        assert_eq!(inline_width(&ViewNode::text("ab")), 2);
+        assert_eq!(
+            inline_width(&ViewNode::Line(vec![
+                ViewNode::text("字"),
+                ViewNode::text("x")
+            ])),
+            3
         );
     }
 

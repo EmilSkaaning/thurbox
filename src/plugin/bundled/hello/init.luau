@@ -11,7 +11,13 @@ return {
         return ui.list({
             ui.text("thurbox plugin host", "accent", true),
             ui.divider(),
-            ui.text("pane: " .. paneId, "muted"),
+            -- A line composes runs at their own width, so a muted label and an
+            -- unstyled value share one row. `ui.row` would have given each half
+            -- the pane.
+            ui.line({
+                ui.text("pane: ", "muted"),
+                ui.text(paneId),
+            }),
             ui.spacer(1),
             ui.text("This pane is Luau, not Rust."),
             ui.text("Edit init.luau and restart to change it.", "muted"),

@@ -73,6 +73,14 @@ pub enum ViewError {
         /// The node kind that carried both.
         kind: String,
     },
+    /// A `line` child has no intrinsic width, so there is no honest column to
+    /// lay it out at. Named rather than dropped: a plugin author who put a
+    /// column in a line wrote a layout they meant, and a silently missing node
+    /// reads as the host losing content.
+    NotInlineable {
+        /// The kind that cannot be laid out inline.
+        kind: &'static str,
+    },
 }
 
 impl fmt::Display for ViewError {
@@ -111,6 +119,11 @@ impl fmt::Display for ViewError {
                 f,
                 "view node `{kind}` declares motion and its own content; the \
                  motion's frames are the content"
+            ),
+            ViewError::NotInlineable { kind } => write!(
+                f,
+                "view node `{kind}` cannot sit in a `line`; a line holds only \
+                 text, a motion, or another line"
             ),
         }
     }
@@ -197,6 +210,16 @@ fn convert(
         "list" => Ok(ViewNode::List(convert_children(
             table, &kind, depth, budget, path,
         )?)),
+        "line" => {
+            let runs = convert_children(table, &kind, depth, budget, path)?;
+            // Asked of the converted child rather than decided while walking
+            // it: a motion's frames come back from the ordinary walk, which has
+            // no idea a line is above it.
+            if let Some(kind) = runs.iter().find_map(ViewNode::first_non_inlineable) {
+                return Err(ViewError::NotInlineable { kind });
+            }
+            Ok(ViewNode::Line(runs))
+        }
         "divider" => Ok(ViewNode::Divider),
         "spacer" => {
             let lines = match table.get::<Value>("lines") {
@@ -515,6 +538,127 @@ mod tests {
             convert_src(r#"return { kind = "spacer", lines = 3 }"#).unwrap(),
             ViewNode::Spacer { lines: 3 }
         );
+    }
+
+    #[test]
+    fn a_line_of_styled_runs_converts() {
+        let node = convert_src(
+            r#"return { kind = "line", children = {
+                 { kind = "text", content = "Name: ", style = "muted" },
+                 { kind = "text", content = "demo", bold = true },
+               } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            node,
+            ViewNode::Line(vec![
+                ViewNode::styled(
+                    "Name: ",
+                    TextStyle {
+                        token: Some(StyleToken::Muted),
+                        bold: false
+                    }
+                ),
+                ViewNode::styled(
+                    "demo",
+                    TextStyle {
+                        token: None,
+                        bold: true
+                    }
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn an_empty_line_converts() {
+        assert_eq!(
+            convert_src(r#"return { kind = "line" }"#).unwrap(),
+            ViewNode::Line(Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_line_refuses_a_child_with_no_intrinsic_width() {
+        // Each of these would have to be measured against the area it was given
+        // rather than against its own content.
+        for kind in ["column", "list", "row", "divider", "spacer"] {
+            let src =
+                format!(r#"return {{ kind = "line", children = {{ {{ kind = "{kind}" }} }} }}"#);
+            let err = convert_src(&src).unwrap_err();
+            assert_eq!(err, ViewError::NotInlineable { kind });
+            assert!(err.to_string().contains(kind), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_line_accepts_a_motion_whose_frames_are_runs() {
+        let node = convert_src(
+            r#"return { kind = "line", children = {
+                 { kind = "motion", id = "dot", motion = { kind = "cycle", frames = {
+                     { kind = "text", content = "-" },
+                     { kind = "text", content = "\\" },
+                 } } },
+                 { kind = "text", content = " working" },
+               } }"#,
+        )
+        .unwrap();
+        match node {
+            ViewNode::Line(runs) => {
+                assert_eq!(runs.len(), 2);
+                assert!(matches!(runs[0], ViewNode::Motion { .. }));
+            }
+            other => panic!("expected a line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_motion_cannot_smuggle_a_column_into_a_line() {
+        // The restriction has to survive a frame, or wrapping a column in a
+        // two-frame animation would be a way around it.
+        let err = convert_src(
+            r#"return { kind = "line", children = {
+                 { kind = "motion", motion = { kind = "cycle", frames = {
+                     { kind = "text", content = "." },
+                     { kind = "column", children = {} },
+                 } } },
+               } }"#,
+        )
+        .unwrap_err();
+        assert_eq!(err, ViewError::NotInlineable { kind: "column" });
+    }
+
+    #[test]
+    fn a_line_may_nest_a_line() {
+        let node = convert_src(
+            r#"return { kind = "line", children = {
+                 { kind = "line", children = { { kind = "text", content = "a" } } },
+                 { kind = "text", content = "b" },
+               } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            node,
+            ViewNode::Line(vec![
+                ViewNode::Line(vec![ViewNode::text("a")]),
+                ViewNode::text("b"),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_lines_runs_count_against_the_node_budget() {
+        // One line plus MAX_NODES runs is one node too many; the line does not
+        // give a plugin a way around the budget.
+        let runs = (0..MAX_NODES)
+            .map(|_| r#"{ kind = "text", content = "x" }"#)
+            .collect::<Vec<_>>()
+            .join(",");
+        let err = convert_src(&format!(
+            r#"return {{ kind = "line", children = {{ {runs} }} }}"#
+        ))
+        .unwrap_err();
+        assert_eq!(err, ViewError::TooManyNodes);
     }
 
     #[test]

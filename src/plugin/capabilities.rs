@@ -173,7 +173,10 @@ fn build_ui_table(lua: &Lua) -> mlua::Result<Table> {
         )?,
     )?;
 
-    for kind in ["row", "column", "list"] {
+    // `line` shares the container shape but not the layout: its children are
+    // packed at their own width on one row, which is what a `label: value` row
+    // needs and what `row`'s equal shares cannot express.
+    for kind in ["row", "line", "column", "list"] {
         ui.set(
             kind,
             lua.create_function(move |lua, children: Option<Table>| {
@@ -352,7 +355,7 @@ mod tests {
         let module = build_module_table(&lua, "demo", &GrantedCapabilities::none(), None).unwrap();
         let ui: Table = module.get("ui").expect("ui table present");
         for name in [
-            "text", "row", "column", "list", "divider", "spacer", "cycle",
+            "text", "row", "line", "column", "list", "divider", "spacer", "cycle",
         ] {
             assert!(ui.contains_key(name).unwrap(), "missing ui.{name}");
         }
