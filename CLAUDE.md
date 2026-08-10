@@ -351,6 +351,7 @@ npm run fmt:website                  # Auto-fix formatting (Prettier)
 ```bash
 cargo test --test architecture_rules                      # Arch rules
 cargo test --test teardown_gate                           # v2 teardown inventory
+./scripts/dev/lint-workflows.sh                           # Release-delivery invariants
 cargo deny check advisories                               # Advisories
 cargo deny check bans licenses sources                    # Dep policy
 ```
@@ -363,6 +364,28 @@ source, so implementing a replacement makes the gate ask you to re-verdict its
 row rather than letting a stale table wave the deletion through. Today it blocks
 every unit: the built-in hooks wiring is still delivered by the installer the
 teardown deletes, and no pane has a bundled plugin to become the default.
+
+`scripts/dev/lint-workflows.sh` is the allowlist for the **workflow files** —
+the one structural check that reads `.github/` rather than `src/`. It enforces
+four release-delivery invariants, each cheap to check and expensive to discover
+broken: (1) `cd.yml`'s `push` trigger carries exactly `branches: [main]` and no
+other key (parsed structurally, so a `tags:` beside the branch list fails where a
+grep would pass); (2) `cd.yml` never asks for the plugin feature —
+`--features plugins`, `--features=plugins`, `--all-features`, or a `features`
+list — since a v1 release binary containing the v2 runtime voids the whole point
+of the compile-time gate (whole-line comments are stripped, so `cd.yml` may
+document the rule; **Stage C deletes this check** rather than switching it off,
+so the flip is a visible line in a diff); (3) `nightly.yml` runs no
+package-channel publish — no `publish-*` job, none of the four channel secrets,
+no `choco push`/`wingetcreate`/tap/AUR tooling — because Chocolatey and winget
+are moderated and a nightly there burns a human review; (4) every nightly release
+is marked `prerelease: true` (or `--prerelease` for `gh release create`), because
+an unmarked one becomes `releases/latest` and every unpinned installer resolves
+to it. Invariants 3 and 4 report `not applicable` while `nightly.yml` is absent
+— the check landed **before** that workflow on purpose, so the first one is born
+gated. The checker itself is fixture-tested (`scripts/dev/lint-workflows.bats`,
+run in the same CI job ahead of the tree check) since a checker that passes
+everything would otherwise pass the tree too.
 
 ## Release Process
 
