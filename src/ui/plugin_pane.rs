@@ -64,6 +64,15 @@ fn text_style(style: TextStyle, palette: &ThemePalette) -> Style {
     if style.bold {
         s = s.add_modifier(Modifier::BOLD);
     }
+    // Attributes over the token's colour, never instead of it: a dimmed run is
+    // still whatever colour the theme resolved, which is what lets a list row
+    // dim without the pane naming a second palette entry.
+    if style.dim {
+        s = s.add_modifier(Modifier::DIM);
+    }
+    if style.underline {
+        s = s.add_modifier(Modifier::UNDERLINED);
+    }
     s
 }
 
@@ -589,6 +598,62 @@ mod tests {
             .collect()
     }
 
+    /// Emphasis is per run, over the token's colour: a dimmed or underlined run
+    /// keeps the colour the theme resolved and its neighbour keeps neither
+    /// attribute. Without both a list row's three appearances collapse into one.
+    #[test]
+    fn emphasis_is_applied_over_the_token_and_only_to_its_own_run() {
+        let p = palette();
+        let rect = area(10, 1);
+        let mut buf = Buffer::empty(rect);
+        render_tree(
+            &ViewNode::Line(vec![
+                ViewNode::styled(
+                    "d",
+                    TextStyle {
+                        token: Some(StyleToken::Muted),
+                        dim: true,
+                        ..TextStyle::default()
+                    },
+                ),
+                ViewNode::styled(
+                    "u",
+                    TextStyle {
+                        token: Some(StyleToken::Accent),
+                        bold: true,
+                        underline: true,
+                        ..TextStyle::default()
+                    },
+                ),
+                ViewNode::text("p"),
+            ]),
+            rect,
+            &p,
+            &FrameTable::default(),
+            &mut buf,
+        );
+
+        let dim = &buf[(0, 0)];
+        assert_eq!(dim.fg, p.text_muted, "dim does not replace the colour");
+        assert!(dim.modifier.contains(Modifier::DIM));
+        assert!(!dim.modifier.contains(Modifier::UNDERLINED));
+
+        let under = &buf[(1, 0)];
+        assert_eq!(under.fg, p.accent);
+        assert!(under.modifier.contains(Modifier::UNDERLINED));
+        assert!(under.modifier.contains(Modifier::BOLD));
+        assert!(!under.modifier.contains(Modifier::DIM));
+
+        let plain = &buf[(2, 0)];
+        assert_eq!(plain.fg, p.text_primary);
+        assert!(
+            !plain
+                .modifier
+                .intersects(Modifier::DIM | Modifier::UNDERLINED | Modifier::BOLD),
+            "emphasis must not bleed onto the next run"
+        );
+    }
+
     #[test]
     fn a_line_packs_runs_at_their_own_width() {
         // The whole point: `row` would have given each of these half the area,
@@ -616,14 +681,14 @@ mod tests {
                 "L:",
                 TextStyle {
                     token: Some(StyleToken::Muted),
-                    bold: false,
+                    ..TextStyle::default()
                 },
             ),
             ViewNode::styled(
                 "V",
                 TextStyle {
                     token: Some(StyleToken::Accent),
-                    bold: false,
+                    ..TextStyle::default()
                 },
             ),
         ]);
@@ -694,7 +759,7 @@ mod tests {
                 "L: ",
                 TextStyle {
                     token: Some(StyleToken::Muted),
-                    bold: false,
+                    ..TextStyle::default()
                 },
             ),
             ViewNode::text("wrapping value"),

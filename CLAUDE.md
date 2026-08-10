@@ -937,7 +937,7 @@ and granted capabilities, and everything discovery rejected with its cause.
 `list`/`status` **start** the plugins they report, since a compile or `init`
 failure is invisible until something runs them; `doctor` discovers only.
 Plugins live in `~/.config/thurbox/plugins/<name>/` as a `plugin.toml` plus an
-`init.luau`; the bundled `hello` and `info-panel` plugins are materialized to
+`init.luau`; the bundled `hello`, `info-panel` and `tasks` plugins are materialized to
 `~/.local/share/thurbox/builtin-plugins/`, and a user plugin of the same name
 overrides it) and **`command`** (list/describe/run: the typed, agent-callable
 plugin command registry — below; unlike `plugin list`, discovery here starts no
@@ -951,7 +951,13 @@ follows a theme switch. The token set is the palette's *role* set —
 `status_done`/`status_idle`/`status_error`/`status_unreachable`) — because a
 status indicator is the one case where the token *is* the meaning, and because a
 pane could not otherwise be drawn through the tree without reaching past it for a
-colour (ADR-26).
+colour (ADR-26). A text run also carries **emphasis** — `bold`, `dim`,
+`underline` — as terminal attributes applied *over* the token's colour, never
+instead of it, so a pane still names no colour. All three exist because a
+selectable list row needs three appearances a colour cannot express: the selected
+row is bold, a row a running search filtered out is dim, and a matched run is
+underlined (ADR-29). Without them no plugin could draw a list with a search in
+it, which is most of thurbox's panes.
 
 `row` and `line` differ in who
 owns the widths: a `row` splits its area into **equal shares** (a plugin cannot
@@ -992,7 +998,8 @@ builds and publishes it from `tick_core` and `plugin` reads it when a plugin cal
 a reader, so no plugin call lands on the UI thread and no new module edge appears
 (the precedent is `session::spawn_contribution`). Reading is gated **per kind of
 state** — `sessions` → `thurbox.activeSession()`, `metrics` →
-`thurbox.systemMetrics()`, `automations` → `thurbox.upcomingAutomations()` —
+`thurbox.systemMetrics()`, `automations` → `thurbox.upcomingAutomations()`,
+`tasks` → `thurbox.tasks()` —
 because the capability list is what an install prompt is written from, and "reads
 your sessions" is a different question from "reads this machine's CPU". The
 snapshot resolves only what a sandboxed plugin *cannot compute* (the VM loads no
@@ -1003,10 +1010,26 @@ an id, and each status's glyph **and style token** (the token because
 else is a raw number and the plugin composes every string it draws — publishing
 formatted strings would leave a pane arranging someone else's presentation.
 Publishing is **demand-gated** (nothing is built unless a running plugin holds one
-of the three capabilities — `pane_context::readers_present()`, set by the host from
+of the state capabilities — `pane_context::readers_present()`, set by the host from
 its grants) and **change-gated** (written only when the value differs), asserted on
 the `pane_context_builds`/`pane_context_publishes` counters; it never marks the UI
 dirty, since a pane repaints when its own tree changes.
+
+The **task** section is where that division of labour was pinned (ADR-29). It
+carries one row per task with its title, its status *wire name*, and the four view
+facts the kernel owns because it owns the keyboard and the search — `selected`
+(which also moves under a global-search preview), `dimmed`, `matchPositions` (byte
+offsets, so the plugin still segments and emphasises them) and `linked`. It
+carries **no glyph and no style token**, the opposite of a session status: that
+mapping is shared by two native panes so the kernel resolves it, while a task
+status is drawn in one place and publishing `☐` would hand the pane the
+presentation it exists to own. The rule for the next port: *publish the rendering
+only when two panes must agree about it.* The section is bounded
+(`MAX_TASK_ROWS`, so a thousand-task list cannot exceed the tree's node budget)
+and empty when `[features] tasks` is off, mirroring the automation section's
+filter. Rejected: a `TaskReader` trait in `session` implemented by `storage` on
+the `plugin_store` pattern — four of the six fields a row draws are not in the
+database at all, so a plugin reading rows that way could not draw the pane.
 
 The bundled **`info-panel`** plugin (`src/plugin/bundled/info-panel/`) is the first
 native pane reproduced in Luau, and `tests/bundled_info_panel.rs` asserts its view
@@ -1021,6 +1044,25 @@ the audit's §7: the plugin pane is up to a second stale (the render worker poll
 a ~1 s cycle — the session-list spike's event-driven-render condition, now wanted by
 a second pane), and every plugin will reimplement `format_bytes` until a
 `thurbox.format.*` table is designed from more than one pane's needs.
+
+The bundled **`tasks`** plugin (`src/plugin/bundled/tasks/`) is the second, and the
+first *list* pane — the shape the four remaining Phase 4 panes have. From two
+capabilities (`render`, `tasks`) it reproduces the checkbox glyphs, the status
+colours, the selected > dimmed > status precedence, the emphasis on matched
+characters (segmenting the published byte offsets itself, UTF-8 rules included),
+the trailing `⇄`, and the empty-state line; `tests/bundled_tasks_panel.rs` asserts
+tree equality across eleven variants. The native pane now renders through the tree
+too (`ui::tasks_panel::tasks_tree`, with the pre-port span renderer retained as a
+`#[cfg(test)]` oracle), split from the one geometry step
+(`visible_rows`: window, fit, reserve). That split is the port's finding: geometry
+stays the kernel's, so **two divergences are pinned rather than hidden** — a title
+wider than the column is fitted with `…` by the native pane and merely clipped in
+the plugin's copy, and a list longer than the pane is windowed around the selection
+natively but drawn from the first row in the plugin's. Closing them wants an
+ellipsizing clip with a flush-right run, and a list node carrying a selected index
+— the latter a precondition of the session-list port, since a session list that
+cannot scroll to its selection is not one. The port needed no new node, no new
+token and no formatter; see `docs/PHASE4-PANE-READINESS.md` §8.
 
 Pane **visibility is kernel
 state**: the manifest seeds it (`default_visible`), `F10`

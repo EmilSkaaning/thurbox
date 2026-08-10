@@ -1224,3 +1224,78 @@ schedules seven panes, which turns both from untidiness into arithmetic.
 - §5's remaining measurement is answered rather than deferred: the worker no
   longer renders panes the user cannot see, which was the cost the motion work was
   careful never to pay for a hidden pane.
+
+## ADR-29: A list pane's rows are published state; its geometry is not
+
+**Context.** The tasks pane is the second Phase 4 port and the first *list* pane,
+which is the shape the four remaining ones have. Reading
+`src/ui/tasks_panel.rs` rather than the node catalogue — the discipline
+`docs/PHASE4-PANE-READINESS.md` §6 records — the pane is seven decisions, and
+they split cleanly in two. Six are presentation (a status's glyph, its colour, the
+selected > dimmed > status precedence, the emphasis on a matched run, the trailing
+`⇄`, the empty-state line) and one is geometry (which rows are in view, how wide a
+title may be, where the marker's room comes from). Two of the six could not be
+expressed at all: `TextStyle` carried a colour token and `bold`, so a dimmed row
+and an underlined matched run had no spelling. And none of the pane's state was
+reachable — the task list is in SQLite and `plugin` may not import `storage`.
+
+**Decision.**
+
+1. **The task list is a section on ADR-27's published snapshot, not a database
+   seam.** `PaneContext::tasks` carries one row per task with its title, its
+   status *wire name*, and the four view facts the kernel owns. Rejected: a
+   `TaskReader` trait in `session` implemented by `storage`, handed to a VM as a
+   factory the way `session::plugin_store::PluginStore` is. It is the obvious
+   reading of the architecture rule and it reads the wrong thing: `selected`,
+   `dimmed`, `match_positions` and `linked` are not in the database, they are view
+   state in `App`, so a plugin reading rows through it could not draw a row that
+   looks like the pane's. It would also put a `SELECT` on the render worker per
+   cycle, and it would be a second mechanism for "kernel state a pane reads".
+   `PluginStore` stays what it was designed for: a plugin's *own* durable state.
+2. **The section publishes a status's name, and deliberately not its rendering.**
+   The opposite of `StatusSnapshot`, which publishes a session status's glyph
+   *and* style token because `StyleToken::for_status` is one mapping shared by two
+   native panes and a plugin re-deriving it would be an unchecked second copy. A
+   task status is drawn in exactly one place, so publishing `☐` would hand the
+   plugin the thing the port exists to prove it can own.
+3. **Emphasis joins the view tree: `dim` and `underline` beside `bold`.** They are
+   text attributes applied over whatever colour the token resolves to, so the tree
+   still admits no way to name a colour. Rejected: a semantic `selected` /
+   `matched` flag the kernel styles — it would make the kernel own the look of
+   every plugin's list rows, and thurbox's own three list panes would still have
+   to match it by hand. Rejected: an options table as `ui.text`'s third argument —
+   `bold` cannot stop being the third positional argument, so it would be a second
+   spelling of one node.
+4. **Geometry stays in the kernel, and the pane splits on that line.**
+   `ui::tasks_panel::visible_rows` resolves the window, fits each title and folds
+   focus into a per-row `selected`; `tasks_tree` takes those rows and carries no
+   geometry, and it is what `render_tasks_panel` paints — so the tree is what
+   users see, which is the only thing that makes a tree-equality test evidence.
+   Rejected: publishing rows already fitted and windowed, which would make the
+   equality total. It needs a width the publisher does not have (the snapshot is
+   built on the tick; a pane's rect exists only during a frame, and the native
+   pane is hidden by default), and it would fit the plugin's rows to *another*
+   pane's size — the plugin's pane is a different rect in the same layout.
+
+**Consequences.**
+
+- The bundled `tasks` plugin reproduces the pane from two declared capabilities,
+  `render` and `tasks`, and `tests/bundled_tasks_panel.rs` asserts tree equality
+  across eleven content variants — including multi-byte titles and a match offset
+  landing inside a character, since the UTF-8 walk over published byte offsets is
+  the plugin's own.
+- **Two divergences are pinned rather than hidden**, both geometry: a title wider
+  than the column is fitted by the kernel and clipped in the plugin's copy, and a
+  list longer than the pane is windowed by the kernel and drawn from the first row
+  in the plugin's copy. Closing them wants an ellipsizing clip with a flush-right
+  run, and a list node carrying a selected index. The second is a precondition of
+  the session-list port, not a nicety: a session list that cannot scroll to its
+  selection is not one.
+- The native pane now renders through the view tree, and the span-building
+  renderer it replaced is retained as a `#[cfg(test)]` oracle asserting the two
+  paint identically — the same arrangement ADR-26 made for the info panel, and the
+  reason "the pane is unchanged" is a check rather than a claim.
+- The port needed **no** new style token, no new container node, and no formatter:
+  `PHASE4` §7's prediction that every pane would reimplement `format_bytes` is
+  still made by one pane, so a `thurbox.format.*` table remains undesigned on
+  purpose.

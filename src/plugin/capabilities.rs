@@ -168,6 +168,14 @@ pub fn build_module_table(
         module.set("upcomingAutomations", read)?;
     }
 
+    if granted.has(Capability::Tasks) {
+        let read = lua.create_function(|lua, ()| {
+            let context = crate::session::pane_context::published().unwrap_or_default();
+            super::kernel_state::tasks_table(lua, &context)
+        })?;
+        module.set("tasks", read)?;
+    }
+
     // View-node constructors. Ungated on purpose: they build plain tables and
     // grant no host power, so hiding them behind a capability would be theatre.
     // Implemented here rather than as a shipped `.luau` file so they live in
@@ -192,23 +200,37 @@ pub fn build_module_table(
 fn build_ui_table(lua: &Lua) -> mlua::Result<Table> {
     let ui = lua.create_table()?;
 
-    // `ui.text(content, style?, bold?)`
+    // `ui.text(content, style?, bold?, underline?, dim?)`
+    //
+    // The emphases are positional flags rather than an options table because the
+    // node's own fields are the canonical form and `bold` cannot stop being the
+    // third argument without breaking every plugin already written against it —
+    // two spellings of one node would be worse than one long signature.
+    type TextArgs = (
+        mlua::Value,
+        Option<String>,
+        Option<bool>,
+        Option<bool>,
+        Option<bool>,
+    );
     ui.set(
         "text",
-        lua.create_function(
-            |lua, (content, style, bold): (mlua::Value, Option<String>, Option<bool>)| {
-                let node = lua.create_table()?;
-                node.set("kind", "text")?;
-                node.set("content", content)?;
-                if let Some(style) = style {
-                    node.set("style", style)?;
+        lua.create_function(|lua, (content, style, bold, underline, dim): TextArgs| {
+            let node = lua.create_table()?;
+            node.set("kind", "text")?;
+            node.set("content", content)?;
+            if let Some(style) = style {
+                node.set("style", style)?;
+            }
+            // Only a `true` is carried, so a node table stays as small as
+            // what it actually declares.
+            for (key, flag) in [("bold", bold), ("underline", underline), ("dim", dim)] {
+                if let Some(true) = flag {
+                    node.set(key, true)?;
                 }
-                if let Some(true) = bold {
-                    node.set("bold", true)?;
-                }
-                Ok(node)
-            },
-        )?,
+            }
+            Ok(node)
+        })?,
     )?;
 
     // `line` shares the container shape but not the layout: its children are
@@ -447,17 +469,22 @@ mod tests {
             (
                 Capability::Sessions,
                 "activeSession",
-                ["systemMetrics", "upcomingAutomations"],
+                ["systemMetrics", "upcomingAutomations", "tasks"],
             ),
             (
                 Capability::Metrics,
                 "systemMetrics",
-                ["activeSession", "upcomingAutomations"],
+                ["activeSession", "upcomingAutomations", "tasks"],
             ),
             (
                 Capability::Automations,
                 "upcomingAutomations",
-                ["activeSession", "systemMetrics"],
+                ["activeSession", "systemMetrics", "tasks"],
+            ),
+            (
+                Capability::Tasks,
+                "tasks",
+                ["activeSession", "systemMetrics", "upcomingAutomations"],
             ),
         ] {
             let module = build_module_table(
@@ -484,7 +511,12 @@ mod tests {
     fn no_state_capability_means_no_state_reader() {
         let lua = Lua::new();
         let module = build_module_table(&lua, "demo", &GrantedCapabilities::none(), None).unwrap();
-        for name in ["activeSession", "systemMetrics", "upcomingAutomations"] {
+        for name in [
+            "activeSession",
+            "systemMetrics",
+            "upcomingAutomations",
+            "tasks",
+        ] {
             assert!(!module.contains_key(name).unwrap(), "{name} leaked");
         }
     }
@@ -503,6 +535,7 @@ mod tests {
                 Capability::Sessions,
                 Capability::Metrics,
                 Capability::Automations,
+                Capability::Tasks,
             ])),
             None,
         )
@@ -519,6 +552,12 @@ mod tests {
             .call(())
             .unwrap();
         assert_eq!(automations.raw_len(), 0);
+        let tasks: Table = module
+            .get::<mlua::Function>("tasks")
+            .unwrap()
+            .call(())
+            .unwrap();
+        assert_eq!(tasks.get::<Table>("entries").unwrap().raw_len(), 0);
     }
 
     #[test]

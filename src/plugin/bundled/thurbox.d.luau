@@ -20,7 +20,13 @@ export type ViewNode = {
     id: string?,
     content: (string | number)?,
     style: StyleToken?,
+    -- Emphasis: terminal attributes applied over whatever colour `style`
+    -- resolves to, never instead of it. A list row needs all three — the
+    -- selected row is bold, a row a search filtered out is dim, and a matched
+    -- run is underlined.
     bold: boolean?,
+    underline: boolean?,
+    dim: boolean?,
     children: { ViewNode }?,
     lines: number?,
     motion: Motion?,
@@ -41,7 +47,16 @@ export type Motion = {
 }
 
 export type Ui = {
-    text: (content: string | number, style: StyleToken?, bold: boolean?) -> ViewNode,
+    -- The emphasis flags are positional because the node's own fields are the
+    -- canonical form and `bold` cannot stop being the third argument; they read
+    -- in declaration order (bold, underline, dim).
+    text: (
+        content: string | number,
+        style: StyleToken?,
+        bold: boolean?,
+        underline: boolean?,
+        dim: boolean?
+    ) -> ViewNode,
     row: (children: { ViewNode }?) -> ViewNode,
     -- One row of runs, each at its own width — a `label: value` line. Unlike
     -- `row`, which splits its area into equal shares, and unlike a single
@@ -172,6 +187,36 @@ export type UpcomingAutomation = {
     dueInSecs: number,
 }
 
+-- One row of the task list.
+--
+-- The status is a *name*, not a glyph and not a token: which checkbox a state
+-- draws as, and in what colour, is the pane's decision. What the host does
+-- resolve is what a plugin cannot observe — the cursor's row (which also moves
+-- under a global-search preview), the search's verdict on this row, and whether
+-- the task has an open related session.
+--
+-- `matchPositions` are zero-based *byte* offsets into `title`. Splitting them
+-- into runs is presentation, so it is yours; an offset past the end of the title
+-- ends the scan and one that does not land on a UTF-8 character boundary is
+-- skipped, because a title may have been shortened after the offsets were
+-- computed.
+export type TaskEntry = {
+    title: string,
+    status: string,
+    selected: boolean,
+    dimmed: boolean,
+    linked: boolean,
+    matchPositions: { number },
+}
+
+-- `focused` is whether the task pane holds focus, which changes what an empty
+-- list should say: naming the key that adds a task is only honest when the pane
+-- can receive it.
+export type TaskList = {
+    entries: { TaskEntry },
+    focused: boolean,
+}
+
 export type Thurbox = {
     -- This plugin's own name. Always present.
     name: string,
@@ -190,6 +235,11 @@ export type Thurbox = {
     -- Present only with `automations`. Always an array — "there are none" is a
     -- fact, so it needs no nil check — soonest first.
     upcomingAutomations: (() -> { UpcomingAutomation })?,
+    -- Present only with `tasks`. Always a table — "there are no tasks" is a
+    -- fact — whose `entries` are in the order the pane lists them. Titles are
+    -- *not* fitted to any width: your pane's size is not yours to know, so draw
+    -- the row and let the host clip it.
+    tasks: (() -> TaskList)?,
 }
 
 -- What a plugin's `init.luau` returns.

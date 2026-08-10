@@ -73,6 +73,8 @@ pub enum Capability {
     Metrics,
     /// Read the automations thurbox has scheduled.
     Automations,
+    /// Read thurbox's task list — titles, status, and which row a user is on.
+    Tasks,
 }
 
 impl Capability {
@@ -88,6 +90,7 @@ impl Capability {
             Capability::Sessions => "sessions",
             Capability::Metrics => "metrics",
             Capability::Automations => "automations",
+            Capability::Tasks => "tasks",
         }
     }
 
@@ -103,6 +106,7 @@ impl Capability {
             Capability::Sessions,
             Capability::Metrics,
             Capability::Automations,
+            Capability::Tasks,
         ]
     }
 
@@ -114,7 +118,10 @@ impl Capability {
     pub fn reads_kernel_state(self) -> bool {
         matches!(
             self,
-            Capability::Sessions | Capability::Metrics | Capability::Automations
+            Capability::Sessions
+                | Capability::Metrics
+                | Capability::Automations
+                | Capability::Tasks
         )
     }
 }

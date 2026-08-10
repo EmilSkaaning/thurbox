@@ -172,6 +172,13 @@ const BUNDLED: &[BundledPlugin] = &[
         manifest: include_str!("bundled/info-panel/plugin.toml"),
         entry: include_str!("bundled/info-panel/init.luau"),
     },
+    // The tasks pane, likewise hidden by default — the first *list* pane, which
+    // is the shape the remaining Phase 4 panes have.
+    BundledPlugin {
+        name: "tasks",
+        manifest: include_str!("bundled/tasks/plugin.toml"),
+        entry: include_str!("bundled/tasks/init.luau"),
+    },
 ];
 
 /// Materialize the bundled plugins and return their directories.

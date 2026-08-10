@@ -11,9 +11,12 @@ porting it, with every claim traced to the code that makes it true. It is a
 worklist, not a design: each row is a gap someone has to close, with the
 cheapest honest closure named.
 
-Status of the audit: **four gaps closed** (inline lines, commit `6e0c7cc`;
-style tokens and gauges, ADR-26; kernel state, ADR-27) and **one half open**
-(§5). The info panel has now been ported twice — first to the view tree in every
+Status of the audit: **all five gaps closed** (inline lines, commit `6e0c7cc`;
+style tokens and gauges, ADR-26; kernel state, ADR-27; the layout and the
+keyboard, ADR-28). §8 records what the **second** port — the tasks pane, ADR-29 —
+needed on top of them, which is the only part of this document still a worklist.
+
+The info panel has now been ported twice — first to the view tree in every
 build (ADR-26), then reproduced as the **bundled `info-panel` plugin** (ADR-27) —
 so the rows below are no longer predictions. Where a prediction was wrong, it
 says so.
@@ -237,3 +240,60 @@ A third thing worth recording because it did *not* happen: **the view tree neede
 no widening.** An independent consumer needed `list`, `paragraph`, `divider`,
 `gauge` and `text` with eight tokens, every one of which ADR-26 had already added
 for the native port. That is the confirmation ADR-26 could not give itself.
+
+## 8. The second port: the tasks pane (ADR-29)
+
+§6 predicted that the tasks pane needed §2 and §5 and neither §3 nor §4. Both
+halves of that were wrong in an interesting way, and this section is the record.
+
+**What sufficed.** Everything the pane *renders* was already expressible: a `list`
+of `line`s, three colour roles (`accent`, `muted`, and the theme's primary
+foreground as a token-less run) — no new node kind, no new style token, and no
+formatter at all. So §7's prediction that every pane would reimplement
+`format_bytes` is still made by exactly one pane, and a `thurbox.format.*` table
+stays undesigned on purpose.
+
+**What had to be widened: two emphasis flags** (`dim`, `underline`), ADR-29. This
+is §3 again, and the prediction that the tasks pane would not need it was wrong
+for a reason worth stating: §3 was written about *colour*, and a selectable row
+needs three appearances that are not three colours. `Theme::selected_item()` is
+accent + bold and was expressible; a row a running search filtered out is muted +
+**DIM**, and a matched character is accent + bold + **UNDERLINED**, and neither
+attribute existed. The consequence was not aesthetic: **no plugin could draw a
+list with a search in it**, which is every remaining pane in the phase. Reading
+the pane's ratatui calls is what found it — reading the node catalogue would not
+have, exactly as §6 says.
+
+**What is still open: geometry, in two named pieces.** This is §4 again, and here
+the prediction was right that the pane does not need a *gauge* while being wrong
+that it needs no geometry. Three of the pane's decisions depend on its resolved
+rect, and the port left all three in the kernel
+(`ui::tasks_panel::visible_rows`), which means the plugin's copy of the pane
+differs in exactly these ways. Both are pinned by their own test in
+`tests/bundled_tasks_panel.rs`, so neither can be forgotten or quietly absorbed:
+
+| Open gap | Native pane | The plugin's copy | Cheapest closure |
+|---|---|---|---|
+| a title wider than the column | fitted with `…`, with the `⇄` marker's width reserved | draws the whole title; the renderer clips it, and a linked row can lose its marker | a `line` that clips with an ellipsis, plus a flush-right run — the renderer already right-aligns a gauge's suffix, so what is missing is a node that asks for it |
+| more rows than the pane has lines | windows around the selection | draws from the first row and is clipped at the bottom, so a selection below the fold is invisible | a list node carrying a selected index, windowed by the kernel from the height it has — the `gauge` shape, applied to height |
+
+The second is a **precondition of the session-list port**, not a nicety: a session
+list that cannot scroll to its selection is not a session list. Recording it here
+means that port starts with the requirement rather than discovering it.
+
+**A rejection worth carrying forward.** The tempting fix for both rows is to
+publish the rows *already* fitted and windowed, which would make the tree equality
+total. It was rejected twice over: the publisher has no width (the snapshot is
+built on the tick, a pane's rect exists only during a frame, and the native pane is
+hidden by default anyway), and the plugin's pane is a *different rect in the same
+layout* — rows fitted to another pane's width are wrong at their own. A pane that
+renders its own rows plainly is better evidence than one that renders someone
+else's geometry.
+
+**And the state channel scaled.** §2's closure was a snapshot with three sections;
+this port added a fourth and needed no new mechanism, no new architecture edge, and
+no change to the demand/change gates. The one thing it did establish is where the
+line falls: the kernel publishes a status's *name* here, where it publishes a
+session status's glyph and token in `StatusSnapshot` — because that mapping is
+shared by two native panes and this one is not. "Publish the rendering only when
+two panes must agree about it" is the rule the next port should apply.

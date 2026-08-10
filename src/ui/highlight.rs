@@ -92,6 +92,24 @@ fn segments(text: &str, positions: &[usize]) -> Vec<Segment> {
     segments
 }
 
+/// The highlighted/plain runs of `text` at `positions`, as byte ranges.
+///
+/// The same segmentation the span builders below use, exposed for a caller that
+/// builds [`crate::session::view_tree`] nodes instead of ratatui spans — a list
+/// pane rendered through the view tree needs one text node per run. Sharing the
+/// pass is what stops the two representations from disagreeing about where a
+/// highlighted run starts, which is the same reason the borrowed and owned span
+/// builders share it.
+pub(crate) fn highlight_runs(
+    text: &str,
+    positions: &[usize],
+) -> Vec<(std::ops::Range<usize>, bool)> {
+    segments(text, positions)
+        .into_iter()
+        .map(|seg| (seg.start..seg.end, seg.highlighted))
+        .collect()
+}
+
 /// Build spans for `text` with the bytes at `positions` highlighted over
 /// `base_style`. `positions` are UTF-8 byte offsets (as returned by
 /// [`crate::fuzzy::fuzzy_match`]).
@@ -201,6 +219,28 @@ mod tests {
         assert_eq!(texts(&spans), vec!["a", "bc…"]);
         let owned = highlighted_spans_owned(text, &[0, 4], Style::default());
         assert_eq!(texts(&owned), vec!["a", "bc…"]);
+    }
+
+    /// The run form and the span form must segment identically — that is the
+    /// whole reason they share one pass, so it is worth asserting rather than
+    /// assuming.
+    #[test]
+    fn runs_and_spans_segment_the_same_text_alike() {
+        for (text, positions) in [
+            ("foo-bar", vec![0, 4]),
+            ("hello", vec![]),
+            ("abc…", vec![0, 4]),
+            ("ab", vec![99]),
+            ("", vec![0]),
+        ] {
+            let runs = highlight_runs(text, &positions);
+            let spans = highlighted_spans(text, &positions, Style::default());
+            let from_runs: Vec<String> = runs
+                .iter()
+                .map(|(range, _)| text[range.clone()].to_string())
+                .collect();
+            assert_eq!(from_runs, texts(&spans), "{text:?} {positions:?}");
+        }
     }
 
     #[test]

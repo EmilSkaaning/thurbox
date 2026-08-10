@@ -144,12 +144,25 @@ impl StyleToken {
 }
 
 /// Text styling flags a node may carry alongside its colour token.
+///
+/// The three emphases are terminal attributes, never colours: each is applied
+/// *over* whatever [`StyleToken`] the run resolves to, so a theme still chooses
+/// every colour in a pane. They exist because a selectable list row needs three
+/// appearances a colour token alone cannot express — the selected row, a row a
+/// running search filtered out ([`TextStyle::dim`]), and the characters that
+/// search matched ([`TextStyle::underline`]). Without them a list with a search
+/// in it cannot be described by this catalog at all, which is most of the panes
+/// thurbox has.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct TextStyle {
     /// Colour role; `None` renders in the theme's default foreground.
     pub token: Option<StyleToken>,
     /// Render bold.
     pub bold: bool,
+    /// Render dimmed.
+    pub dim: bool,
+    /// Render underlined.
+    pub underline: bool,
 }
 
 /// A gauge's fill, as a percentage.
@@ -408,7 +421,7 @@ impl ViewNode {
             content,
             TextStyle {
                 token: Some(token),
-                bold: false,
+                ..TextStyle::default()
             },
         )
     }

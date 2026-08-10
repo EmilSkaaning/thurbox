@@ -568,14 +568,14 @@ impl App {
                             format!("failed: {e}"),
                             crate::session::view_tree::TextStyle {
                                 token: Some(crate::session::view_tree::StyleToken::Danger),
-                                bold: false,
+                                ..crate::session::view_tree::TextStyle::default()
                             },
                         ),
                         None => crate::session::view_tree::ViewNode::styled(
                             "loading…",
                             crate::session::view_tree::TextStyle {
                                 token: Some(crate::session::view_tree::StyleToken::Muted),
-                                bold: false,
+                                ..crate::session::view_tree::TextStyle::default()
                             },
                         ),
                     };
@@ -596,26 +596,7 @@ impl App {
         let Some(area) = area else {
             return;
         };
-        let search = self.global_search_query();
-        let entries: Vec<tasks_panel::TaskPaneEntry> = self
-            .task_ui
-            .filtered_task_indices
-            .iter()
-            .filter_map(|&i| self.task_ui.cached_tasks.get(i))
-            .map(|t| {
-                let title = truncate_str(&t.title, 40);
-                // Match against the displayed (truncated) title so highlight
-                // byte offsets stay valid.
-                let m = search.and_then(|q| crate::fuzzy::fuzzy_match(q, &title));
-                tasks_panel::TaskPaneEntry {
-                    title,
-                    status: t.status,
-                    match_positions: m.as_ref().map(|m| m.positions.clone()).unwrap_or_default(),
-                    dimmed: search.is_some() && m.is_none(),
-                    linked: !self.task_related_session_indices(t).is_empty(),
-                }
-            })
-            .collect();
+        let entries = self.task_pane_entries();
         let focus = match self.focus {
             InputFocus::TaskList => crate::ui::FocusLevel::Focused,
             // While the central-pane editor is focused, keep the panel "active"

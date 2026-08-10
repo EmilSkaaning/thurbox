@@ -7441,6 +7441,74 @@ impl App {
             session,
             system,
             automations,
+            tasks: self.build_tasks_snapshot(),
+        }
+    }
+
+    /// The task rows the tasks pane shows, in order.
+    ///
+    /// Model work, beside the publisher rather than in `view`, because the native
+    /// pane and the published snapshot must show the same list: two builders would
+    /// be two answers to "which tasks, matched how". Titles are reduced to a
+    /// display cap here and the search is matched against the *reduced* title, so
+    /// a highlight offset always indexes the string that is drawn.
+    pub(crate) fn task_pane_entries(&self) -> Vec<crate::ui::tasks_panel::TaskPaneEntry> {
+        let search = self.global_search_query();
+        self.task_ui
+            .filtered_task_indices
+            .iter()
+            .filter_map(|&i| self.task_ui.cached_tasks.get(i))
+            .map(|t| {
+                let title = view::truncate_str(&t.title, 40);
+                let m = search.and_then(|q| crate::fuzzy::fuzzy_match(q, &title));
+                crate::ui::tasks_panel::TaskPaneEntry {
+                    title,
+                    status: t.status,
+                    match_positions: m.as_ref().map(|m| m.positions.clone()).unwrap_or_default(),
+                    dimmed: search.is_some() && m.is_none(),
+                    linked: !self.task_related_session_indices(t).is_empty(),
+                }
+            })
+            .collect()
+    }
+
+    /// The task list as the published snapshot carries it.
+    ///
+    /// Bounded by [`pc::MAX_TASK_ROWS`](crate::session::pane_context::MAX_TASK_ROWS)
+    /// *before* the per-row work, so a thousand-task list costs a pane neither a
+    /// failed render nor a thousand session lookups. Empty with the feature off,
+    /// the same filter the automation section applies: thurbox draws no task list
+    /// in that configuration, so a pane advertising one would surface a disabled
+    /// feature.
+    fn build_tasks_snapshot(&self) -> crate::session::pane_context::TasksSnapshot {
+        use crate::session::pane_context as pc;
+
+        if !self.features.tasks {
+            return pc::TasksSnapshot::default();
+        }
+        // A pane marks the cursor's row only when the cursor is visible there —
+        // while the pane is focused, or while a global-search preview is moving
+        // it. A plugin can observe neither, so it is resolved here.
+        let cursor_visible = matches!(self.focus, InputFocus::TaskList)
+            || self.global_search_preview_kind() == Some(crate::app::search::SearchKind::Task);
+        let selected = self.task_ui.task_panel_index;
+        let entries = self
+            .task_pane_entries()
+            .into_iter()
+            .take(pc::MAX_TASK_ROWS)
+            .enumerate()
+            .map(|(i, e)| pc::TaskSnapshot {
+                title: e.title,
+                status: e.status.as_str(),
+                selected: cursor_visible && i == selected,
+                dimmed: e.dimmed,
+                linked: e.linked,
+                match_positions: e.match_positions,
+            })
+            .collect();
+        pc::TasksSnapshot {
+            entries,
+            focused: matches!(self.focus, InputFocus::TaskList),
         }
     }
 

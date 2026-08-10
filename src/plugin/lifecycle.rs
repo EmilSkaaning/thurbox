@@ -1217,7 +1217,7 @@ mod tests {
                         "row board",
                         crate::session::view_tree::TextStyle {
                             token: Some(crate::session::view_tree::StyleToken::Accent),
-                            bold: false,
+                            ..crate::session::view_tree::TextStyle::default()
                         }
                     )
                 );

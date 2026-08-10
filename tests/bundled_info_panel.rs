@@ -149,6 +149,9 @@ impl Case {
 
         PaneContext {
             session: Some(session),
+            // The task section stays default here: this pane reads none of it,
+            // which is itself worth pinning — a pane sees only what it declares.
+            tasks: Default::default(),
             system: self.metrics.as_ref().map(|m| SystemSnapshot {
                 cpu_percent: m.cpu_percent,
                 memory_used: m.memory_used,
@@ -475,6 +478,7 @@ fn with_no_session_the_plugin_still_shows_what_it_knows() {
     let host = host();
     thurbox::session::pane_context::publish(PaneContext {
         session: None,
+        tasks: Default::default(),
         system: Some(SystemSnapshot {
             cpu_percent: 5.0,
             memory_used: 1_073_741_824,

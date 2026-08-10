@@ -204,6 +204,62 @@ pub struct AutomationSnapshot {
     pub due_in_secs: u64,
 }
 
+/// One row of the task list, as a pane draws it.
+///
+/// Four of the six fields are view facts rather than stored ones, and they are
+/// here because the *kernel* owns them: it owns the keyboard that moves the
+/// selection and the search that dims and matches, and a task's link to a live
+/// session is a join across records — the same class of thing as
+/// [`SessionSnapshot::parent_name`]. What is deliberately **not** here is the
+/// glyph and the colour: unlike a session status (see [`StatusSnapshot`], whose
+/// mapping is shared by two native panes and so must not be re-derived), a task
+/// status is drawn in exactly one place, so publishing its rendering would hand a
+/// pane the presentation it exists to own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskSnapshot {
+    /// The task's title, as the model knows it.
+    ///
+    /// Not fitted to any column: a pane's width is resolved during a frame and
+    /// this is published on the tick, and the plugin's pane is a different rect
+    /// from the native one — rows fitted to someone else's width would be wrong
+    /// at their own.
+    pub title: String,
+    /// Stable wire name of the task's status (`todo`, `in_progress`, `done`).
+    pub status: &'static str,
+    /// Whether this is the row the user's cursor is on, resolved here because
+    /// the selection also moves under a global-search preview.
+    pub selected: bool,
+    /// Whether a running search filtered this row out.
+    pub dimmed: bool,
+    /// Whether the task has at least one open related session.
+    pub linked: bool,
+    /// Byte offsets in `title` a running search matched. Empty when no search is
+    /// running or this row did not match; the pane decides how a matched run is
+    /// emphasised.
+    pub match_positions: Vec<usize>,
+}
+
+/// The task list a pane draws.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TasksSnapshot {
+    /// One entry per row, in the order the kernel lists them.
+    pub entries: Vec<TaskSnapshot>,
+    /// Whether the task pane holds focus, which is the one thing besides the
+    /// rows that changes what is drawn: the empty-state line names the key that
+    /// adds a task only when the pane can receive it.
+    pub focused: bool,
+}
+
+/// Most task rows a publication carries.
+///
+/// A bound on the *section*, not on a consumer, because the cost it prevents is
+/// the consumer's: a view tree is capped at
+/// [`super::view_tree::MAX_NODES`] nodes and a row costs several, so a
+/// thousand-task list would make every render of a task pane fail rather than
+/// merely scroll. No pane can show this many rows on any terminal, so the bound
+/// costs nothing that is visible.
+pub const MAX_TASK_ROWS: usize = 200;
+
 /// Everything a plugin may read about the kernel's current state.
 ///
 /// One value rather than three published separately: every section describes the
@@ -217,6 +273,8 @@ pub struct PaneContext {
     pub system: Option<SystemSnapshot>,
     /// Automations due to fire, soonest first.
     pub automations: Vec<AutomationSnapshot>,
+    /// The task list, empty when there are no tasks or the feature is off.
+    pub tasks: TasksSnapshot,
 }
 
 /// The process-wide snapshot slot.
@@ -305,6 +363,7 @@ mod tests {
             }),
             system: None,
             automations: Vec::new(),
+            tasks: TasksSnapshot::default(),
         }
     }
 
@@ -361,6 +420,63 @@ mod tests {
             );
             assert!(!snap.name.is_empty());
         }
+    }
+
+    /// A task row's status crosses as the name the database stores, so a pane
+    /// branching on it and a row read back out of SQLite agree — and so the
+    /// vocabulary cannot drift into a second spelling.
+    #[test]
+    fn a_task_rows_status_is_the_stored_wire_name() {
+        for status in [
+            crate::session::TaskStatus::Todo,
+            crate::session::TaskStatus::InProgress,
+            crate::session::TaskStatus::Done,
+        ] {
+            let row = TaskSnapshot {
+                title: "t".to_string(),
+                status: status.as_str(),
+                selected: false,
+                dimmed: false,
+                linked: false,
+                match_positions: Vec::new(),
+            };
+            assert_eq!(row.status, status.as_str());
+        }
+    }
+
+    /// The task section takes part in the change gate like every other, so two
+    /// equal lists must compare equal — including their match offsets, which is
+    /// the field most likely to be rebuilt into an equal-but-new `Vec`.
+    #[test]
+    fn equal_task_sections_compare_equal() {
+        let row = |selected: bool| TaskSnapshot {
+            title: "ship it".to_string(),
+            status: "todo",
+            selected,
+            dimmed: false,
+            linked: true,
+            match_positions: vec![0, 5],
+        };
+        assert_eq!(
+            TasksSnapshot {
+                entries: vec![row(false)],
+                focused: true
+            },
+            TasksSnapshot {
+                entries: vec![row(false)],
+                focused: true
+            }
+        );
+        assert_ne!(
+            TasksSnapshot {
+                entries: vec![row(false)],
+                focused: true
+            },
+            TasksSnapshot {
+                entries: vec![row(true)],
+                focused: true
+            }
+        );
     }
 
     /// Two different statuses must not describe themselves identically, or a

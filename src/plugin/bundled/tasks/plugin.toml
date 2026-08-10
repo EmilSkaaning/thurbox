@@ -1,0 +1,23 @@
+# thurbox's tasks pane, as a plugin.
+#
+# The second pane of Phase 4, and the first *list* pane: a selectable list with
+# search emphasis, which is the shape every remaining native pane has. It is a
+# *reproduction*, not a replacement — the native pane is still what thurbox
+# draws, and `tests/bundled_tasks_panel.rs` asserts this plugin builds the
+# identical view tree, so the two cannot drift while both exist.
+#
+# Two capabilities, and that is the whole reach: it renders, and it reads the
+# task list. Nothing here is privileged.
+name = "tasks"
+api_version = 1
+
+capabilities = ["render", "tasks"]
+
+[[panes]]
+id = "tasks"
+title = "Tasks (plugin)"
+slot = "right"
+# Off by default. The native tasks pane is still what F5 shows, so shipping this
+# visible would put two task lists side by side on every install. Turn it on to
+# compare them.
+default_visible = false

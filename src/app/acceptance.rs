@@ -3717,6 +3717,7 @@ fn plugin_pane_renders_its_tree_in_a_real_frame() {
             TextStyle {
                 token: Some(StyleToken::Accent),
                 bold: true,
+                ..TextStyle::default()
             },
         ),
         ViewNode::Divider,
@@ -4627,6 +4628,123 @@ fn pane_context_describes_the_active_session() {
             .is_none_or(|n| !n.contains('/')),
         "a repo reaches a plugin as a display name, not a path: {:?}",
         session.repo_name
+    );
+}
+
+/// The task section carries the rows a pane draws plus the three view facts a
+/// plugin cannot observe: which row the cursor is on, what a search dimmed, and
+/// what it matched.
+#[test]
+fn pane_context_describes_the_task_list() {
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(1);
+    for title in ["write it", "ship it"] {
+        h.app
+            .db
+            .create_task(&crate::storage::tasks::NewTask::local(title))
+            .unwrap();
+    }
+    h.app.refresh_tasks();
+
+    // In the pane's own order, which is the list's order — not sorted here, so
+    // a plugin draws the rows the native pane draws in the sequence it draws
+    // them.
+    let bare = h.app.build_pane_context().tasks;
+    let published: Vec<&str> = bare.entries.iter().map(|t| t.title.as_str()).collect();
+    let pane: Vec<String> = h
+        .app
+        .task_pane_entries()
+        .into_iter()
+        .map(|e| e.title)
+        .collect();
+    assert_eq!(
+        published,
+        pane.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+    assert_eq!(published.len(), 2);
+    assert_eq!(bare.entries[0].status, "todo");
+    assert!(
+        bare.entries.iter().all(|t| !t.selected),
+        "an unfocused pane marks no row, so a plugin does not draw a cursor \
+         where the user cannot move one"
+    );
+    assert!(!bare.focused);
+
+    // Focusing the pane is what puts the cursor on screen.
+    h.key(KeyCode::F(5), KeyModifiers::NONE);
+    let focused = h.app.build_pane_context().tasks;
+    assert!(focused.focused);
+    assert!(focused.entries[0].selected);
+    assert!(!focused.entries[1].selected);
+}
+
+/// With the feature off thurbox draws no task list at all, so a pane advertising
+/// one would surface something the user switched off.
+#[test]
+fn pane_context_publishes_no_tasks_when_the_feature_is_off() {
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(1);
+    h.app
+        .db
+        .create_task(&crate::storage::tasks::NewTask::local("hidden"))
+        .unwrap();
+    h.app.refresh_tasks();
+    assert_eq!(h.app.build_pane_context().tasks.entries.len(), 1);
+
+    h.app.features.tasks = false;
+    assert!(
+        h.app.build_pane_context().tasks.entries.is_empty(),
+        "the section follows its feature flag, like the automation section"
+    );
+}
+
+/// The bound is on the section, so a list far longer than any pane can show
+/// cannot make a plugin's render exceed the view tree's node budget.
+#[test]
+fn pane_context_bounds_how_many_task_rows_it_publishes() {
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(1);
+    let over = crate::session::pane_context::MAX_TASK_ROWS + 7;
+    for i in 0..over {
+        h.app
+            .db
+            .create_task(&crate::storage::tasks::NewTask::local(format!("t{i}")))
+            .unwrap();
+    }
+    h.app.refresh_tasks();
+    assert_eq!(
+        h.app.build_pane_context().tasks.entries.len(),
+        crate::session::pane_context::MAX_TASK_ROWS
+    );
+}
+
+/// A changed task list is a changed snapshot; an unchanged one still publishes
+/// once, so adding the section did not defeat the change gate.
+#[test]
+fn a_changed_task_list_republishes_and_an_unchanged_one_does_not() {
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(1);
+    h.tick();
+    let before = h.app.perf_counters().pane_context_publishes;
+
+    h.app
+        .db
+        .create_task(&crate::storage::tasks::NewTask::local("new work"))
+        .unwrap();
+    h.app.refresh_tasks();
+    h.tick();
+    assert_eq!(
+        h.app.perf_counters().pane_context_publishes,
+        before + 1,
+        "a task the user added is state that moved"
+    );
+    for _ in 0..3 {
+        h.tick();
+    }
+    assert_eq!(
+        h.app.perf_counters().pane_context_publishes,
+        before + 1,
+        "a still task list must not be republished every tick"
     );
 }
 

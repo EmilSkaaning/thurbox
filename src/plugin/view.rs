@@ -365,11 +365,19 @@ fn convert_text(table: &Table, kind: &str) -> Result<ViewNode, ViewError> {
         }
     };
 
-    let bold = matches!(table.get::<Value>("bold"), Ok(Value::Boolean(true)));
+    // Emphasis is opt-in per attribute: anything that is not the boolean `true`
+    // — absent, `false`, or a value of another type — leaves the attribute off,
+    // so a misspelled field cannot silently style a run.
+    let flag = |name: &str| matches!(table.get::<Value>(name), Ok(Value::Boolean(true)));
 
     Ok(ViewNode::Text {
         content: sanitize_text(&content),
-        style: TextStyle { token, bold },
+        style: TextStyle {
+            token,
+            bold: flag("bold"),
+            dim: flag("dim"),
+            underline: flag("underline"),
+        },
     })
 }
 
@@ -661,10 +669,67 @@ mod tests {
                 "hi",
                 TextStyle {
                     token: Some(StyleToken::Accent),
-                    bold: true
+                    bold: true,
+                    ..TextStyle::default()
                 }
             )
         );
+    }
+
+    /// Each emphasis is its own field and each is opt-in: a plugin that declares
+    /// one must not get another, and a field it did not declare must be off.
+    #[test]
+    fn each_emphasis_converts_independently() {
+        let node =
+            convert_src(r#"return { kind = "text", content = "hi", style = "muted", dim = true }"#)
+                .unwrap();
+        assert_eq!(
+            node,
+            ViewNode::styled(
+                "hi",
+                TextStyle {
+                    token: Some(StyleToken::Muted),
+                    dim: true,
+                    ..TextStyle::default()
+                }
+            )
+        );
+
+        let all = convert_src(
+            r#"return { kind = "text", content = "hi", bold = true, dim = true,
+                        underline = true }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            all,
+            ViewNode::styled(
+                "hi",
+                TextStyle {
+                    token: None,
+                    bold: true,
+                    dim: true,
+                    underline: true,
+                }
+            )
+        );
+    }
+
+    /// Anything that is not the boolean `true` leaves the attribute off, so a
+    /// misspelled or mistyped value cannot silently style a run.
+    #[test]
+    fn a_non_boolean_emphasis_is_off_rather_than_on() {
+        for decl in [
+            r#"underline = false"#,
+            r#"underline = "yes""#,
+            r#"underline = 1"#,
+            r#"dim = {}"#,
+        ] {
+            let node = convert_src(&format!(
+                r#"return {{ kind = "text", content = "x", {decl} }}"#
+            ))
+            .unwrap();
+            assert_eq!(node, ViewNode::text("x"), "{decl}");
+        }
     }
 
     #[test]
@@ -733,14 +798,15 @@ mod tests {
                     "Name: ",
                     TextStyle {
                         token: Some(StyleToken::Muted),
-                        bold: false
+                        ..TextStyle::default()
                     }
                 ),
                 ViewNode::styled(
                     "demo",
                     TextStyle {
                         token: None,
-                        bold: true
+                        bold: true,
+                        ..TextStyle::default()
                     }
                 ),
             ])

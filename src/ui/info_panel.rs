@@ -174,6 +174,7 @@ fn section(title: impl Into<String>) -> ViewNode {
         TextStyle {
             token: Some(StyleToken::Accent),
             bold: true,
+            ..TextStyle::default()
         },
     )])
 }
@@ -189,6 +190,7 @@ fn push_session_rows(rows: &mut Vec<ViewNode>, info: &SessionInfo, parent_name: 
             TextStyle {
                 token: Some(StyleToken::for_status(info.status)),
                 bold: true,
+                ..TextStyle::default()
             },
         ),
     ]));
@@ -199,6 +201,7 @@ fn push_session_rows(rows: &mut Vec<ViewNode>, info: &SessionInfo, parent_name: 
             TextStyle {
                 token: Some(StyleToken::Role),
                 bold: true,
+                ..TextStyle::default()
             },
         ),
     ]));

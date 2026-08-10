@@ -19,7 +19,7 @@
 use mlua::{Lua, Table};
 
 use crate::session::pane_context::{
-    AutomationSnapshot, PaneContext, SessionSnapshot, SystemSnapshot,
+    AutomationSnapshot, PaneContext, SessionSnapshot, SystemSnapshot, TaskSnapshot,
 };
 
 /// Set `key` to `value` only when there is one.
@@ -163,11 +163,49 @@ fn build_automation(lua: &Lua, a: &AutomationSnapshot) -> mlua::Result<Table> {
     Ok(t)
 }
 
+/// The task list: `{ entries = { … }, focused = bool }`.
+///
+/// A table rather than a `Nil`, for the automations reason — "there are no tasks"
+/// is knowledge the kernel has, so a pane iterates without a nil check. `entries`
+/// is a one-based array so `for _, entry in ipairs(tasks.entries)` works.
+pub fn tasks_table(lua: &Lua, context: &PaneContext) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    let entries = lua.create_table()?;
+    for (i, task) in context.tasks.entries.iter().enumerate() {
+        entries.set(i + 1, build_task(lua, task)?)?;
+    }
+    t.set("entries", entries)?;
+    t.set("focused", context.tasks.focused)?;
+    Ok(t)
+}
+
+fn build_task(lua: &Lua, task: &TaskSnapshot) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("title", task.title.clone())?;
+    t.set("status", task.status)?;
+    // Booleans cross as booleans even when false: unlike an optional value,
+    // "this row is not selected" is a fact every row carries, and a pane reads
+    // all three unconditionally.
+    t.set("selected", task.selected)?;
+    t.set("dimmed", task.dimmed)?;
+    t.set("linked", task.linked)?;
+    // Byte offsets, not pre-split runs: the split is presentation, so the pane
+    // does it. One-based array of the zero-based offsets the matcher produced —
+    // the array index is Lua's convention, the values are the kernel's.
+    let matches = lua.create_table()?;
+    for (i, pos) in task.match_positions.iter().enumerate() {
+        matches.set(i + 1, *pos as u64)?;
+    }
+    t.set("matchPositions", matches)?;
+    Ok(t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session::pane_context::{
-        AgentMetricsSnapshot, GitSnapshot, StatusSnapshot, UsageSnapshot, UsageWindowSnapshot,
+        AgentMetricsSnapshot, GitSnapshot, StatusSnapshot, TasksSnapshot, UsageSnapshot,
+        UsageWindowSnapshot,
     };
     use crate::session::SessionStatus;
 
@@ -194,8 +232,7 @@ mod tests {
     fn context(session: Option<SessionSnapshot>) -> PaneContext {
         PaneContext {
             session,
-            system: None,
-            automations: Vec::new(),
+            ..PaneContext::default()
         }
     }
 
@@ -264,7 +301,6 @@ mod tests {
     fn quantities_cross_as_numbers_not_strings() {
         let lua = Lua::new();
         let ctx = PaneContext {
-            session: None,
             system: Some(SystemSnapshot {
                 cpu_percent: 12.5,
                 memory_used: 8_589_934_592,
@@ -273,7 +309,7 @@ mod tests {
                 session_memory_bytes: 524_288_000,
                 thurbox_dir_bytes: Some(1_048_576),
             }),
-            automations: Vec::new(),
+            ..PaneContext::default()
         };
         let t = match metrics_table(&lua, &ctx).unwrap() {
             mlua::Value::Table(t) => t,
@@ -306,17 +342,97 @@ mod tests {
     fn automations_carry_a_resolved_countdown() {
         let lua = Lua::new();
         let ctx = PaneContext {
-            session: None,
-            system: None,
             automations: vec![AutomationSnapshot {
                 label: "nightly".to_string(),
                 due_in_secs: 90,
             }],
+            ..PaneContext::default()
         };
         let t = automations_table(&lua, &ctx).unwrap();
         let first: Table = t.get(1).unwrap();
         assert_eq!(first.get::<String>("label").unwrap(), "nightly");
         assert_eq!(first.get::<u64>("dueInSecs").unwrap(), 90);
+    }
+
+    /// A task row carries what a pane draws it from — and no glyph and no style
+    /// token, because choosing those is what the pane is for.
+    #[test]
+    fn a_task_row_crosses_with_its_view_facts_and_no_rendering() {
+        let lua = Lua::new();
+        let ctx = PaneContext {
+            tasks: TasksSnapshot {
+                entries: vec![TaskSnapshot {
+                    title: "ship the pane".to_string(),
+                    status: "in_progress",
+                    selected: true,
+                    dimmed: false,
+                    linked: true,
+                    match_positions: vec![0, 5],
+                }],
+                focused: true,
+            },
+            ..PaneContext::default()
+        };
+        let t = tasks_table(&lua, &ctx).unwrap();
+        assert!(t.get::<bool>("focused").unwrap());
+        let entries: Table = t.get("entries").unwrap();
+        assert_eq!(entries.raw_len(), 1);
+        let row: Table = entries.get(1).unwrap();
+        assert_eq!(row.get::<String>("title").unwrap(), "ship the pane");
+        assert_eq!(row.get::<String>("status").unwrap(), "in_progress");
+        assert!(row.get::<bool>("selected").unwrap());
+        assert!(!row.get::<bool>("dimmed").unwrap());
+        assert!(row.get::<bool>("linked").unwrap());
+        let matches: Table = row.get("matchPositions").unwrap();
+        assert_eq!(matches.get::<u64>(1).unwrap(), 0);
+        assert_eq!(matches.get::<u64>(2).unwrap(), 5);
+        for absent in ["icon", "glyph", "token", "style"] {
+            assert!(
+                !row.contains_key(absent).unwrap(),
+                "a task row must not carry its own rendering ({absent})"
+            );
+        }
+    }
+
+    /// Unlike an optional field, a row's flags are facts every row has, so
+    /// `false` must cross as `false` rather than as an absent key — a pane reads
+    /// all three unconditionally.
+    #[test]
+    fn a_task_rows_flags_cross_even_when_false() {
+        let lua = Lua::new();
+        let ctx = PaneContext {
+            tasks: TasksSnapshot {
+                entries: vec![TaskSnapshot {
+                    title: "t".to_string(),
+                    status: "todo",
+                    selected: false,
+                    dimmed: false,
+                    linked: false,
+                    match_positions: Vec::new(),
+                }],
+                focused: false,
+            },
+            ..PaneContext::default()
+        };
+        let entries: Table = tasks_table(&lua, &ctx).unwrap().get("entries").unwrap();
+        let row: Table = entries.get(1).unwrap();
+        for key in ["selected", "dimmed", "linked"] {
+            assert!(row.contains_key(key).unwrap(), "{key} should be present");
+            assert!(!row.get::<bool>(key).unwrap());
+        }
+        let matches: Table = row.get("matchPositions").unwrap();
+        assert_eq!(matches.raw_len(), 0);
+    }
+
+    /// "There are no tasks" is knowledge, like "there are no automations", so it
+    /// crosses as an empty array inside a present table.
+    #[test]
+    fn no_tasks_is_an_empty_array() {
+        let lua = Lua::new();
+        let t = tasks_table(&lua, &context(None)).unwrap();
+        let entries: Table = t.get("entries").unwrap();
+        assert_eq!(entries.raw_len(), 0);
+        assert!(!t.get::<bool>("focused").unwrap());
     }
 
     #[test]
