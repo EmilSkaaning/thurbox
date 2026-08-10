@@ -7401,20 +7401,22 @@ impl App {
         self.plugin_panes.iter().find(|p| p.is_focusable())
     }
 
-    /// Whether a plugin pane should occupy a slot in the right column.
+    /// How many plugin panes the right column should seat.
     ///
-    /// A pane exists only for a *running* plugin, so this is false whenever no
+    /// A pane exists only for a *running* plugin, so this is zero whenever no
     /// plugin is installed, none started, or the feature is compiled out — and
-    /// the layout is then byte-identical to a build without the plugin host.
+    /// the layout is then byte-identical to a build without the plugin host. It
+    /// is a count rather than a flag because a plugin may publish several panes
+    /// and the workspace tree seats each one.
     #[cfg(feature = "plugins")]
-    pub(crate) fn show_plugin_pane(&self) -> bool {
-        self.plugin_panes.iter().any(|p| p.visible)
+    pub(crate) fn visible_plugin_panes(&self) -> usize {
+        self.plugin_panes.iter().filter(|p| p.visible).count()
     }
 
     /// Without the plugin feature there is never a pane to place.
     #[cfg(not(feature = "plugins"))]
-    pub(crate) fn show_plugin_pane(&self) -> bool {
-        false
+    pub(crate) fn visible_plugin_panes(&self) -> usize {
+        0
     }
 
     /// Replace the plugin panes, reporting whether what the user sees changed.
@@ -7479,7 +7481,7 @@ impl App {
                 // The review's changed-files list lives in the file-viewer
                 // column, so force that column present while a review is open.
                 show_file_viewer: self.show_file_viewer || self.active_review().is_some(),
-                show_plugin_pane: self.show_plugin_pane(),
+                plugin_panes: self.visible_plugin_panes(),
                 show_global_search: self.global_search.active,
                 show_automations_pane: self.features.automations,
                 automation_count: self.automation_ui.cached_automations.len(),

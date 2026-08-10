@@ -100,24 +100,24 @@ width-dependent, which means a resize has to re-enter the VM before the frame
 that needs it, and a plugin that mis-measures produces a broken pane rather than
 a refused node. Prefer the node.
 
-## 5. Open: the layout hosts one plugin pane, and only the first is reachable
+## 5. Half closed: the layout seats N panes; the keyboard still reaches one
 
-`ui::layout`'s `RightSlot::Plugin` is a **single** slot;
-`App::render_plugin_pane` draws `plugin_panes.iter().find(|p| p.visible)`, and
-`App::toggle_plugin_pane` mutates `plugin_panes.first_mut()`. So with two
-bundled plugins installed:
+**Closed.** The layout no longer hosts a single pane. `ui::layout` divides the
+screen with a workspace tree (ADR-24), the right column holds one region per
+*visible* plugin pane (`PanelAreas::plugin_panes`), and
+`App::render_plugin_panes` draws each of them. Two bundled panes can be on
+screen at once, which is what `two_plugin_panes_both_reach_the_screen` in
+`src/app/acceptance.rs` asserts.
 
-- only one pane can be on screen at a time, and
-- `F10` toggles the **first** pane whatever the user wanted, leaving a second
-  bundled pane unreachable from the keyboard.
-
-Phase 4 ships seven panes. It therefore cannot be finished on this kernel, and
-this is not a pane-porting problem — it is the workspace tree
-(ADR-V23), which Phase 0 scheduled precisely so that panes would not have to be
-migrated twice. Whatever closes it should also decide whether `F10` remains one
-toggle or becomes per-pane visibility with generated
+**Still open.** `App::toggle_plugin_pane` mutates `plugin_panes.first_mut()`, so
+`F10` toggles the **first** declared pane whatever the user wanted and a second
+bundled pane is unreachable from the keyboard. Phase 4 ships seven panes, so
+this has to be decided before the pane migration finishes: whether `F10` remains
+one toggle or becomes per-pane visibility with generated
 `<plugin>.<pane>.toggle` commands (ADR-V21) — the pane-visibility spec already
-describes the latter.
+describes the latter. Deliberately not folded into the layout change: seating a
+pane is geometry, and giving each pane a key is a keybinding decision with its
+own surface.
 
 A related measurement worth taking at the same time: `render_all_panes_collected`
 renders **every** declared pane each cycle, visible or not. That is correct for

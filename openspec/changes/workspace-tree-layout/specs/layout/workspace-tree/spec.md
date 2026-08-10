@@ -110,8 +110,9 @@ unchanged, so no previously reachable layout is altered.
 #### Scenario: A narrow terminal drops the extra columns
 
 - **WHEN** more plugin panes are visible than the terminal has room for
-- **THEN** the leading panes are placed, the trailing ones are not, and the
-  center region is at least the minimum width
+- **THEN** the leading panes are placed and the trailing ones are not
+- **AND** whenever more than one plugin column is placed, the center region is
+  at least the minimum width
 
 #### Scenario: Widening restores a dropped column
 

@@ -3677,7 +3677,7 @@ fn plugin_pane_visibility_follows_an_external_change() {
     let mut h = Harness::new(160, 40, 1);
     let pane = crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, true);
     h.app.set_plugin_panes(vec![pane]);
-    assert!(h.app.show_plugin_pane(), "seeded visible");
+    assert_eq!(h.app.visible_plugin_panes(), 1, "seeded visible");
 
     h.app
         .db
@@ -3687,7 +3687,7 @@ fn plugin_pane_visibility_follows_an_external_change() {
         h.app.apply_stored_plugin_pane_visibility(),
         "an external hide is a change"
     );
-    assert!(!h.app.show_plugin_pane(), "the pane is off screen");
+    assert_eq!(h.app.visible_plugin_panes(), 0, "the pane is off screen");
     assert!(
         !h.render().contains("Demo"),
         "a hidden pane must not be drawn"
@@ -3697,6 +3697,36 @@ fn plugin_pane_visibility_follows_an_external_change() {
     // owes no repaint: one installed plugin must not repaint on every detected
     // database change.
     assert!(!h.app.apply_stored_plugin_pane_visibility());
+}
+
+/// Two panes must both reach the screen. The single-slot layout drew only the
+/// first visible pane, so a second bundled plugin was invisible however it was
+/// configured — the wall the workspace tree exists to remove.
+#[cfg(feature = "plugins")]
+#[test]
+fn two_plugin_panes_both_reach_the_screen() {
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::view_tree::ViewNode;
+
+    let mut h = Harness::new(200, 40, 1);
+    let mut first =
+        crate::plugin::PluginPane::loading("alpha", "board", "Alpha", PaneSlot::Right, true);
+    let mut second =
+        crate::plugin::PluginPane::loading("beta", "board", "Beta", PaneSlot::Right, true);
+    first.apply(Ok(ViewNode::text("drawn by alpha")));
+    second.apply(Ok(ViewNode::text("drawn by beta")));
+    h.app.set_plugin_panes(vec![first, second]);
+
+    let frame = h.render();
+    assert!(frame.contains("drawn by alpha"), "{frame}");
+    assert!(frame.contains("drawn by beta"), "{frame}");
+
+    // Each got its own region, side by side, and neither overlaps the center.
+    let areas = h.app.layout_for(ratatui::layout::Rect::new(0, 0, 200, 40));
+    assert_eq!(areas.plugin_panes.len(), 2);
+    let (a, b) = (areas.plugin_panes[0], areas.plugin_panes[1]);
+    assert_eq!(a.x, areas.terminal.x + areas.terminal.width);
+    assert_eq!(b.x, a.x + a.width);
 }
 
 /// A pane the user has never chosen for keeps whatever the manifest seeded, so
@@ -3938,7 +3968,7 @@ fn no_plugin_panes_means_no_layout_change() {
     let before = h.render();
     h.app.set_plugin_panes(Vec::new());
     assert_eq!(h.render(), before);
-    assert!(!h.app.show_plugin_pane());
+    assert_eq!(h.app.visible_plugin_panes(), 0);
 }
 
 /// A pane whose tree does not change must not dirty the UI: one installed
@@ -3987,7 +4017,7 @@ fn plugin_pane_toggles_and_persists() {
         !hidden.contains("PLUGIN BODY"),
         "toggle must hide it:\n{hidden}"
     );
-    assert!(!h.app.show_plugin_pane());
+    assert_eq!(h.app.visible_plugin_panes(), 0);
 
     // The choice is persisted, so re-publishing the same pane set (as the
     // render worker does every cycle) must not resurrect it.
@@ -3996,12 +4026,16 @@ fn plugin_pane_toggles_and_persists() {
     fresh.apply(Ok(ViewNode::text("PLUGIN BODY")));
     h.app.set_plugin_panes(vec![fresh]);
     assert!(
-        !h.app.show_plugin_pane(),
+        h.app.visible_plugin_panes() == 0,
         "a stored choice must outrank the manifest seed"
     );
 
     h.app.toggle_plugin_pane();
-    assert!(h.app.show_plugin_pane(), "toggling back shows it again");
+    assert_eq!(
+        h.app.visible_plugin_panes(),
+        1,
+        "toggling back shows it again"
+    );
 }
 
 /// A hidden plugin pane must cost no layout space at all.
@@ -4016,7 +4050,7 @@ fn a_hidden_plugin_pane_leaves_the_layout_untouched() {
     let pane = crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, false);
     h.app.set_plugin_panes(vec![pane]);
 
-    assert!(!h.app.show_plugin_pane());
+    assert_eq!(h.app.visible_plugin_panes(), 0);
     assert_eq!(h.render(), baseline);
 }
 

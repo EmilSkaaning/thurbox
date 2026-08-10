@@ -2,7 +2,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 use crate::session::workspace_tree::{Axis, Node, Region, RegionId, Sizing};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PanelAreas {
     pub header: Rect,
     /// Session list area (top of the left column).
@@ -17,9 +17,11 @@ pub struct PanelAreas {
     /// the file viewer (behaves like the file viewer).
     pub tasks_panel: Option<Rect>,
     pub file_viewer: Option<Rect>,
-    /// A plugin-contributed pane, in the right column after the file viewer.
-    /// Present only in the wide layout, exactly like the native side panels.
-    pub plugin_pane: Option<Rect>,
+    /// Plugin-contributed panes, in the right column after the file viewer, in
+    /// publication order. Present only in the wide layout, exactly like the
+    /// native side panels — and shorter than the visible-pane count when the
+    /// terminal has room for only some of them.
+    pub plugin_panes: Vec<Rect>,
     /// Global search strip — full-width, docked along the bottom (above the
     /// footer) when active.
     pub global_search: Option<Rect>,
@@ -44,6 +46,16 @@ const AUTOMATIONS_PANE_MIN_ROWS: u16 = 3;
 /// Minimum rows the session list keeps when the automations pane is shown.
 const SESSIONS_MIN_ROWS: u16 = 3;
 
+/// Narrowest the center may become before an **additional** plugin column is
+/// dropped rather than placed.
+///
+/// It gates only the second pane onward: with one plugin pane the right column
+/// is exactly the set the single-slot layout produced, narrow centers included,
+/// and re-gating that would change a layout that already ships. Panes past the
+/// first are new capacity, and four 20% columns take the center to zero — an
+/// agent terminal that silently vanished when a plugin published a pane.
+const CENTER_MIN_COLS: u16 = 20;
+
 /// Which panels the layout should place, as a named structure.
 ///
 /// Named rather than positional because the old signature took **nine**
@@ -61,8 +73,10 @@ pub struct LayoutParams {
     pub show_tasks_panel: bool,
     /// Show the file viewer in the right column.
     pub show_file_viewer: bool,
-    /// Show a plugin-contributed pane in the right column.
-    pub show_plugin_pane: bool,
+    /// How many plugin-contributed panes are visible. Each gets its own region
+    /// in the right column: a plugin may publish several panes, so the layout
+    /// counts them rather than asking whether there is one.
+    pub plugin_panes: usize,
     /// Show the full-width global-search strip above the footer.
     pub show_global_search: bool,
     /// Show the automations pane beneath the session list.
@@ -78,8 +92,9 @@ impl LayoutParams {
     ///
     /// Order is fixed by the host (tasks, then file viewer, then plugin panes)
     /// — a pane picks a column, not a position, so two panes can never
-    /// disagree about who comes first.
-    fn right_regions(&self) -> Vec<RegionId> {
+    /// disagree about who comes first. `plugin_columns` is how many plugin
+    /// panes the terminal has room for, which is at most [`Self::plugin_panes`].
+    fn right_regions(&self, plugin_columns: usize) -> Vec<RegionId> {
         let mut regions = Vec::new();
         if self.show_tasks_panel {
             regions.push(RegionId::Tasks);
@@ -87,15 +102,16 @@ impl LayoutParams {
         if self.show_file_viewer {
             regions.push(RegionId::FileViewer);
         }
-        if self.show_plugin_pane {
-            regions.push(RegionId::Plugin(0));
-        }
+        regions.extend((0..plugin_columns).map(RegionId::Plugin));
         regions
     }
 
     /// Whether anything wants the wide three-column layout.
     fn wants_side_columns(&self) -> bool {
-        self.show_info_panel || !self.right_regions().is_empty()
+        self.show_info_panel
+            || self.show_tasks_panel
+            || self.show_file_viewer
+            || self.plugin_panes > 0
     }
 }
 
@@ -241,6 +257,53 @@ fn left_column(sizing: Sizing, p: LayoutParams, column_rows: u16) -> Node {
     )
 }
 
+/// The wide content band's children: `list? | info? | center | right…`.
+///
+/// `plugin_columns` is how many plugin panes to seat; the center holds the
+/// remainder, so a hidden occupant's width goes there rather than leaving a gap.
+fn wide_columns(p: LayoutParams, column_rows: u16, plugin_columns: usize) -> Vec<Node> {
+    let mut children = Vec::new();
+    if p.show_session_list {
+        children.push(left_column(Sizing::Percent(18), p, column_rows));
+    }
+    if p.show_info_panel {
+        children.push(Node::pane(Sizing::Percent(15), RegionId::Info));
+    }
+    children.push(Node::pane(Sizing::Fill { min: 0 }, RegionId::Center));
+    for region in p.right_regions(plugin_columns) {
+        children.push(Node::pane(Sizing::Percent(20), region));
+    }
+    children
+}
+
+/// How many of the visible plugin panes the wide layout can seat.
+///
+/// Each right-column occupant takes 20% and the center takes the remainder, so
+/// over-subscribing starves the **center** — the fallback view, which must never
+/// be hidden. The check is therefore "does the center survive", made by solving
+/// the candidate column and dropping the last plugin pane until it does, per
+/// [`CENTER_MIN_COLS`]. The first pane is never dropped this way: it is the
+/// layout the single-slot version already produced.
+fn plugin_columns_that_fit(area: Rect, p: LayoutParams, column_rows: u16) -> usize {
+    let mut columns = p.plugin_panes;
+    let band = Rect::new(area.x, area.y, area.width, column_rows);
+    while columns > 1 {
+        let candidate = Node::split(
+            Sizing::Fill { min: 1 },
+            Axis::Horizontal,
+            wide_columns(p, column_rows, columns),
+        );
+        let center = solve(&candidate, band)
+            .rect(RegionId::Center)
+            .unwrap_or_default();
+        if center.width >= CENTER_MIN_COLS {
+            break;
+        }
+        columns -= 1;
+    }
+    columns
+}
+
 /// The content band: the columns between the header and the bottom strips.
 ///
 /// Three shapes, picked by width exactly as before: the center alone below the
@@ -256,20 +319,12 @@ fn content_band(area: Rect, p: LayoutParams, column_rows: u16) -> Node {
     }
 
     if area.width >= settings.three_panel_min_cols && p.wants_side_columns() {
-        let mut children = Vec::new();
-        if p.show_session_list {
-            children.push(left_column(Sizing::Percent(18), p, column_rows));
-        }
-        if p.show_info_panel {
-            children.push(Node::pane(Sizing::Percent(15), RegionId::Info));
-        }
-        // The center takes the remainder, so a hidden occupant's width goes
-        // here rather than leaving a gap in the column.
-        children.push(Node::pane(Sizing::Fill { min: 0 }, RegionId::Center));
-        for region in p.right_regions() {
-            children.push(Node::pane(Sizing::Percent(20), region));
-        }
-        return Node::split(sizing, Axis::Horizontal, children);
+        let columns = plugin_columns_that_fit(area, p, column_rows);
+        return Node::split(
+            sizing,
+            Axis::Horizontal,
+            wide_columns(p, column_rows, columns),
+        );
     }
 
     if !p.show_session_list {
@@ -353,7 +408,9 @@ pub fn compute_layout(area: Rect, p: LayoutParams) -> PanelAreas {
         info_panel: placed.rect(RegionId::Info),
         tasks_panel: placed.rect(RegionId::Tasks),
         file_viewer: placed.rect(RegionId::FileViewer),
-        plugin_pane: placed.rect(RegionId::Plugin(0)),
+        plugin_panes: (0..)
+            .map_while(|i| placed.rect(RegionId::Plugin(i)))
+            .collect(),
         global_search: placed.band(RegionId::GlobalSearch),
         status_message: placed.band(RegionId::StatusMessage),
         terminal: placed.rect(RegionId::Center).unwrap_or_default(),
@@ -367,6 +424,17 @@ mod tests {
 
     fn area(width: u16, height: u16) -> Rect {
         Rect::new(0, 0, width, height)
+    }
+
+    /// The single plugin region, asserting there is exactly one.
+    fn only_plugin_pane(areas: &PanelAreas) -> Rect {
+        assert_eq!(
+            areas.plugin_panes.len(),
+            1,
+            "expected one plugin region: {:?}",
+            areas.plugin_panes
+        );
+        areas.plugin_panes[0]
     }
 
     #[test]
@@ -468,7 +536,7 @@ mod tests {
                     show_info_panel: true,
                     show_tasks_panel: true,
                     show_file_viewer: true,
-                    show_plugin_pane: true,
+                    plugin_panes: 1,
                     show_global_search: true,
                     show_automations_pane: true,
                     automation_count: 4,
@@ -495,7 +563,7 @@ mod tests {
                 show_info_panel: true,
                 show_tasks_panel: true,
                 show_file_viewer: true,
-                show_plugin_pane: true,
+                plugin_panes: 1,
                 show_global_search: true,
                 show_automations_pane: true,
                 automation_count: 4,
@@ -1113,13 +1181,13 @@ mod tests {
                 show_session_list: true,
                 show_tasks_panel: true,
                 show_file_viewer: true,
-                show_plugin_pane: true,
+                plugin_panes: 1,
                 ..Default::default()
             },
         );
         let tp = areas.tasks_panel.expect("tasks panel shown");
         let fv = areas.file_viewer.expect("file viewer shown");
-        let pp = areas.plugin_pane.expect("plugin pane shown");
+        let pp = only_plugin_pane(&areas);
         assert!(fv.x >= tp.x + tp.width, "file viewer right of tasks");
         assert!(pp.x >= fv.x + fv.width, "plugin pane right of file viewer");
     }
@@ -1132,20 +1200,20 @@ mod tests {
             area(200, 24),
             LayoutParams {
                 show_tasks_panel: true,
-                show_plugin_pane: true,
+                plugin_panes: 1,
                 ..Default::default()
             },
         );
         let without_tasks = compute_layout(
             area(200, 24),
             LayoutParams {
-                show_plugin_pane: true,
+                plugin_panes: 1,
                 ..Default::default()
             },
         );
 
         let term = without_tasks.terminal;
-        let pp = without_tasks.plugin_pane.expect("plugin pane shown");
+        let pp = only_plugin_pane(&without_tasks);
         assert!(without_tasks.tasks_panel.is_none());
         // The pane butts straight up against the terminal: nothing is left
         // where the hidden occupant would have been.
@@ -1157,7 +1225,7 @@ mod tests {
             term.width > with_tasks.terminal.width,
             "the terminal absorbs a hidden occupant's width"
         );
-        assert_eq!(pp.width, with_tasks.plugin_pane.unwrap().width);
+        assert_eq!(pp.width, only_plugin_pane(&with_tasks).width);
     }
 
     #[test]
@@ -1166,11 +1234,11 @@ mod tests {
             area(200, 24),
             LayoutParams {
                 show_session_list: true,
-                show_plugin_pane: true,
+                plugin_panes: 1,
                 ..Default::default()
             },
         );
-        assert!(areas.plugin_pane.is_some());
+        assert_eq!(areas.plugin_panes.len(), 1);
         assert!(areas.tasks_panel.is_none());
         assert!(areas.file_viewer.is_none());
     }
@@ -1182,11 +1250,116 @@ mod tests {
             area(119, 24),
             LayoutParams {
                 show_session_list: true,
-                show_plugin_pane: true,
+                plugin_panes: 1,
                 ..Default::default()
             },
         );
-        assert!(areas.plugin_pane.is_none());
+        assert!(areas.plugin_panes.is_empty());
+    }
+
+    #[test]
+    fn two_visible_plugin_panes_get_two_regions() {
+        let areas = compute_layout(
+            area(200, 24),
+            LayoutParams {
+                show_session_list: true,
+                plugin_panes: 2,
+                ..Default::default()
+            },
+        );
+        assert_eq!(areas.plugin_panes.len(), 2, "both panes are seated");
+        let (first, second) = (areas.plugin_panes[0], areas.plugin_panes[1]);
+        let term = areas.terminal;
+        assert_eq!(
+            first.x,
+            term.x + term.width,
+            "first pane right of the center"
+        );
+        assert_eq!(second.x, first.x + first.width, "second right of the first");
+        assert_eq!(second.x + second.width, 200, "the pair ends at the edge");
+    }
+
+    #[test]
+    fn hiding_one_plugin_pane_leaves_no_gap() {
+        let two = compute_layout(
+            area(200, 24),
+            LayoutParams {
+                plugin_panes: 2,
+                ..Default::default()
+            },
+        );
+        let one = compute_layout(
+            area(200, 24),
+            LayoutParams {
+                plugin_panes: 1,
+                ..Default::default()
+            },
+        );
+        assert_eq!(one.plugin_panes.len(), 1);
+        let pane = one.plugin_panes[0];
+        // The remaining pane keeps its width and butts against the center,
+        // which absorbed the hidden one (it holds the `Min(0)` slot).
+        assert_eq!(pane.width, two.plugin_panes[0].width);
+        assert_eq!(pane.x, one.terminal.x + one.terminal.width, "no gap");
+        assert!(one.terminal.width > two.terminal.width);
+    }
+
+    #[test]
+    fn extra_plugin_columns_are_dropped_when_the_center_would_starve() {
+        // Five 20% occupants would leave the center nothing at any width.
+        let areas = compute_layout(
+            area(200, 24),
+            LayoutParams {
+                show_tasks_panel: true,
+                show_file_viewer: true,
+                plugin_panes: 3,
+                ..Default::default()
+            },
+        );
+        assert_eq!(areas.plugin_panes.len(), 2, "the third column is dropped");
+        assert!(
+            areas.terminal.width >= CENTER_MIN_COLS,
+            "the center survives: {}",
+            areas.terminal.width
+        );
+    }
+
+    #[test]
+    fn widening_restores_a_dropped_plugin_column() {
+        // Three 20% occupants beside the list and info leave the center 7% of
+        // the width — under the floor at 200 cols, over it at 400.
+        let params = LayoutParams {
+            show_session_list: true,
+            show_info_panel: true,
+            show_tasks_panel: true,
+            plugin_panes: 2,
+            ..Default::default()
+        };
+        assert_eq!(compute_layout(area(200, 24), params).plugin_panes.len(), 1);
+        assert_eq!(compute_layout(area(400, 24), params).plugin_panes.len(), 2);
+    }
+
+    #[test]
+    fn one_plugin_pane_is_placed_even_when_the_center_starves() {
+        // The single-slot layout allowed this (four occupants at the wide
+        // threshold), so the floor must not retroactively drop it.
+        let areas = compute_layout(
+            area(120, 40),
+            LayoutParams {
+                show_session_list: true,
+                show_info_panel: true,
+                show_tasks_panel: true,
+                show_file_viewer: true,
+                plugin_panes: 1,
+                ..Default::default()
+            },
+        );
+        assert_eq!(areas.plugin_panes.len(), 1);
+        assert!(
+            areas.terminal.width < CENTER_MIN_COLS,
+            "the case only proves anything while the center is starved: {}",
+            areas.terminal.width
+        );
     }
 
     #[test]
@@ -1198,24 +1371,23 @@ mod tests {
                 show_info_panel: true,
                 show_tasks_panel: true,
                 show_file_viewer: true,
-                show_plugin_pane: true,
+                plugin_panes: 1,
                 show_automations_pane: true,
                 ..Default::default()
             },
         );
         let mut rects: Vec<Rect> = vec![areas.terminal];
-        for r in [
-            areas.left_panel,
-            areas.info_panel,
-            areas.tasks_panel,
-            areas.file_viewer,
-            areas.plugin_pane,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            rects.push(r);
-        }
+        rects.extend(
+            [
+                areas.left_panel,
+                areas.info_panel,
+                areas.tasks_panel,
+                areas.file_viewer,
+            ]
+            .into_iter()
+            .flatten(),
+        );
+        rects.extend(areas.plugin_panes.iter().copied());
         for (i, a) in rects.iter().enumerate() {
             for b in rects.iter().skip(i + 1) {
                 let overlap = a.x < b.x + b.width
@@ -1234,7 +1406,7 @@ mod tests {
         assert!(areas.info_panel.is_none());
         assert!(areas.tasks_panel.is_none());
         assert!(areas.file_viewer.is_none());
-        assert!(areas.plugin_pane.is_none());
+        assert!(areas.plugin_panes.is_empty());
     }
 
     #[test]
@@ -1253,7 +1425,7 @@ mod tests {
                 show_info_panel: false,
                 show_tasks_panel: false,
                 show_file_viewer: false,
-                show_plugin_pane: false,
+                plugin_panes: 0,
                 show_global_search: false,
                 show_automations_pane: false,
                 automation_count: 0,

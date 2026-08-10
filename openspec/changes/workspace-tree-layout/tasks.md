@@ -46,17 +46,17 @@ expectations unmodified: `cargo nextest run -E 'test(layout)'`
 
 ## 5. N plugin panes
 
-- [ ] 5.1 `src/ui/layout.rs`: `LayoutParams::show_plugin_pane: bool` →
+- [x] 5.1 `src/ui/layout.rs`: `LayoutParams::show_plugin_pane: bool` →
   `plugin_panes: usize`; the preset emits one `RegionId::Plugin(i)` leaf per
   pane; `PanelAreas::plugin_pane: Option<Rect>` → `plugin_panes: Vec<Rect>`
   (dropping `Copy`).
-- [ ] 5.2 Add the `CENTER_MIN_COLS` gate: drop trailing plugin leaves while the
+- [x] 5.2 Add the `CENTER_MIN_COLS` gate: drop trailing plugin leaves while the
   solved center is under it and more than one plugin leaf remains.
-- [ ] 5.3 `src/app/mod.rs`: add `App::visible_plugin_panes() -> usize` (0 without
+- [x] 5.3 `src/app/mod.rs`: add `App::visible_plugin_panes() -> usize` (0 without
   the `plugins` feature) and pass it from `layout_for`.
-- [ ] 5.4 `src/app/view.rs`: `render_plugin_pane` → `render_plugin_panes`, zipping
+- [x] 5.4 `src/app/view.rs`: `render_plugin_pane` → `render_plugin_panes`, zipping
   the visible panes with `areas.plugin_panes`.
-- [ ] 5.5 Tests in `src/ui/layout.rs`: two visible panes get two adjacent
+- [x] 5.5 Tests in `src/ui/layout.rs`: two visible panes get two adjacent
   non-overlapping regions; hiding one leaves no gap and widens the center; a
   narrow terminal drops the trailing columns and keeps the center at the
   minimum; widening restores them; one pane is placed exactly where the single
@@ -68,19 +68,33 @@ expectations unmodified: `cargo nextest run -E 'test(layout)'`
 
 ## 6. Docs
 
-- [ ] 6.1 Update the layout paragraph in `CLAUDE.md` (Architecture → `ui/`
+- [x] 6.1 Update the layout paragraph in `CLAUDE.md` (Architecture → `ui/`
   bullet) to describe the tree + preset instead of the slot list, and note that
   the right column seats every visible plugin pane.
-- [ ] 6.2 Add the workspace tree to `docs/ARCHITECTURE.md` as an ADR with its
+- [x] 6.2 Add the workspace tree to `docs/ARCHITECTURE.md` as an ADR with its
   rationale and the "preset reproduces v1" constraint.
 
 **Verify:** `rumdl check .`
 
 ## 7. Close-out
 
-- [ ] 7.1 `cargo fmt --all -- --check`; `cargo clippy --all-targets --features
+- [x] 7.1 `cargo fmt --all -- --check`; `cargo clippy --all-targets --features
   plugins -- -D warnings`; `cargo clippy --all-targets -- -D warnings`;
   `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features`;
   `./scripts/dev/lint-luau.sh`; `rumdl check .`.
-- [ ] 7.2 `cargo tree --edges normal | grep -c mlua` → `0`.
-- [ ] 7.3 Both suites green against the 2035 / 2381 baseline.
+- [x] 7.2 `cargo tree --edges normal | grep -c mlua` → `0`.
+- [x] 7.3 Both suites green against the 2035 / 2381 baseline.
+
+**Result:** fmt/clippy (both configurations)/rustdoc/luau/rumdl clean;
+`cargo tree --edges normal | grep -c mlua` → 0; `cargo nextest run --all` →
+**2050 passed, 0 failed** (2035 baseline + 15 new) and `--features plugins` →
+**2397 passed, 0 failed** (2381 baseline + 16). No `insta` snapshot moved and no
+pre-existing layout assertion was edited, which is the evidence that the default
+preset reproduces the previous geometry.
+
+**Deviation from the plan:** the `min_width`-per-node key stayed out (see
+`design.md`) and the extra-column gate lives in the preset instead, because the
+starved region when the right column over-subscribes is the *center*, which must
+never be hidden. Percentage columns also mean the gate is width-dependent only
+when the reserved share leaves the center a few percent — which is what
+`widening_restores_a_dropped_plugin_column` pins at 200 vs 400 cols.

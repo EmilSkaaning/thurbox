@@ -878,3 +878,63 @@ thing in both Cargo configurations — the same allowlist shape
   be argued in the table, with its reasons attached.
 - *A checklist in the PR template* — unenforced, and invisible to the
   agent sessions that do most of this work.
+
+---
+
+## ADR-24: Pane geometry is a workspace tree; slots are a preset over it
+
+**Choice**: `ui::layout` divides the screen with a **tree of splits**
+(`session::workspace_tree`) rather than a fixed set of named rects. A branch
+splits its rect along one axis and carries its children in order; a leaf names
+one `RegionId`. `compute_layout` is three stages — `default_preset` synthesizes
+the tree from `LayoutParams`, `solve` divides the rects, and `PanelAreas` is the
+projection the view reads. The five v1 panel slots become the **default
+preset**, and the right column holds one region per *visible* plugin pane rather
+than a single one.
+
+**Why**: the fixed-rect model answered "where does a pane go" with one field per
+panel, so every pane thurbox has ever added widened `PanelAreas` and threaded a
+branch through the split. Concretely it also seated exactly **one** plugin pane
+(`RightSlot::Plugin`, drawn as `plugin_panes.iter().find(|p| p.visible)`), so a
+second bundled plugin was invisible however it was configured — the wall
+`docs/PHASE4-PANE-READINESS.md` §5 recorded. A tree answers full-width regions,
+grids, nested splits and runtime reordering with the same structure instead of a
+slot name each.
+
+**Geometry is preserved by construction, not by inspection.** `Sizing` has
+exactly three variants and they map 1:1 onto `Length` / `Percentage` / `Min` —
+the only three `Constraint` kinds the previous code used — so every branch hands
+ratatui the byte-identical constraint list. That extends to keeping a hidden
+vertical band as a zero-cell child rather than omitting it: a shorter constraint
+list is a different input to the solver, and the *projection* is what reads zero
+extent as "not shown". The evidence is the ~115 pinned `insta` acceptance
+snapshots plus 41 pre-existing layout assertions, all unchanged.
+
+The tree data lives in `session` (pure data, no crate-internal references)
+because a loadable layout file would be parsed under `agent`, which may
+reference `session` but never `ui` — the same placement as `AgentDef`,
+`HostDef`, and `theme_config::CustomThemeDef`.
+
+**Rejected**:
+
+- *Add a second plugin slot* — cheapest per request, and it ends with a slot
+  name per position, which is the model being replaced.
+- *Write a flex solver instead of calling `Layout::split`* — the honest "real
+  layout engine", and the wrong trade here: ratatui's rounding is exactly what
+  the snapshots encode, so re-deriving it would turn a behaviour-preserving
+  refactor into a hunt for off-by-ones. The tree's value is the structure; the
+  arithmetic was never the problem.
+- *Replace `PanelAreas` with a `RegionId → Rect` map at every call site* — the
+  end state, but 30-odd consumers would churn for no behavioural gain, and named
+  fields catch a typo that a map lookup answers with `None`. The map exists
+  behind the projection.
+- *A `min_width` node key, with the solver hiding any region under its minimum*
+  — the general rule, and it hides the wrong region: when the right column
+  over-subscribes, the starved region is the **center**, which is the fallback
+  view and must never be hidden. The count of plugin columns that fit is
+  therefore decided in the preset (`CENTER_MIN_COLS`), and the node key lands
+  with the config file that can set it.
+- *Gate the first plugin column on the center's width too* — symmetric, and it
+  would change a layout that already ships (four occupants at the wide
+  threshold already leave a single-digit center). Panes past the first are new
+  capacity and can be gated without a regression.

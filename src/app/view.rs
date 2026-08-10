@@ -155,7 +155,7 @@ impl App {
         self.render_info_panel(frame, areas.info_panel);
         self.render_tasks_panel(frame, areas.tasks_panel);
         #[cfg(feature = "plugins")]
-        self.render_plugin_pane(frame, areas.plugin_pane);
+        self.render_plugin_panes(frame, &areas.plugin_panes);
         self.render_file_viewer(frame, areas.file_viewer);
         self.render_central_pane(frame, areas.terminal);
         if let Some(search_area) = areas.global_search {
@@ -528,76 +528,79 @@ impl App {
         );
     }
 
-    /// Render the tasks panel column (when present).
-    /// Draw the first plugin pane into its slot.
+    /// Draw each visible plugin pane into the region the layout gave it.
+    ///
+    /// `regions` is the right column's plugin regions in publication order, and
+    /// it can be **shorter** than the visible-pane list when the terminal has
+    /// room for only some of them — `zip` is what leaves the rest unpainted.
     ///
     /// Paints from the tree already cached on the pane — this never calls into
     /// a plugin, and could not: the view tree is pure data in `session` with no
     /// reference back to a VM.
     #[cfg(feature = "plugins")]
-    fn render_plugin_pane(&mut self, frame: &mut Frame, area: Option<Rect>) {
+    fn render_plugin_panes(&self, frame: &mut Frame, regions: &[Rect]) {
         use crate::ui::{focus_block, FocusLevel};
 
-        let (Some(area), Some(pane)) = (area, self.plugin_panes.iter().find(|p| p.visible)) else {
-            return;
-        };
+        let visible = self.plugin_panes.iter().filter(|p| p.visible);
+        for (pane, &area) in visible.zip(regions) {
+            // An error is shown in the title rather than over the content, so a
+            // failing render keeps the last good tree readable underneath it.
+            let title = match pane.error() {
+                Some(_) => format!(" {} (error) ", pane.title),
+                None => format!(" {} ", pane.title),
+            };
+            let block = focus_block(&title, FocusLevel::Inactive);
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
 
-        // An error is shown in the title rather than over the content, so a
-        // failing render keeps the last good tree readable underneath it.
-        let title = match pane.error() {
-            Some(_) => format!(" {} (error) ", pane.title),
-            None => format!(" {} ", pane.title),
-        };
-        let block = focus_block(&title, FocusLevel::Inactive);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        let palette = crate::ui::theme::current();
-        // Which frame each animated node is showing was resolved on the tick,
-        // from the kernel clock; the paint only reads it.
-        let frames = self
-            .motion
-            .table_for(&pane.plugin, &pane.id)
-            .cloned()
-            .unwrap_or_default();
-        match pane.tree() {
-            Some(tree) => crate::ui::plugin_pane::render_tree(
-                tree,
-                inner,
-                &palette,
-                &frames,
-                frame.buffer_mut(),
-            ),
-            None => {
-                // Never rendered: say which, rather than showing an empty box
-                // the user cannot tell from a working-but-quiet plugin.
-                let msg = match pane.error() {
-                    Some(e) => crate::session::view_tree::ViewNode::styled(
-                        format!("failed: {e}"),
-                        crate::session::view_tree::TextStyle {
-                            token: Some(crate::session::view_tree::StyleToken::Danger),
-                            bold: false,
-                        },
-                    ),
-                    None => crate::session::view_tree::ViewNode::styled(
-                        "loading…",
-                        crate::session::view_tree::TextStyle {
-                            token: Some(crate::session::view_tree::StyleToken::Muted),
-                            bold: false,
-                        },
-                    ),
-                };
-                crate::ui::plugin_pane::render_tree(
-                    &msg,
+            let palette = crate::ui::theme::current();
+            // Which frame each animated node is showing was resolved on the
+            // tick, from the kernel clock; the paint only reads it.
+            let frames = self
+                .motion
+                .table_for(&pane.plugin, &pane.id)
+                .cloned()
+                .unwrap_or_default();
+            match pane.tree() {
+                Some(tree) => crate::ui::plugin_pane::render_tree(
+                    tree,
                     inner,
                     &palette,
                     &frames,
                     frame.buffer_mut(),
-                );
+                ),
+                None => {
+                    // Never rendered: say which, rather than showing an empty
+                    // box the user cannot tell from a working-but-quiet plugin.
+                    let msg = match pane.error() {
+                        Some(e) => crate::session::view_tree::ViewNode::styled(
+                            format!("failed: {e}"),
+                            crate::session::view_tree::TextStyle {
+                                token: Some(crate::session::view_tree::StyleToken::Danger),
+                                bold: false,
+                            },
+                        ),
+                        None => crate::session::view_tree::ViewNode::styled(
+                            "loading…",
+                            crate::session::view_tree::TextStyle {
+                                token: Some(crate::session::view_tree::StyleToken::Muted),
+                                bold: false,
+                            },
+                        ),
+                    };
+                    crate::ui::plugin_pane::render_tree(
+                        &msg,
+                        inner,
+                        &palette,
+                        &frames,
+                        frame.buffer_mut(),
+                    );
+                }
             }
         }
     }
 
+    /// Render the tasks panel column (when present).
     fn render_tasks_panel(&mut self, frame: &mut Frame, area: Option<Rect>) {
         let Some(area) = area else {
             return;

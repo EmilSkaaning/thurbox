@@ -2163,13 +2163,23 @@ backend dependency stays visible at each call site.
   substitution logic.
 - **`ui/`** — Pure rendering functions. `layout.rs` computes
   panel areas (responsive: <80 = terminal only, >=80 = 2-panel,
-  >=120 = optional 3-panel). `compute_layout` takes a
-  **`LayoutParams` struct** rather than positional flags, and the
-  right-hand column is an **ordered occupant list** (`RightSlot`:
-  tasks → file viewer → plugin pane), so adding a pane is a field
-  plus a list entry instead of a signature change at 35 call
-  sites. A hidden occupant leaves no gap — the terminal holds the
-  `Min(0)` slot and absorbs the freed width. Widgets: `project_list` (session
+  >=120 = optional 3-panel) from a **workspace tree** rather than
+  a fixed set of rects (ADR-24): a branch splits its rect along
+  one axis and carries its children in order, a leaf names one
+  `session::workspace_tree::RegionId`. `compute_layout` is three
+  stages — `default_preset` synthesizes the tree from a
+  **`LayoutParams` struct**, `solve` divides the rects, and
+  `PanelAreas` is the projection the view reads. Each child's
+  `Sizing` (`Cells`/`Percent`/`Fill { min }`) maps 1:1 onto
+  ratatui's `Length`/`Percentage`/`Min`, so the preset reproduces
+  the pre-tree geometry exactly. The right column is an ordered
+  occupant list (tasks → file viewer → **one region per visible
+  plugin pane**, `PanelAreas::plugin_panes`), so adding a pane is
+  a leaf rather than a rect field and a branch through the split.
+  A hidden occupant leaves no gap — the terminal holds the
+  `Min(0)` slot and absorbs the freed width; a plugin column past
+  the first is dropped rather than squeezing the center below
+  `CENTER_MIN_COLS`. Widgets: `project_list` (session
   list with repo/branch display; `compute_session_order` is the
   single comparator that orders sessions by manual order
   (`display_order`, never by status) and groups them by repo
