@@ -82,6 +82,7 @@ pub fn render_info_panel(
         usage,
         parent_name,
         thurbox_dir_bytes,
+        epoch_now_secs(),
     );
     // A fresh frame table every paint: nothing in this pane animates, and a
     // motion the kernel is not driving draws frame 0 anyway.
@@ -99,6 +100,11 @@ pub fn render_info_panel(
 /// Separated from the paint so the tree is inspectable in a test without a
 /// terminal, and because it takes no area: nothing here depends on how wide the
 /// pane resolved to.
+///
+/// `now` is Unix epoch seconds, taken as an argument rather than read here so
+/// the tree is a pure function of its inputs — the same reason it takes no area.
+/// A plugin reproducing this pane has neither a width nor a clock, and a caller
+/// comparing two builders needs them to agree on the instant.
 #[allow(clippy::too_many_arguments)]
 pub fn info_tree(
     info: &SessionInfo,
@@ -107,6 +113,7 @@ pub fn info_tree(
     usage: Option<&crate::session::AgentUsage>,
     parent_name: Option<&str>,
     thurbox_dir_bytes: Option<u64>,
+    now: u64,
 ) -> ViewNode {
     let mut rows = Vec::new();
 
@@ -126,7 +133,7 @@ pub fn info_tree(
         if !u.is_empty() {
             // Usage is per (agent, host); label the host so two sessions on
             // different accounts read unambiguously.
-            push_usage_rows(&mut rows, u, info.remote_host.as_deref());
+            push_usage_rows(&mut rows, u, info.remote_host.as_deref(), now);
         }
     }
     if let Some(m) = metrics {
@@ -389,6 +396,7 @@ fn push_usage_rows(
     rows: &mut Vec<ViewNode>,
     usage: &crate::session::AgentUsage,
     host: Option<&str>,
+    now: u64,
 ) {
     rows.push(ViewNode::Divider);
     rows.push(section(usage_section_header(usage, host)));
@@ -405,7 +413,6 @@ fn push_usage_rows(
         return;
     }
 
-    let now = epoch_now_secs();
     for w in &usage.windows {
         let suffix = match w.resets_at {
             Some(reset) => format!(
@@ -1402,6 +1409,7 @@ mod tests {
             c.usage.as_ref(),
             c.parent,
             c.disk,
+            epoch_now_secs(),
         );
         super::super::plugin_pane::render_tree(
             &tree,
@@ -1524,7 +1532,7 @@ mod tests {
         // view tree sanitizes it. This is the port changing behaviour on purpose.
         let mut info = SessionInfo::new("x".into());
         info.agent_activity = Some("safe\x1b[2Jtext".into());
-        let tree = info_tree(&info, None, &[], None, None, None);
+        let tree = info_tree(&info, None, &[], None, None, None, 0);
         let rect = Rect {
             x: 0,
             y: 0,
@@ -1556,8 +1564,8 @@ mod tests {
         // and no width, so everything a plugin could not know is now resolved by
         // the renderer. A regression here would mean a later row had gone back to
         // pre-computing its own layout.
-        let a = info_tree(&fixture_info(), None, &[], None, None, None);
-        let b = info_tree(&fixture_info(), None, &[], None, None, None);
+        let a = info_tree(&fixture_info(), None, &[], None, None, None, 0);
+        let b = info_tree(&fixture_info(), None, &[], None, None, None, 0);
         assert_eq!(a, b, "the tree is a pure function of its inputs");
 
         fn assert_no_padding_runs(node: &ViewNode) {
@@ -1583,6 +1591,7 @@ mod tests {
             Some(&fixture_usage()),
             Some("lead"),
             Some(1),
+            epoch_now_secs(),
         );
         assert_no_padding_runs(&full);
     }

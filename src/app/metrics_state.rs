@@ -67,6 +67,16 @@ pub(crate) struct PerfCounters {
     /// ticks (~100 ms) unless the cache was explicitly invalidated
     /// (ADR-P10), so it climbs ~10×/s, not ~100×/s.
     pub(crate) data_version_checks: u64,
+    /// Times a plugin-readable kernel snapshot was actually built. Gated on a
+    /// running plugin holding a state-reading capability, so it stays at zero in
+    /// a build with no plugin host and in one whose plugins ask for no state —
+    /// which is what stops an unread pane costing the idle loop a rebuild per
+    /// tick (ADR-27).
+    pub(crate) pane_context_builds: u64,
+    /// Subset of `pane_context_builds` that differed from the last published
+    /// snapshot and were written. The ratio shows how often the kernel state a
+    /// pane can see actually moves.
+    pub(crate) pane_context_publishes: u64,
     #[cfg(feature = "plugins")]
     /// Animation leases granted to a plugin pane (a retained lease is not
     /// re-counted). A pane with six animated nodes takes one lease, so this
@@ -127,6 +137,12 @@ impl PerfCounters {
             data_version_checks: self
                 .data_version_checks
                 .wrapping_sub(prev.data_version_checks),
+            pane_context_builds: self
+                .pane_context_builds
+                .wrapping_sub(prev.pane_context_builds),
+            pane_context_publishes: self
+                .pane_context_publishes
+                .wrapping_sub(prev.pane_context_publishes),
             #[cfg(feature = "plugins")]
             motion_leases: self.motion_leases.wrapping_sub(prev.motion_leases),
             #[cfg(feature = "plugins")]

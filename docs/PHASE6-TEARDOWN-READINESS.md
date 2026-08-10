@@ -36,7 +36,7 @@ So the plan's arithmetic is sound. The readiness half is where it breaks.
 | Agent status hooks | kernel session layer | **no** | `ensure_builtin_hooks_extension` calls `install_extension` — the wiring is delivered *by* the installer Phase 6 deletes |
 | Registering agents in `agents.toml` | manifest `[[agents]]` | **no** | `PluginManifest` declares `panes`, `commands`, `keybindings`, `capabilities`, `service`, `cli`, `spawn` |
 | Seeding sessions/automations | manifest `[[automations]]` + `init` | **no** | no `automations` field, and no kernel-table host API to seed one through |
-| Placing files in an agent's config dir | plugin `fs` capability | **no** | `Capability` is `log`, `state-read`, `state-write`, `render`, `input`, `spawn` |
+| Placing files in an agent's config dir | plugin `fs` capability | **no** | `Capability` is `log`, `state-read`, `state-write`, `render`, `input`, `spawn`, `sessions`, `metrics`, `automations` |
 | Patching agent args at spawn | spawn contributions | **no** | `SpawnDecl` carries `env` only; argument contributions have no manifest surface |
 | Self-heal on startup/tick | idempotent by construction | **yes** | `plugin::discovery::discover` re-walks the manifests every start, so nothing is installed-then-healed |
 | Version/staleness/auto-update | `thurbox-cli plugin update` | **no** | the `plugin` CLI is `list`, `status`, `doctor`, `reload` |
@@ -65,22 +65,38 @@ Getting any of that wrong fails silently: the binary compiles, sessions launch,
 and status reporting stops. That is why it is one change with the switch-over in
 it, not a refactor done in pieces.
 
-## 3. Phase 4 never ran, so pane deletion has no floor
+## 3. Phase 4 has started, but no pane has been handed over
 
-`src/plugin/bundled/` contains `hello` and nothing else.
+`src/plugin/bundled/` contains `hello` and `info-panel`.
 
-| Pane | Native renderer | Bundled plugin |
-|---|---|---|
-| Info panel | `src/ui/info_panel.rs` | absent |
-| Tasks | `src/ui/tasks_panel.rs` | absent |
-| Automations | `src/ui/automations_panel.rs` | absent |
-| File viewer | `src/ui/file_viewer.rs` | absent |
-| Global search | `src/ui/global_search.rs` | absent |
-| Code review | `src/ui/code_review.rs` | absent |
-| Session list | `src/ui/project_list.rs` | absent |
+| Pane | Native renderer | Bundled plugin | Drawn by |
+|---|---|---|---|
+| Info panel | `src/ui/info_panel.rs` | `info-panel` | the native pane |
+| Tasks | `src/ui/tasks_panel.rs` | absent | the native pane |
+| Automations | `src/ui/automations_panel.rs` | absent | the native pane |
+| File viewer | `src/ui/file_viewer.rs` | absent | the native pane |
+| Global search | `src/ui/global_search.rs` | absent | the native pane |
+| Code review | `src/ui/code_review.rs` | absent | the native pane |
+| Session list | `src/ui/project_list.rs` | absent | the native pane |
 
-`docs/PHASE4-PANE-READINESS.md` is the audit of what the plugin API still cannot
-express for the *first* of those panes; four of its five gaps are open.
+`docs/PHASE4-PANE-READINESS.md` is the audit of what the plugin API could not
+express for the *first* of those panes; four of its five gaps are now closed
+(ADR-26, ADR-27) and §5 is half open.
+
+**A pane's row is ready only on handover, not on existence.** The info panel
+shows why the distinction is load-bearing rather than pedantic: its plugin exists
+and reproduces the pane exactly, while the native renderer is still what the
+interface draws. Deleting `src/ui/info_panel.rs` today would remove the pane every
+user is looking at. So `tests/teardown_gate.rs`'s pane probe is a conjunction —
+the bundled plugin exists **and** `src/app/view.rs` no longer names the pane's
+native renderer module — and `a_reproduced_pane_is_not_a_replaced_one` pins that
+reasoning so the probe cannot be "simplified" back to a directory check.
+
+Handing a pane over is therefore its own step, distinct from writing its plugin:
+it means `App::view` drawing the plugin's pane in the native one's place, which
+needs the plugin pane to be reachable from the keyboard (PHASE4 §5) and to render
+on events rather than on a 1 s poll (PHASE4 §7, and the session-list spike's third
+condition). Neither is done.
 
 Stage B has not happened either — `Cargo.toml` reads `default = []`, so no user
 has ever run the plugin host, and Stage B's exit criterion ("at least one plugin
@@ -105,7 +121,11 @@ downstream of where the tree is.
    pinning. Unblocks `plugin-update`, and is the prerequisite for replacing the
    `[features]` flags.
 6. **Phase 4, all seven panes** — each landing alongside its native predecessor
-   and asserting the same insta snapshot. Unblocks the seven pane units.
+   and asserting the same rendering. The info panel has landed this way
+   (ADR-27, tree equality rather than a frame snapshot). Writing a pane's plugin
+   does **not** unblock its unit; the seven pane units need the *handover* on top,
+   which is per-pane keyboard visibility plus event-driven render, then
+   `App::view` drawing the plugin in the native pane's place.
 7. **Stage B**, then the flips: Cargo default, runtime default, `2.0.0`.
 
 Nothing on this list is unblocked by deleting something first, which is the

@@ -5,6 +5,10 @@ pub mod host_def;
 pub mod keybindings;
 pub mod message;
 pub mod overlay;
+// Ungated for the same reason `view_tree` is (below): the snapshot is a kernel
+// data type, and a data type gated on a Cargo feature is how one pane ends up
+// with two descriptions of its own state.
+pub mod pane_context;
 #[cfg(feature = "plugins")]
 pub mod plugin_command;
 pub mod plugin_manifest;

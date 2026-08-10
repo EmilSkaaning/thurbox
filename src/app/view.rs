@@ -504,18 +504,9 @@ impl App {
                 }
             })
             .collect();
-        // Resolve the parent session's name for child sessions; fall back to
-        // the short uuid when the parent is no longer in the list.
-        let parent_name = info.parent_session_id.map(|pid| {
-            self.sessions
-                .iter()
-                .find(|s| s.info.id == pid)
-                .map(|s| s.info.name.clone())
-                .unwrap_or_else(|| {
-                    let id = pid.to_string();
-                    id.chars().take(8).collect()
-                })
-        });
+        // Resolved by the model, so the published pane-context snapshot names a
+        // vanished parent exactly as this pane does.
+        let parent_name = self.parent_display_name(info);
         info_panel::render_info_panel(
             frame,
             info_area,
@@ -2162,7 +2153,12 @@ pub(super) fn format_countdown(remaining_ms: u64) -> String {
 }
 
 /// Truncate a string to `max_len` characters, appending "..." if truncated.
-fn truncate_str(s: &str, max_len: usize) -> String {
+/// Shorten `s` to `max_len` display characters, ending in `...` when cut.
+///
+/// `pub(super)` so the published pane-context snapshot truncates an automation
+/// name by the same rule the pane renders it with — two rules would let a plugin
+/// reproducing the pane disagree with it on a long name.
+pub(super) fn truncate_str(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
         s.to_string()
     } else {

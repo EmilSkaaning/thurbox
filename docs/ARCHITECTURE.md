@@ -1069,3 +1069,87 @@ found a third the audit had missed.
   this pane is still not portable to a *plugin*: it receives its `SessionInfo` as
   an argument. The proven claim is narrow — the catalogue can express this pane's
   rendering, not that a third party could have written it.
+
+## ADR-27: Kernel state reaches a plugin as a published snapshot, gated per kind
+
+**Context.** ADR-26 closed every *rendering* gap between the view tree and
+thurbox's own info panel, and left one open which it named as the reason the pane
+was still not a plugin: `plugin::capabilities::build_module_table` granted
+`name`, `log`, the `state*` trio over the plugin's own namespace and the `ui`
+constructors — and nothing through which a plugin could read a session, a task,
+or anything else the kernel owns. A pane that renders kernel data could not be
+written at all.
+
+Phase 4 turns the native panes into bundled plugins, so the gap had to be closed
+before the first one. `docs/PHASE4-PANE-READINESS.md` §2 had already named the
+right precedent — `session::spawn_contribution` — and two properties that had to
+be designed rather than assumed: the read is capability-gated, and publishing is
+not per-tick work.
+
+**Decision.**
+
+1. **A published snapshot, not a binding that reaches into `App`.**
+   `session::pane_context` holds `PaneContext` (pure data) plus a process-wide
+   `RwLock<Option<PaneContext>>`. `app` builds and publishes it; `plugin` reads it
+   when a plugin calls a reader. Rejected: a binding holding an `&App`, which
+   needs the refused `plugin → app` edge and would put plugin code on the UI
+   thread. Rejected: passing state as a second argument to `render`, which grants
+   every plugin a session's name and activity text with no capability declared.
+   The module is **ungated**, for ADR-26's reason: a kernel data type gated on a
+   Cargo feature is how one pane ends up with two descriptions of its own state.
+2. **Three capabilities, not one.** `sessions`, `metrics` and `automations`, each
+   gating one reader (`thurbox.activeSession()`, `thurbox.systemMetrics()`,
+   `thurbox.upcomingAutomations()`). The capability list is what an install prompt
+   is written from, and "reads your sessions" is a different question from "reads
+   this machine's CPU and memory". Rejected: a single `state` capability — it
+   makes the smallest pane that wants a session name also demand host telemetry.
+3. **The snapshot resolves what a plugin cannot compute, and nothing else.** A
+   VM loads no `os` and no path library, so the kernel resolves the clock
+   (`resets_in_secs`, `due_in_secs` — in *seconds*, the granularity the countdown
+   is displayed at, so the value does not differ on every tick), path basenames,
+   a parent session's name, and each status's glyph *and style token* (the token
+   because `StyleToken::for_status` exists so two panes cannot disagree about it).
+   Everything else is a **number**: the plugin composes every string it displays.
+   Rejected: publishing formatted strings — it would have made the port trivial
+   and worthless, since the pane would be arranging strings the kernel composed.
+4. **Two gates on publishing.** Nothing is built unless a running plugin holds a
+   state capability (`pane_context::readers_present()`, an `AtomicBool` the host
+   sets from the grants it already computes); nothing is written unless the value
+   differs from what was published. Rejected: an input signature on the
+   `App::session_order_signature` pattern — over *these* inputs it must touch
+   every field the snapshot touches, so it saves allocations rather than
+   traversal, at the cost of a second description of the snapshot's dependencies
+   that can drift from the snapshot. Publishing deliberately does **not** mark
+   the UI dirty: a pane repaints when its own tree changes, and coupling the two
+   would repaint the screen for a pane that is not on it.
+
+**Consequences.**
+
+- The bundled `info-panel` plugin (`src/plugin/bundled/info-panel/`) reproduces
+  the native pane in Luau, and `tests/bundled_info_panel.rs` asserts its view
+  tree **equals** `ui::info_panel::info_tree`'s across ten content variants. The
+  same renderer paints both, so an equal tree is a byte-identical pane — and a
+  failure names a node rather than a cell. Its manifest declares four
+  capabilities and the test asserts it holds no fifth, so the pane is evidence
+  about what a *third party* can build.
+- `info_tree` takes `now` as a parameter. It read the clock to build the usage
+  countdown, which made its output depend on wall time; a plugin has neither a
+  width nor a clock, and the comparison above has to be exact rather than
+  minute-boundary flaky.
+- **The view tree needed no widening.** An independent consumer needed `list`,
+  `paragraph`, `divider`, `gauge` and `text` with eight tokens, all of which
+  ADR-26 had already added — which is the confirmation ADR-26 could not give
+  itself.
+- **Freshness is the cost that did not get paid.** The render worker polls on a
+  ~1 s cycle, so the plugin's copy of a live gauge lags the native pane by up to a
+  second. `docs/SPIKE-SESSION-LIST.md` already fixed event-driven render as a
+  condition of the session-list port; this is the second pane to want it.
+- **Every plugin will reimplement `format_bytes`.** A `thurbox.format.*` table
+  would fix it and is deliberately absent: it should be designed from two or
+  three panes' needs, and adding it now would destroy this port's evidence that a
+  plugin can own its own presentation.
+- The teardown gate is stricter. A pane's replacement verdict now requires
+  *handover* — the plugin exists **and** `src/app/view.rs` no longer draws the
+  native pane — because a plugin reproducing a pane alongside the native one has
+  replaced nothing, and the old probe would have permitted deleting the renderer
+  every user is looking at.

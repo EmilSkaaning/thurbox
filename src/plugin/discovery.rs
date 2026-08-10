@@ -158,11 +158,21 @@ struct BundledPlugin {
 ///
 /// Embedded rather than installed so the single-binary promise holds: a fresh
 /// thurbox has a working plugin with nothing to download.
-const BUNDLED: &[BundledPlugin] = &[BundledPlugin {
-    name: "hello",
-    manifest: include_str!("bundled/hello/plugin.toml"),
-    entry: include_str!("bundled/hello/init.luau"),
-}];
+const BUNDLED: &[BundledPlugin] = &[
+    BundledPlugin {
+        name: "hello",
+        manifest: include_str!("bundled/hello/plugin.toml"),
+        entry: include_str!("bundled/hello/init.luau"),
+    },
+    // thurbox's own info panel, reproduced as a plugin (Phase 4). Hidden by
+    // default — the native pane is still what the interface draws, so a visible
+    // copy would put two of the same pane on screen for every user.
+    BundledPlugin {
+        name: "info-panel",
+        manifest: include_str!("bundled/info-panel/plugin.toml"),
+        entry: include_str!("bundled/info-panel/init.luau"),
+    },
+];
 
 /// Materialize the bundled plugins and return their directories.
 ///
@@ -591,6 +601,20 @@ mod tests {
             assert_eq!(manifest.name, plugin.name);
             assert!(!plugin.entry.is_empty());
         }
+    }
+
+    /// A bundled pane must not turn itself on: the native pane it reproduces is
+    /// still on screen, so a visible copy would change every user's layout.
+    #[test]
+    fn the_bundled_info_panel_is_hidden_by_default() {
+        let plugin = BUNDLED
+            .iter()
+            .find(|p| p.name == "info-panel")
+            .expect("the info panel ships bundled");
+        let path = PathBuf::from(plugin.name).join(MANIFEST_FILE_NAME);
+        let manifest = PluginManifest::from_toml(&path, plugin.manifest).expect("valid");
+        assert_eq!(manifest.panes.len(), 1);
+        assert!(!manifest.panes[0].default_visible);
     }
 
     #[test]

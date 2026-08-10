@@ -42,6 +42,10 @@ struct Replacement {
     /// Re-derives the verdict from the source (given the repo root and this
     /// row's id), so `ready` cannot go stale.
     probe: fn(&Path, &str) -> bool,
+    /// For a pane row, the native renderer module whose continued use in
+    /// `src/app/view.rs` means the pane has not been handed over. `None` for the
+    /// capability rows, which have no pane.
+    native_module: Option<&'static str>,
 }
 
 /// A thing the teardown deletes as one piece, and what must exist first.
@@ -75,6 +79,7 @@ const REPLACEMENTS: &[Replacement] = &[
             // installer that the same teardown deletes.
             !source(root, "src/session_ops/builtin_hooks.rs").contains("install_extension(")
         },
+        native_module: None,
     },
     Replacement {
         id: "agent-registration",
@@ -82,6 +87,7 @@ const REPLACEMENTS: &[Replacement] = &[
         v2_home: "plugin manifest `[[agents]]`",
         ready: false,
         probe: |root, _| manifest_field(root, "pub struct PluginManifest", "pub agents:"),
+        native_module: None,
     },
     Replacement {
         id: "resource-seeding",
@@ -89,6 +95,7 @@ const REPLACEMENTS: &[Replacement] = &[
         v2_home: "plugin manifest `[[automations]]` plus kernel-table host APIs",
         ready: false,
         probe: |root, _| manifest_field(root, "pub struct PluginManifest", "pub automations:"),
+        native_module: None,
     },
     Replacement {
         id: "agent-config-files",
@@ -98,6 +105,7 @@ const REPLACEMENTS: &[Replacement] = &[
         // SECURITY §3 enforces filesystem denial by the *absence* of a binding,
         // so this row flips only on a deliberate capability decision.
         probe: |root, _| manifest_field(root, "pub enum Capability", "Fs,"),
+        native_module: None,
     },
     Replacement {
         id: "spawn-arg-contribution",
@@ -105,6 +113,7 @@ const REPLACEMENTS: &[Replacement] = &[
         v2_home: "spawn contributions carrying arguments, not only env",
         ready: false,
         probe: |root, _| manifest_field(root, "pub struct SpawnDecl", "pub args"),
+        native_module: None,
     },
     Replacement {
         id: "self-heal",
@@ -112,6 +121,7 @@ const REPLACEMENTS: &[Replacement] = &[
         v2_home: "idempotent by construction — discovery re-walks the manifests",
         ready: true,
         probe: |root, _| source(root, "src/plugin/discovery.rs").contains("pub fn discover("),
+        native_module: None,
     },
     Replacement {
         id: "plugin-update",
@@ -122,41 +132,80 @@ const REPLACEMENTS: &[Replacement] = &[
             let actions = block(root, "src/cli/plugins.rs", "pub enum Action");
             actions.contains("Update") || actions.contains("Install")
         },
+        native_module: None,
     },
-    // One row per pane MIGRATION §2 schedules for the bundled-plugin phase.
-    pane("info-panel-plugin", "the info panel"),
-    pane("tasks-plugin", "the tasks pane"),
-    pane("automations-plugin", "the automations pane"),
-    pane("file-viewer-plugin", "the file viewer"),
-    pane("global-search-plugin", "global search"),
-    pane("code-review-plugin", "the code review view"),
-    pane("session-list-plugin", "the session list"),
+    // One row per pane MIGRATION §2 schedules for the bundled-plugin phase. The
+    // second argument is the pane's native renderer module, which is how the
+    // probe below asks whether the handover happened.
+    pane("info-panel-plugin", "the info panel", "info_panel"),
+    pane("tasks-plugin", "the tasks pane", "tasks_panel"),
+    pane(
+        "automations-plugin",
+        "the automations pane",
+        "automations_panel",
+    ),
+    pane("file-viewer-plugin", "the file viewer", "file_viewer"),
+    pane("global-search-plugin", "global search", "global_search"),
+    pane("code-review-plugin", "the code review view", "code_review"),
+    pane("session-list-plugin", "the session list", "project_list"),
 ];
 
-/// A pane's replacement row. Ready once a bundled plugin exists whose directory
-/// is named after the pane — the id minus its `-plugin` suffix, in either
-/// spelling, since the eventual plugin's name is not this gate's to fix.
-const fn pane(id: &'static str, v1_capability: &'static str) -> Replacement {
+/// A pane's replacement row, ready only on **handover**.
+///
+/// Two conditions, and the second is why this is not simply "does a plugin
+/// exist". A bundled plugin that *reproduces* a pane while the native one is
+/// still what the interface draws has replaced nothing — and a gate that called
+/// that ready would permit deleting the renderer every user is looking at. That
+/// is not hypothetical: the info panel's plugin exists today and this row is
+/// still blocked, which `a_reproduced_pane_is_not_a_replaced_one` asserts.
+///
+/// So the probe asks for both:
+///
+/// 1. a bundled plugin directory named after the pane — the id minus its
+///    `-plugin` suffix, in either spelling, since the eventual plugin's name is
+///    not this gate's to fix; and
+/// 2. that `src/app/view.rs` no longer names the pane's native renderer module.
+///    Every one of the seven renderers is referenced from that one file, so the
+///    rule is uniform across the panes rather than seven special cases.
+const fn pane(
+    id: &'static str,
+    v1_capability: &'static str,
+    native_module: &'static str,
+) -> Replacement {
     Replacement {
         id,
         v1_capability,
-        v2_home: "a bundled plugin under src/plugin/bundled/",
+        v2_home: "a bundled plugin under src/plugin/bundled/, drawn instead of the native pane",
         ready: false,
-        probe: |root, id| {
-            let stem = match id.strip_suffix("-plugin") {
-                Some(s) => s,
-                None => id,
-            };
-            [stem.to_string(), stem.replace('-', "_")]
-                .iter()
-                .any(|dir| {
-                    root.join("src/plugin/bundled")
-                        .join(dir)
-                        .join("plugin.toml")
-                        .exists()
-                })
-        },
+        probe: |root, id| bundled_plugin_exists(root, id) && !view_draws_native_pane(root, id),
+        native_module: Some(native_module),
     }
+}
+
+/// Whether a bundled plugin directory named after `id`'s pane exists.
+fn bundled_plugin_exists(root: &Path, id: &str) -> bool {
+    let stem = id.strip_suffix("-plugin").unwrap_or(id);
+    [stem.to_string(), stem.replace('-', "_")]
+        .iter()
+        .any(|dir| {
+            root.join("src/plugin/bundled")
+                .join(dir)
+                .join("plugin.toml")
+                .exists()
+        })
+}
+
+/// Whether the interface still draws `id`'s pane natively.
+///
+/// Resolved through the row rather than passed in, so the probe stays a plain
+/// `fn` pointer and the module name lives in exactly one place — the table.
+fn view_draws_native_pane(root: &Path, id: &str) -> bool {
+    let module = REPLACEMENTS
+        .iter()
+        .find(|r| r.id == id)
+        .and_then(|r| r.native_module)
+        .unwrap_or_else(|| panic!("pane row `{id}` names no native renderer module"));
+    source(root, "src/app/view.rs").contains(module)
 }
 
 /// What the teardown deletes, and what each deletion waits on.
@@ -408,6 +457,61 @@ fn readiness_is_derived_from_the_verdicts() {
         .map(|r| Replacement { ready: true, ..*r })
         .collect();
     assert!(blockers(&all_ready).is_empty());
+}
+
+/// The half of the pane probe that is easy to get wrong, asserted directly: a
+/// pane whose plugin exists but whose native renderer is still drawn is **not**
+/// ready.
+///
+/// This is not a restatement of the probe. It pins the *reason* the info panel's
+/// row is blocked — a reproduction is not a replacement — so that "simplifying"
+/// the probe back to "does a plugin directory exist" fails here with the
+/// argument attached, rather than quietly permitting the deletion of the pane
+/// every user is looking at.
+#[test]
+fn a_reproduced_pane_is_not_a_replaced_one() {
+    let root = repo_root();
+    assert!(
+        bundled_plugin_exists(&root, "info-panel-plugin"),
+        "the info panel's bundled plugin should exist — if it was removed, this \
+         test no longer proves anything and should be revisited with it"
+    );
+    assert!(
+        view_draws_native_pane(&root, "info-panel-plugin"),
+        "the native info panel should still be what the interface draws"
+    );
+    assert!(
+        !replacement("info-panel-plugin").ready,
+        "a pane reproduced by a plugin, while the native one is still drawn, is \
+         not handed over: deleting src/ui/info_panel.rs would remove what users see"
+    );
+    // And the recorded verdict agrees with the probe, which is the general rule
+    // `recorded_verdicts_match_the_tree` enforces for every row.
+    assert!(!(replacement("info-panel-plugin").probe)(
+        &root,
+        "info-panel-plugin"
+    ));
+}
+
+/// Every pane row must name a native renderer, or its probe would panic the first
+/// time the pane's plugin appeared — which is exactly when the gate matters.
+#[test]
+fn every_pane_row_names_its_native_renderer() {
+    let root = repo_root();
+    for r in REPLACEMENTS
+        .iter()
+        .filter(|r| r.v2_home.contains("bundled"))
+    {
+        let module = r
+            .native_module
+            .unwrap_or_else(|| panic!("{} names no native renderer module", r.id));
+        assert!(
+            source(&root, "src/app/view.rs").contains(module),
+            "{}: src/app/view.rs no longer mentions `{module}` — either the pane \
+             was handed over (re-verdict the row) or the module was renamed",
+            r.id
+        );
+    }
 }
 
 /// A unit with no requirements would be an unguarded deletion, and a requirement

@@ -986,6 +986,9 @@ pub struct App {
     /// Held here rather than in `main` because, unlike the host itself, this is
     /// state the view reads every frame. The trees are produced off-thread and
     /// applied on the tick; painting only ever reads what is already here.
+    /// The last snapshot published for plugin readers, held so the publisher can
+    /// skip writing an unchanged one. `None` until the first publication.
+    pub(crate) published_pane_context: Option<crate::session::pane_context::PaneContext>,
     #[cfg(feature = "plugins")]
     pub(crate) plugin_panes: Vec<crate::plugin::PluginPane>,
     /// Plugin pane events, produced off-thread and drained on the tick.
@@ -1386,6 +1389,7 @@ impl App {
             motion_settings: crate::session::settings::global().motion,
             show_info_panel: false,
             show_tasks_panel: false,
+            published_pane_context: None,
             #[cfg(feature = "plugins")]
             plugin_panes: Vec::new(),
             #[cfg(feature = "plugins")]
@@ -4687,6 +4691,12 @@ impl App {
         // Apply a finished off-thread code-review diff build (ADR-P8).
         self.poll_review_build();
 
+        // Publish the kernel state a plugin pane may read, before the renders
+        // below are drained: a pane whose tree arrives this tick was built from
+        // the previous publication either way, and publishing first keeps the
+        // gap at one worker cycle rather than two.
+        self.publish_pane_context();
+
         // Apply finished plugin pane renders.
         #[cfg(feature = "plugins")]
         self.poll_plugin_renders();
@@ -4841,6 +4851,8 @@ impl App {
                 "hook_state_loads": p.hook_state_loads,
                 "external_poll_checks": p.external_poll_checks,
                 "external_poll_reloads": p.external_poll_reloads,
+                "pane_context_builds": p.pane_context_builds,
+                "pane_context_publishes": p.pane_context_publishes,
             },
             "frame": histo(&t.frame),
             "tick": histo(&t.tick),
@@ -7253,6 +7265,184 @@ impl App {
         self.refresh_tasks();
         self.set_status(StatusLevel::Success, "Task saved");
         true
+    }
+
+    /// Publish the kernel state a plugin pane may read (ADR-27).
+    ///
+    /// Two gates, and both are load-bearing:
+    ///
+    /// 1. **Demand.** Nothing is built unless some running plugin holds a
+    ///    state-reading capability. That check is one relaxed atomic load, and
+    ///    nothing in a build without the plugin host ever sets the flag — so a
+    ///    stable build pays a load per tick and returns.
+    /// 2. **Change.** The built snapshot is compared against the last published
+    ///    one and the process-wide slot is written only on a difference, so state
+    ///    that is not moving costs no write and no clone.
+    ///
+    /// It deliberately does **not** mark the UI dirty. A plugin pane repaints
+    /// when the tree it returns changes ([`Self::poll_plugin_renders`]); coupling
+    /// a repaint to a state change here would repaint the screen for a pane that
+    /// is not even on it.
+    pub(crate) fn publish_pane_context(&mut self) {
+        if !crate::session::pane_context::readers_present() {
+            return;
+        }
+        self.metrics.bump(|p| &mut p.pane_context_builds);
+        let context = self.build_pane_context();
+        if self.published_pane_context.as_ref() == Some(&context) {
+            return;
+        }
+        crate::session::pane_context::publish(context.clone());
+        self.published_pane_context = Some(context);
+        self.metrics.bump(|p| &mut p.pane_context_publishes);
+    }
+
+    /// Build the snapshot from the same inputs `render_info_panel` reads.
+    ///
+    /// Kept beside the publisher rather than in `view` because it is Model work:
+    /// it resolves state, it draws nothing. Everything a plugin cannot compute
+    /// for itself is resolved here — the clock, path basenames, the parent
+    /// session's name — see [`crate::session::pane_context`].
+    pub(crate) fn build_pane_context(&self) -> crate::session::pane_context::PaneContext {
+        use crate::session::pane_context as pc;
+
+        let now_ms = crate::sync::current_time_millis();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let session =
+            self.sessions
+                .get(self.active_index)
+                .map(|s| &s.info)
+                .map(|info| {
+                    // Usage is scoped per (agent, host), exactly as the native pane
+                    // scopes it: a remote session reports the account its *host* is
+                    // logged into.
+                    let usage = self
+                        .usage
+                        .get(&(info.agent.clone(), info.remote_host.clone()))
+                        .filter(|u| !u.is_empty())
+                        .map(|u| pc::UsageSnapshot {
+                            windows: u
+                                .windows
+                                .iter()
+                                .map(|w| pc::UsageWindowSnapshot {
+                                    label: w.label.clone(),
+                                    used_percent: w.used_percent,
+                                    // Whole seconds, matching the granularity the
+                                    // countdown is displayed at — a millisecond
+                                    // remainder would differ every tick and defeat the
+                                    // change gate above.
+                                    resets_in_secs: w.resets_at.map(|r| r.saturating_sub(now_secs)),
+                                })
+                                .collect(),
+                            plan: u.plan.clone(),
+                            note: u.note.clone(),
+                        });
+
+                    let first_repo = info
+                        .worktrees
+                        .first()
+                        .map(|wt| &wt.repo_path)
+                        .or(info.cwd.as_ref())
+                        .and_then(|p| p.file_name())
+                        .and_then(|f| f.to_str())
+                        .map(str::to_string);
+
+                    pc::SessionSnapshot {
+                        id: info.id.to_string(),
+                        name: info.name.clone(),
+                        status: pc::StatusSnapshot::of(info.status),
+                        agent: info.agent.clone(),
+                        parent_name: self.parent_display_name(info),
+                        remote_host: info.remote_host.clone(),
+                        hook_wiring: info.hook_wiring.clone(),
+                        activity: info.agent_activity.clone(),
+                        notification: info.notification.clone(),
+                        repo_name: first_repo,
+                        branch: info.worktrees.first().map(|wt| wt.branch.clone()),
+                        additional_dir_names: info
+                            .additional_dirs
+                            .iter()
+                            .filter_map(|d| d.file_name().and_then(|f| f.to_str()))
+                            .map(str::to_string)
+                            .collect(),
+                        git: info.git_stats.as_ref().map(|g| pc::GitSnapshot {
+                            files_changed: g.files_changed as u64,
+                            insertions: g.insertions as u64,
+                            deletions: g.deletions as u64,
+                            dirty: g.dirty,
+                            ahead: g.ahead as u64,
+                            behind: g.behind as u64,
+                        }),
+                        agent_metrics: info.agent_metrics.as_ref().map(|m| {
+                            pc::AgentMetricsSnapshot {
+                                model_display_name: m.model_display_name.clone(),
+                                cli_version: m.cli_version.clone(),
+                                total_cost_usd: m.total_cost_usd,
+                                total_duration_ms: m.total_duration_ms,
+                                total_api_duration_ms: m.total_api_duration_ms,
+                                total_lines_added: m.total_lines_added,
+                                total_lines_removed: m.total_lines_removed,
+                                total_input_tokens: m.total_input_tokens,
+                                total_output_tokens: m.total_output_tokens,
+                                context_window_size: m.context_window_size,
+                                used_percentage: m.used_percentage,
+                                cache_read_input_tokens: m.cache_read_input_tokens,
+                                cache_creation_input_tokens: m.cache_creation_input_tokens,
+                            }
+                        }),
+                        usage,
+                    }
+                });
+
+        let m = &self.metrics.system_metrics;
+        let system = Some(pc::SystemSnapshot {
+            cpu_percent: m.cpu_percent,
+            memory_used: m.memory_used,
+            memory_total: m.memory_total,
+            session_cpu_percent: m.session_cpu_percent,
+            session_memory_bytes: m.session_memory_bytes,
+            thurbox_dir_bytes: self.metrics.thurbox_dir_bytes,
+        });
+
+        // The same filter the native pane applies: with the automations feature
+        // off the TUI fires nothing, so advertising a countdown would surface a
+        // disabled feature.
+        let automations = self
+            .automation_ui
+            .cached_automations
+            .iter()
+            .filter(|_| self.features.automations)
+            .filter(|a| a.enabled && a.next_run_at.is_some())
+            .map(|a| pc::AutomationSnapshot {
+                label: view::truncate_str(&a.name, 30),
+                due_in_secs: a.next_run_at.unwrap_or(now_ms).saturating_sub(now_ms) / 1_000,
+            })
+            .collect();
+
+        pc::PaneContext {
+            session,
+            system,
+            automations,
+        }
+    }
+
+    /// The name to show for `info`'s parent session, or `None` for a top-level
+    /// one. Falls back to a shortened id when the parent has left the list.
+    ///
+    /// Shared by the native pane and the published snapshot so the two cannot
+    /// disagree about a vanished parent.
+    pub(crate) fn parent_display_name(&self, info: &SessionInfo) -> Option<String> {
+        info.parent_session_id.map(|pid| {
+            self.sessions
+                .iter()
+                .find(|s| s.info.id == pid)
+                .map(|s| s.info.name.clone())
+                .unwrap_or_else(|| pid.to_string().chars().take(8).collect())
+        })
     }
 
     /// Apply any plugin pane renders that finished since the last tick.

@@ -937,7 +937,7 @@ and granted capabilities, and everything discovery rejected with its cause.
 `list`/`status` **start** the plugins they report, since a compile or `init`
 failure is invisible until something runs them; `doctor` discovers only.
 Plugins live in `~/.config/thurbox/plugins/<name>/` as a `plugin.toml` plus an
-`init.luau`; the bundled `hello` plugin is materialized to
+`init.luau`; the bundled `hello` and `info-panel` plugins are materialized to
 `~/.local/share/thurbox/builtin-plugins/`, and a user plugin of the same name
 overrides it) and **`command`** (list/describe/run: the typed, agent-callable
 plugin command registry — below; unlike `plugin list`, discovery here starts no
@@ -982,9 +982,47 @@ catalogue can carry a real v1 pane. Neither module references `mlua` or
 **byte identity** by keeping the pre-port line builders under `#[cfg(test)]` as an
 oracle and comparing the two renderings cell by cell across widths, heights and
 content variants (`view_tree_render_matches_the_legacy_paragraph_cell_for_cell`),
-plus a pinned whole-pane frame. What a plugin still cannot do is *read* the
-`SessionInfo` the pane renders (`docs/PHASE4-PANE-READINESS.md` §2), so the pane
-is expressible in the tree but not yet writable as a plugin. Pane **visibility is kernel
+plus a pinned whole-pane frame.
+
+**A plugin reads kernel state through a published snapshot** (ADR-27) — the
+mechanism that made the info panel writable *as* a plugin, closing
+`docs/PHASE4-PANE-READINESS.md` §2. `session::pane_context` (ungated pure data,
+like the view tree) holds a process-wide `RwLock<Option<PaneContext>>`; `app`
+builds and publishes it from `tick_core` and `plugin` reads it when a plugin calls
+a reader, so no plugin call lands on the UI thread and no new module edge appears
+(the precedent is `session::spawn_contribution`). Reading is gated **per kind of
+state** — `sessions` → `thurbox.activeSession()`, `metrics` →
+`thurbox.systemMetrics()`, `automations` → `thurbox.upcomingAutomations()` —
+because the capability list is what an install prompt is written from, and "reads
+your sessions" is a different question from "reads this machine's CPU". The
+snapshot resolves only what a sandboxed plugin *cannot compute* (the VM loads no
+`os` and no path library): a countdown rather than an absolute instant, a
+directory's display name rather than a path, a parent session's name rather than
+an id, and each status's glyph **and style token** (the token because
+`StyleToken::for_status` exists so two panes cannot disagree about it). Everything
+else is a raw number and the plugin composes every string it draws — publishing
+formatted strings would leave a pane arranging someone else's presentation.
+Publishing is **demand-gated** (nothing is built unless a running plugin holds one
+of the three capabilities — `pane_context::readers_present()`, set by the host from
+its grants) and **change-gated** (written only when the value differs), asserted on
+the `pane_context_builds`/`pane_context_publishes` counters; it never marks the UI
+dirty, since a pane repaints when its own tree changes.
+
+The bundled **`info-panel`** plugin (`src/plugin/bundled/info-panel/`) is the first
+native pane reproduced in Luau, and `tests/bundled_info_panel.rs` asserts its view
+tree **equals** `info_tree`'s across ten content variants — the same renderer paints
+both, so an equal tree is a byte-identical pane and a failure names a node rather
+than a cell. It is **additive**: `default_visible = false`, the native pane is still
+what thurbox draws, and `tests/teardown_gate.rs` keeps `src/ui/info_panel.rs`
+protected — a pane's replacement verdict requires **handover** (the plugin exists
+*and* `src/app/view.rs` no longer names the native renderer), because a
+reproduction is not a replacement. Two costs the port did not pay off, recorded in
+the audit's §7: the plugin pane is up to a second stale (the render worker polls on
+a ~1 s cycle — the session-list spike's event-driven-render condition, now wanted by
+a second pane), and every plugin will reimplement `format_bytes` until a
+`thurbox.format.*` table is designed from more than one pane's needs.
+
+Pane **visibility is kernel
 state**: the manifest seeds it (`default_visible`), `F10`
 (rebindable `TogglePluginPane`) toggles it, and the choice is persisted per
 pane in `metadata` so it survives a restart — unlike v1's panel toggles, which

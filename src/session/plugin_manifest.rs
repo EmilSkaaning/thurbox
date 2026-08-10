@@ -60,6 +60,19 @@ pub enum Capability {
     /// thing that makes the reach visible in the capability list, which is
     /// where an install prompt reads a plugin's powers from.
     Spawn,
+    /// Read the sessions thurbox is running — names, branches, agent metrics,
+    /// activity text.
+    ///
+    /// Kernel state is gated per *kind* rather than by one blanket grant,
+    /// because the capability list is what an install prompt is written from:
+    /// "reads your sessions" and "reads this machine's CPU and memory" are
+    /// different questions to ask a user, and a pane that wants a session name
+    /// must not have to demand host telemetry to get it.
+    Sessions,
+    /// Read this machine's resource usage and thurbox's own disk footprint.
+    Metrics,
+    /// Read the automations thurbox has scheduled.
+    Automations,
 }
 
 impl Capability {
@@ -72,6 +85,9 @@ impl Capability {
             Capability::Render => "render",
             Capability::Input => "input",
             Capability::Spawn => "spawn",
+            Capability::Sessions => "sessions",
+            Capability::Metrics => "metrics",
+            Capability::Automations => "automations",
         }
     }
 
@@ -84,7 +100,22 @@ impl Capability {
             Capability::Render,
             Capability::Input,
             Capability::Spawn,
+            Capability::Sessions,
+            Capability::Metrics,
+            Capability::Automations,
         ]
+    }
+
+    /// Whether this capability grants a reader over kernel state.
+    ///
+    /// The plugin host uses it to answer one question for the publisher — does
+    /// *anything* running want a snapshot — so a new state capability cannot be
+    /// added without the publisher noticing it.
+    pub fn reads_kernel_state(self) -> bool {
+        matches!(
+            self,
+            Capability::Sessions | Capability::Metrics | Capability::Automations
+        )
     }
 }
 

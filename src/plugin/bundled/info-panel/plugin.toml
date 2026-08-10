@@ -1,0 +1,27 @@
+# thurbox's info panel, as a plugin.
+#
+# Phase 4 of the v2 migration turns the native panes into bundled plugins, and
+# this is the first. It is a *reproduction*, not a replacement: the native pane
+# is still what thurbox draws, and `tests/bundled_info_panel.rs` asserts this
+# plugin builds the identical view tree — so the two cannot drift while both
+# exist.
+#
+# It uses no privileged surface. Every host power below is a declared capability
+# a user's own plugin can request, which is the whole point of shipping the pane
+# this way: what it can do is what a third party can do.
+name = "info-panel"
+api_version = 1
+
+# Three state capabilities rather than one blanket grant, because the capability
+# list is what a user is asked to approve: "reads your sessions" and "reads this
+# machine's CPU and memory" are different questions.
+capabilities = ["render", "sessions", "metrics", "automations"]
+
+[[panes]]
+id = "info"
+title = "Info (plugin)"
+slot = "right"
+# Off by default. The native info panel is still on screen, so shipping this
+# visible would put two of the same pane side by side on every install. Turn it
+# on to compare them.
+default_visible = false

@@ -80,11 +80,24 @@ wall-clock-free `u64` counters bumped at the render/tick hot paths:
 | `restore_seed_prefetches` | restore history captures prefetched in parallel, one per matched pane (ADR-P9) |
 | `agent_meta_syncs` | a session's OSC title/notification actually re-read (gated on the reader thread's meta generation, ADR-P10) |
 | `data_version_checks` | the status refresh actually ran its `PRAGMA data_version` read (throttled ~10×/s, ADR-P10) |
+| `pane_context_builds` / `pane_context_publishes` | the plugin-readable kernel snapshot was gathered / differed from the last one and was written (ADR-27) |
 | `motion_leases` / `motion_frames` | animation leases granted to a plugin pane / repaints declared motion caused (one per tick where a resolved frame moved) — `plugins` builds only |
 | `motion_denied` / `motion_frozen` | declared motions the kernel declined (reduced motion, or a hidden pane) / leases frozen by the aggregate rate budget — `plugins` builds only |
 
 `hook_state_loads` is the regression gate for ADR-P6: it climbs once at startup
 and then only when an external `session signal` commits, instead of ~1 per tick.
+
+`pane_context_builds` / `pane_context_publishes` are the pair for ADR-27, and they
+gate two different things. **Builds** must stay at **0** unless some *running*
+plugin holds one of the `sessions` / `metrics` / `automations` capabilities — that
+is the whole reason an installed plugin nobody reads costs the idle loop nothing,
+and it is why the flag is set from the plugin host's grants rather than from
+whether the host exists. **Publishes** must stay flat while the state does not
+move, which is what keeps a pending automation from writing the process-wide slot
+a hundred times a second: the countdown is published in whole *seconds*, the
+granularity it is displayed at, so it differs at most once per second rather than
+on every tick. Publishing never marks the UI dirty — a plugin pane repaints when
+its own tree changes.
 `external_poll_reloads` stays 0 with no other writer. Tick-driven counters are
 asserted in the `#[test]` units in `super::tests`
 (`perf_hook_states_cached_across_idle_ticks`,

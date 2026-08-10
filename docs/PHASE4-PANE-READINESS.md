@@ -11,12 +11,17 @@ porting it, with every claim traced to the code that makes it true. It is a
 worklist, not a design: each row is a gap someone has to close, with the
 cheapest honest closure named.
 
-Status of the audit: **three gaps closed** (inline lines, commit `6e0c7cc`;
-style tokens and gauges, ADR-26), **one open in full** (§2) and **one half open**
-(§5). The info panel has now been **ported** — it renders through the view tree
-in every build — so the rows below are no longer predictions. Where a prediction
-was wrong, it says so. No *plugin*-authored pane beyond `hello` exists yet, and
-§2 is why the info panel is not one.
+Status of the audit: **four gaps closed** (inline lines, commit `6e0c7cc`;
+style tokens and gauges, ADR-26; kernel state, ADR-27) and **one half open**
+(§5). The info panel has now been ported twice — first to the view tree in every
+build (ADR-26), then reproduced as the **bundled `info-panel` plugin** (ADR-27) —
+so the rows below are no longer predictions. Where a prediction was wrong, it
+says so.
+
+The plugin is a reproduction, not a replacement: the native pane is still what
+thurbox draws, and `tests/bundled_info_panel.rs` asserts the plugin's view tree
+*equals* the native pane's, so the two cannot drift while both exist. Two costs
+the port did not pay off are recorded in §7 rather than closed.
 
 ## 1. Closed: a line of differently-styled runs
 
@@ -30,37 +35,44 @@ Closed by `ViewNode::Line`: runs packed on one row at their own display width,
 holding only nodes whose width follows from their content. See
 `openspec/specs/plugin-host/view-tree/spec.md`.
 
-## 2. Open: no host binding reads kernel state
+## 2. Closed: no host binding read kernel state
 
-`plugin::capabilities::build_module_table` grants exactly four things today:
-`name`, `log`, the `state*` trio over the plugin's own key/value namespace, and
-the `ui` constructors. **There is no binding through which a plugin can read a
-session, a task, an automation, or anything else the kernel owns.**
+`plugin::capabilities::build_module_table` granted exactly four things: `name`,
+`log`, the `state*` trio over the plugin's own key/value namespace, and the `ui`
+constructors. **There was no binding through which a plugin could read a session,
+a task, an automation, or anything else the kernel owns** — so a pane that
+renders kernel data could not be written at all, not badly, not at all. The
+session-list spike hit this too and had to *model* a `sessions()` binding to take
+its measurements.
 
-So a pane that renders kernel data cannot be written at all — not badly, not at
-all. The session-list spike hit this too and had to *model* a `sessions()`
-binding to take its measurements.
+**Closed by a published snapshot** (ADR-27), on exactly the shape this row
+proposed: `session::pane_context` holds pure data plus a process-wide
+`RwLock<Option<PaneContext>>`, `app` publishes it on the tick, and `plugin`
+reads it when a plugin calls a reader. No new architecture edge, no plugin call
+on the UI thread. Both properties the row said had to be designed were:
 
-What the info panel would need, minimally, is the active session's
-`SessionInfo`: name, status, agent, parent name, remote host, hook-wiring
-degradation, OSC activity, last signal, worktree repo and branch, additional
-dirs.
+- **The read is capability-gated — three of them.** `sessions`, `metrics` and
+  `automations`, each gating one reader. The row proposed one (`sessions`);
+  porting the pane showed one was wrong, because the pane also draws host CPU and
+  scheduled automations, and a plugin that wants a session name must not have to
+  demand host telemetry to get it. The capability list is the install prompt.
+- **Publishing is not per-tick work.** Two gates: nothing is built unless a
+  running plugin holds a state capability, and nothing is written unless the
+  value changed. Asserted on the `pane_context_builds` / `pane_context_publishes`
+  counters, not in prose. The row proposed an input signature on the
+  `session_order_signature` pattern; ADR-27 rejected it with a reason — over
+  these inputs a signature must touch every field the snapshot touches, so it
+  saves allocations rather than traversal, and it adds a second description of
+  the snapshot's dependencies that can drift from the snapshot.
 
-**Shape this should take.** The precedent is `session::spawn_contribution`: a
-process-wide `RwLock<Option<_>>` in `session`, written by whichever binary owns
-the data and read by `plugin` when it builds a binding. Applied here, `app`
-publishes a snapshot when the data changes and the binding reads the published
-snapshot — no new architecture edge (`plugin` already reaches `session`), no
-`plugin` call on the UI thread, and the renderer still cannot reach a VM.
-Two properties have to be designed rather than assumed:
-
-- **A read is capability-gated.** `sessions` is a new `Capability`, and reading
-  session names, branches and activity text is exactly the kind of reach an
-  install prompt has to be able to state.
-- **Publishing must not be per-tick work.** The snapshot is rebuilt only when
-  its inputs change, on the pattern `App::session_order_signature` already uses
-  — otherwise a plugin nobody is looking at costs the idle loop a rebuild every
-  tick, which is the regression ADR-V11 exists to prevent.
+**What the snapshot does and does not carry** turned out to be the whole design.
+A VM loads no `os` and no path library, so the kernel resolves what a plugin
+*cannot compute*: a countdown (never an absolute instant), a directory's display
+name (never a path), a parent session's name (never only its id), and each
+status's glyph **and style token**. Everything else is a number, and the plugin
+composes every string it draws. Publishing `"8.0/16.0 GB"` would have made the
+port trivial and worthless — the plugin would have been arranging strings the
+kernel composed, which proves nothing about a third-party pane.
 
 ## 3. Closed: five style tokens cannot address the palette the pane uses
 
@@ -155,12 +167,13 @@ to avoid paying for hidden panes.
 The migration plan calls the info panel the easy one because it is read-only and
 has no input. That is true of its *input* surface and misleading about its
 *data* surface: it is the pane with the most kernel state and the most geometry
-per line in thurbox. Of the five gaps above, the tasks pane needs §2 and §5 and
-neither §3 nor §4.
+per line in thurbox. Of the five gaps above, the tasks pane needed §2 and §5 and
+neither §3 nor §4 — so it would have been the cheaper first port, and §2 is now
+closed for it too.
 
-So the cheapest first bundled pane is not necessarily the first row of the
-table. That is a finding about the plan, not a proposal to change it — but the
-next person should weigh gap §4 before assuming "read-only" means "easy".
+So the cheapest first bundled pane was not the first row of the table. That is a
+finding about the plan, not a proposal to change it — but the next person should
+weigh gap §4 before assuming "read-only" means "easy".
 
 Two further findings the port produced, for whoever ports the next pane.
 
@@ -173,9 +186,38 @@ generalises: the audit was written by reading what the *catalogue* offers, and
 the gap was in what the *pane* relies on. Reading the pane's ratatui calls, not
 the node list, is what finds these.
 
-**The pane still cannot be a plugin, and §2 is the sole reason.** Every rendering
-gap is closed; `info_tree` is geometry-free and could be produced by plugin code
-verbatim. What a plugin cannot do is *obtain the `SessionInfo`*. So the honest
-claim from this port is narrow — the catalogue can express this pane's rendering
-— and the next milestone for the info panel is a capability-gated session
-snapshot, not any further widening of the view tree.
+**The pane is now a plugin.** The rendering claim was narrow on purpose — the
+catalogue could express this pane's *rendering*, not that a third party could
+have written it — and closing §2 is what made the wider claim available. The
+bundled `info-panel` plugin produces the identical view tree from three declared
+capabilities and nothing else.
+
+## 7. What the plugin port cost, and did not pay off
+
+Two things the bundled pane made measurable rather than arguable. Neither is
+closed, and neither should be closed by the next port either without deciding it
+deliberately.
+
+**The plugin pane is up to a second behind.** The render worker polls on a
+~1 s cycle (`PLUGIN_RENDER_SLICE` × `PLUGIN_RENDER_SLICES` in `src/main.rs`), so
+a live gauge in the plugin's copy of the pane lags the native pane's. Nothing
+about the snapshot causes this — it is republished on the tick — and nothing about
+the pane hides it: side by side, the plugin's CPU bar visibly trails.
+`docs/SPIKE-SESSION-LIST.md` already fixed **event-driven render** as a condition
+of the session-list port; this is the second pane to want it, which makes it a
+scheduling decision rather than a session-list detail.
+
+**Every plugin will reimplement `format_bytes`.** The snapshot publishes raw
+numbers on purpose, so the bundled pane carries eight formatters in Luau
+(`humanBytes`, `formatBytes`, `formatBytesPair`, `formatCost`, `formatDuration`,
+`formatTokens`, `formatCountdownSecs`, `formatDueIn`) — about 80 lines that any
+pane showing a byte count or a duration will write again. A `thurbox.format.*`
+helper table would fix it. It is deliberately not added here: it should be
+designed from two or three panes' needs rather than one, and adding it in the same
+change would have destroyed the evidence that a plugin can own its presentation
+at all. Whoever ports the second pane is the right person to decide.
+
+A third thing worth recording because it did *not* happen: **the view tree needed
+no widening.** An independent consumer needed `list`, `paragraph`, `divider`,
+`gauge` and `text` with eight tokens, every one of which ADR-26 had already added
+for the native port. That is the confirmation ADR-26 could not give itself.

@@ -4196,3 +4196,146 @@ fn offering_a_key_without_a_worker_does_not_block() {
     assert!(!h.app.offer_key_to_plugin("j".to_string()));
     assert!(started.elapsed() < std::time::Duration::from_millis(500));
 }
+
+// ── the published pane context (ADR-27) ──────────────────────────────────────
+//
+// The snapshot a plugin pane reads is kernel state, so these run in both build
+// configurations: the publisher is not gated on the plugin feature, and the two
+// gates on it are what stop an installed plugin costing the idle loop a rebuild
+// per tick.
+
+/// Sets reader demand for one test and clears both process-wide slots on drop,
+/// so a later test asserting "nothing is built" cannot fail because of this one.
+/// Holds the crate-wide pane-context test lock for its lifetime.
+struct DemandGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+impl DemandGuard {
+    fn new(present: bool) -> Self {
+        let guard = crate::session::pane_context::test_lock();
+        crate::session::pane_context::clear_for_test();
+        crate::session::pane_context::set_readers_present(present);
+        Self(guard)
+    }
+}
+
+impl Drop for DemandGuard {
+    fn drop(&mut self) {
+        crate::session::pane_context::clear_for_test();
+    }
+}
+
+#[test]
+fn pane_context_is_not_built_without_a_reader() {
+    let _demand = DemandGuard::new(false);
+    let mut h = Harness::standard(2);
+    for _ in 0..5 {
+        h.tick();
+    }
+    assert_eq!(
+        h.app.perf_counters().pane_context_builds,
+        0,
+        "no plugin can read kernel state, so none may be gathered"
+    );
+    assert_eq!(h.app.perf_counters().pane_context_publishes, 0);
+}
+
+#[test]
+fn pane_context_publishes_once_while_unchanged() {
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(2);
+    for _ in 0..5 {
+        h.tick();
+    }
+    let p = h.app.perf_counters();
+    assert_eq!(
+        p.pane_context_builds, 5,
+        "a reader exists, so each tick gathers"
+    );
+    assert_eq!(
+        p.pane_context_publishes, 1,
+        "unchanged state must not be republished"
+    );
+}
+
+#[test]
+fn pane_context_publishes_again_when_the_state_moves() {
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(2);
+    h.tick();
+    assert_eq!(h.app.perf_counters().pane_context_publishes, 1);
+
+    h.app.sessions[h.app.active_index].info.name = "renamed".to_string();
+    h.tick();
+    assert_eq!(
+        h.app.perf_counters().pane_context_publishes,
+        2,
+        "a changed session name is a changed snapshot"
+    );
+    assert_eq!(
+        crate::session::pane_context::published()
+            .and_then(|c| c.session)
+            .map(|s| s.name),
+        Some("renamed".to_string())
+    );
+}
+
+#[test]
+fn publishing_the_pane_context_does_not_repaint() {
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(2);
+    // The publisher on its own, not a whole tick: a tick has a dozen other
+    // reasons to mark the interface dirty, and the claim under test is about
+    // this one step.
+    h.app.detect_output_redraw(); // prime the output baseline
+    h.app.mark_redrawn();
+    h.app.sessions[h.app.active_index].info.name = "renamed".to_string();
+    h.app.publish_pane_context();
+    assert_eq!(
+        h.app.perf_counters().pane_context_publishes,
+        1,
+        "the state moved, so it was published"
+    );
+    assert!(
+        !h.app.should_redraw(),
+        "kernel state a plugin may read is not a reason to paint: the pane \
+         repaints when its own tree changes"
+    );
+}
+
+/// The snapshot must resolve what a sandboxed plugin cannot: the active
+/// session's identity, its status in drawable form, and a repo name rather than
+/// a path.
+#[test]
+fn pane_context_describes_the_active_session() {
+    let _demand = DemandGuard::new(true);
+    let h = Harness::standard(2);
+    let context = h.app.build_pane_context();
+    let session = context.session.expect("a session is active");
+    assert_eq!(session.name, h.app.sessions[h.app.active_index].info.name);
+    assert_eq!(
+        session.status.icon,
+        h.app.sessions[h.app.active_index].info.status.icon()
+    );
+    assert!(
+        !session.status.token.is_empty(),
+        "the kernel names the token, so a plugin never maps a status to a colour"
+    );
+    assert!(
+        session
+            .repo_name
+            .as_deref()
+            .is_none_or(|n| !n.contains('/')),
+        "a repo reaches a plugin as a display name, not a path: {:?}",
+        session.repo_name
+    );
+}
+
+#[test]
+fn pane_context_has_no_session_when_none_is_open() {
+    let _demand = DemandGuard::new(true);
+    let h = Harness::standard(0);
+    assert!(
+        h.app.build_pane_context().session.is_none(),
+        "an empty thurbox is the normal case, not an error"
+    );
+}

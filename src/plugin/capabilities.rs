@@ -130,6 +130,44 @@ pub fn build_module_table(
         module.set("stateDelete", delete)?;
     }
 
+    // Kernel-state readers. Each reads the snapshot published by
+    // `session::pane_context` at the moment it is called, so a plugin sees the
+    // most recent publication without the host pushing anything into its VM —
+    // and nothing here can reach the running application, only a frozen value.
+    //
+    // Gated per *kind* of state rather than by one blanket grant, because the
+    // capability list is what an install prompt is written from.
+    if granted.has(Capability::Sessions) {
+        let read = lua.create_function(|lua, ()| {
+            let Some(context) = crate::session::pane_context::published() else {
+                // Nothing published yet: a plugin that renders before the first
+                // tick sees no session, which is the same answer it gets when
+                // none is open. Both are states it must handle anyway.
+                return Ok(mlua::Value::Nil);
+            };
+            super::kernel_state::session_table(lua, &context)
+        })?;
+        module.set("activeSession", read)?;
+    }
+
+    if granted.has(Capability::Metrics) {
+        let read = lua.create_function(|lua, ()| {
+            let Some(context) = crate::session::pane_context::published() else {
+                return Ok(mlua::Value::Nil);
+            };
+            super::kernel_state::metrics_table(lua, &context)
+        })?;
+        module.set("systemMetrics", read)?;
+    }
+
+    if granted.has(Capability::Automations) {
+        let read = lua.create_function(|lua, ()| {
+            let context = crate::session::pane_context::published().unwrap_or_default();
+            super::kernel_state::automations_table(lua, &context)
+        })?;
+        module.set("upcomingAutomations", read)?;
+    }
+
     // View-node constructors. Ungated on purpose: they build plain tables and
     // grant no host power, so hiding them behind a capability would be theatre.
     // Implemented here rather than as a shipped `.luau` file so they live in
@@ -398,6 +436,89 @@ mod tests {
         let module = build_module_table(&lua, "demo", &GrantedCapabilities::none(), None).unwrap();
         let ui: Table = module.get("ui").unwrap();
         assert!(ui.is_readonly());
+    }
+
+    /// Kernel state is gated per kind, so one grant must not imply another:
+    /// a pane that wants a session name must not thereby read host telemetry.
+    #[test]
+    fn each_state_reader_is_gated_by_its_own_capability() {
+        let lua = Lua::new();
+        for (capability, present, absent) in [
+            (
+                Capability::Sessions,
+                "activeSession",
+                ["systemMetrics", "upcomingAutomations"],
+            ),
+            (
+                Capability::Metrics,
+                "systemMetrics",
+                ["activeSession", "upcomingAutomations"],
+            ),
+            (
+                Capability::Automations,
+                "upcomingAutomations",
+                ["activeSession", "systemMetrics"],
+            ),
+        ] {
+            let module = build_module_table(
+                &lua,
+                "demo",
+                &GrantedCapabilities::from_manifest(&set(&[capability])),
+                None,
+            )
+            .unwrap();
+            assert!(
+                module.contains_key(present).unwrap(),
+                "{capability} should grant {present}"
+            );
+            for name in absent {
+                assert!(
+                    !module.contains_key(name).unwrap(),
+                    "{capability} must not grant {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_state_capability_means_no_state_reader() {
+        let lua = Lua::new();
+        let module = build_module_table(&lua, "demo", &GrantedCapabilities::none(), None).unwrap();
+        for name in ["activeSession", "systemMetrics", "upcomingAutomations"] {
+            assert!(!module.contains_key(name).unwrap(), "{name} leaked");
+        }
+    }
+
+    /// Before the first publication the readers answer "nothing", rather than
+    /// erroring — a plugin rendering on its first worker cycle is normal.
+    #[test]
+    fn a_reader_called_before_anything_is_published_answers_nothing() {
+        let _guard = crate::session::pane_context::test_lock();
+        crate::session::pane_context::clear_for_test();
+        let lua = Lua::new();
+        let module = build_module_table(
+            &lua,
+            "demo",
+            &GrantedCapabilities::from_manifest(&set(&[
+                Capability::Sessions,
+                Capability::Metrics,
+                Capability::Automations,
+            ])),
+            None,
+        )
+        .unwrap();
+        let session: mlua::Value = module
+            .get::<mlua::Function>("activeSession")
+            .unwrap()
+            .call(())
+            .unwrap();
+        assert!(matches!(session, mlua::Value::Nil));
+        let automations: Table = module
+            .get::<mlua::Function>("upcomingAutomations")
+            .unwrap()
+            .call(())
+            .unwrap();
+        assert_eq!(automations.raw_len(), 0);
     }
 
     #[test]

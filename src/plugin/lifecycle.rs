@@ -251,7 +251,29 @@ impl PluginHost {
             self.start_one(index);
         }
         self.log_failures();
+        self.publish_state_demand();
         self.slots.iter().filter(|s| s.state.is_running()).count()
+    }
+
+    /// Tell the kernel whether anything running can read its state.
+    ///
+    /// Answered from the grants the host already holds, and published rather than
+    /// queried because the reader is `app`'s tick and asking the host would mean
+    /// `app` holding it — across a thread boundary, on the render loop. Called
+    /// from every entry point that can change what is running, so a plugin that
+    /// failed to start, was reloaded, or was stopped stops being counted.
+    ///
+    /// Getting this wrong is not a correctness bug in either direction: `true`
+    /// with no reader wastes a snapshot per tick, and `false` with a reader hands
+    /// the plugin a stale one. Both are recoverable on the next call, which is
+    /// why it is derived here rather than tracked incrementally.
+    fn publish_state_demand(&self) {
+        let wanted = self
+            .slots
+            .iter()
+            .filter(|s| s.state.is_running())
+            .any(|s| s.granted.iter().any(Capability::reads_kernel_state));
+        crate::session::pane_context::set_readers_present(wanted);
     }
 
     /// Everything the host knows, as one snapshot.
@@ -440,6 +462,7 @@ impl PluginHost {
             .ok_or(RuntimeError::ThreadGone)?;
         self.start_one(index);
         self.log_failures();
+        self.publish_state_demand();
         Ok(self.slots[index].state.clone())
     }
 
@@ -522,6 +545,7 @@ impl PluginHost {
                 Err(e) => slot.fail(Transition::Stop, e),
             }
         }
+        self.publish_state_demand();
     }
 
     /// Return a stopped or failed plugin to `Discovered` so it can be started
@@ -538,6 +562,7 @@ impl PluginHost {
             let _ = thread.stop();
         }
         slot.state = PluginState::Discovered;
+        self.publish_state_demand();
         true
     }
 }
@@ -724,6 +749,68 @@ mod tests {
         host.start_all();
 
         assert_eq!(host.eval("reader", "return SHARED").unwrap(), "nil");
+    }
+
+    /// The publisher's gate is derived from what is *running*: a plugin that
+    /// asks for no kernel state must leave the kernel building no snapshot,
+    /// which is what keeps an installed plugin off the idle loop (ADR-27).
+    #[test]
+    fn a_plugin_that_reads_no_state_leaves_the_publisher_idle() {
+        let _lock = crate::session::pane_context::test_lock();
+        crate::session::pane_context::clear_for_test();
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(
+            tmp.path(),
+            "quiet",
+            "capabilities = [\"log\"]\n",
+            "return {}",
+        );
+        let mut host = host_over(tmp.path());
+        host.start_all();
+        assert!(!crate::session::pane_context::readers_present());
+        crate::session::pane_context::clear_for_test();
+    }
+
+    #[test]
+    fn a_plugin_that_reads_state_asks_the_kernel_to_publish() {
+        let _lock = crate::session::pane_context::test_lock();
+        crate::session::pane_context::clear_for_test();
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(
+            tmp.path(),
+            "watcher",
+            "capabilities = [\"sessions\"]\n",
+            "return {}",
+        );
+        let mut host = host_over(tmp.path());
+        host.start_all();
+        assert!(crate::session::pane_context::readers_present());
+
+        // And stops asking once nothing is running: a stopped plugin must not
+        // keep the kernel gathering state for nobody.
+        host.stop_all();
+        assert!(!crate::session::pane_context::readers_present());
+        crate::session::pane_context::clear_for_test();
+    }
+
+    /// A plugin that asked for state but never started must not count either —
+    /// the gate is about readers that exist, not requests that were made.
+    #[test]
+    fn a_failed_plugin_does_not_ask_the_kernel_to_publish() {
+        let _lock = crate::session::pane_context::test_lock();
+        crate::session::pane_context::clear_for_test();
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(
+            tmp.path(),
+            "broken",
+            "capabilities = [\"sessions\"]\n",
+            "error(\"nope\")",
+        );
+        let mut host = host_over(tmp.path());
+        host.start_all();
+        assert!(host.statuses()[0].state.is_failed());
+        assert!(!crate::session::pane_context::readers_present());
+        crate::session::pane_context::clear_for_test();
     }
 
     #[test]

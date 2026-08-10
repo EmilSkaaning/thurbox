@@ -31,6 +31,7 @@
 pub mod capabilities;
 pub mod commands;
 pub mod discovery;
+pub mod kernel_state;
 pub mod lifecycle;
 pub mod pane;
 pub mod runtime;
