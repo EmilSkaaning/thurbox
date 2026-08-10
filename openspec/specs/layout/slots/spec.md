@@ -24,9 +24,15 @@ entry point or require editing unrelated call sites.
 
 ### Requirement: A column holds an ordered list of occupants
 
-A layout column SHALL be described as an ordered list of occupants rather than
-a fixed set of named rects. Occupants MUST be laid out in list order, and an
-absent occupant MUST NOT leave a gap.
+A layout column SHALL be a **branch of the workspace tree** whose children are
+its occupants in draw order, rather than a fixed set of named rects. Occupants
+MUST be laid out in that order, an absent occupant MUST NOT leave a gap, and the
+list MUST accept **any number** of plugin-contributed occupants rather than a
+single one.
+
+Occupant order is decided by the host — the tasks panel, then the file viewer,
+then the plugin panes in publication order — so two panes can never disagree
+about which comes first.
 
 #### Scenario: Two occupants share a column
 
@@ -37,6 +43,12 @@ absent occupant MUST NOT leave a gap.
 
 - **WHEN** one of several occupants is not shown
 - **THEN** the remaining occupants fill the column with no gap where it was
+
+#### Scenario: Several plugin panes occupy the column
+
+- **WHEN** more than one plugin pane is visible
+- **THEN** each gets its own occupant region in the column, in publication
+  order, after the native occupants
 
 ### Requirement: Existing geometry is preserved exactly
 
