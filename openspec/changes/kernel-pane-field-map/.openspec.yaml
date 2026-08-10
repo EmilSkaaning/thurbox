@@ -1,0 +1,7 @@
+schema: spec-driven
+created: 2026-08-10
+# No delta specs: the deliverable is a map of where `App`'s fields land under the
+# v2 kernel/plugin split, and Phase 0 is explicit that it is a map, not a
+# refactor. No code moves and no behaviour changes, so there is no requirement to
+# state and nothing a reviewer could point a test at.
+skip_specs: true

@@ -2606,6 +2606,11 @@ For rationale behind decisions, see `docs/`:
   the checklist for adding a new built-in
 - `docs/PERFORMANCE.md` — Render/tick performance: demand-driven redraw,
   perf counters, the session-order cache, and how to measure
+- `docs/KERNEL-BOUNDARY.md` — Which of `App`'s 85 fields are kernel state (58),
+  pane state that leaves with a plugin (11), and kernel-owned work a pane merely
+  requests (16), with the split cases (`modal` by variant, `active_index` vs
+  `session_list_state`, `cached_session_order` vs kernel session navigation)
+  named as decisions. A map, not a refactor — nothing moved to produce it
 
 **Rule**: If a code change invalidates or extends a documented
 decision, update the relevant doc in the same PR.
