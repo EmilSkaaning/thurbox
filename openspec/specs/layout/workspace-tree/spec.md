@@ -10,8 +10,13 @@ single-axis splits carrying their children in order, and whose leaves each name
 exactly one region. Every rect the frame paints MUST come from solving that
 tree; no region may be positioned by arithmetic outside it.
 
-A branch MUST distribute its extent along one axis only, and sibling regions
-MUST NOT overlap.
+A branch MUST distribute its extent along one axis only, and sibling regions in
+the **base layer** MUST NOT overlap.
+
+Overlapping is confined to the **overlay layer** (`layout/overlay`): a rect
+anchored against another rect, resolved after the base tree is solved, may cover
+base-layer content, is clipped to the pane that owns it, and is strictly ordered
+by declaration. No base-layer region may overlap anything.
 
 #### Scenario: A nested split resolves to disjoint rects
 
@@ -30,6 +35,12 @@ MUST NOT overlap.
 
 - **WHEN** the same tree is solved twice against the same area
 - **THEN** the resulting rects are equal
+
+#### Scenario: An overlay does not disturb the base layer
+
+- **WHEN** overlays are placed inside a solved tree's regions
+- **THEN** every base-layer region keeps the rect the solve gave it, and no two
+  base-layer regions overlap
 
 ### Requirement: A child declares how it takes its share
 

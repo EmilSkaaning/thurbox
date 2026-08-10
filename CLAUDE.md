@@ -2002,10 +2002,16 @@ code_review`.
   colours (GitHub-style). Side-by-side keeps plain add/remove colouring.
 - **Comments.** Line / file / review-summary level, each with a classification
   (issue / suggestion / note / praise, colored badges). Composed in an **in-view
-  box that floats inline at the selected line** (`render_compose_inline` anchors
-  it to the line's screen row, falling back above/below as room allows) — a
-  `ComposeState` sub-mode, not a separate modal. State lives in
-  `app::code_review::CodeReviewState`.
+  box that floats at the selected line** — a `ComposeState` sub-mode, not a
+  separate modal. State lives in `app::code_review::CodeReviewState`. The box is
+  an **anchored overlay** (ADR-25), not a bespoke placement: `compose_anchor`
+  declares "below the selected row's rect, flip if it doesn't fit, stretched
+  across the pane inset a column" and `session::overlay::Overlay::place` resolves
+  it — below the line, flipped above it, or docked at the diff area's bottom edge
+  when neither fits or the line has scrolled off. `CodeReviewHits::overlay`
+  carries the resolved rect back so `view` records it as
+  `ClickAction::OverlayCapture` **before** the diff rows, which is why a click on
+  the box no longer selects the row underneath it.
 - **Reviewed marks.** `r` / `R` toggle a file / hunk as reviewed (`✓`); `r`
   resolves the file from **any** row inside it (line, hunk, header, or a comment),
   not just the file header.
@@ -2179,7 +2185,15 @@ backend dependency stays visible at each call site.
   A hidden occupant leaves no gap — the terminal holds the
   `Min(0)` slot and absorbs the freed width; a plugin column past
   the first is dropped rather than squeezing the center below
-  `CENTER_MIN_COLS`. Widgets: `project_list` (session
+  `CENTER_MIN_COLS`. The tree's regions are the **base layer**, which
+  never overlaps; a surface that must float lives in the
+  **overlay layer** (ADR-25): `session::overlay::Overlay` declares a
+  side of a *target rect* plus its extents, `Overlay::place` resolves
+  it (prefer the side → flip → dock to the clip's far edge, extents
+  clamped so it never escapes the pane), and `ui::overlay::OverlayLayer`
+  keeps one pane's declarations in **declaration order** — there is no
+  `z-index` — reporting them topmost-first so a click on a floating box
+  is hit-tested before the rows it covers. Widgets: `project_list` (session
   list with repo/branch display; `compute_session_order` is the
   single comparator that orders sessions by manual order
   (`display_order`, never by status) and groups them by repo

@@ -938,3 +938,70 @@ reference `session` but never `ui` — the same placement as `AgentDef`,
   would change a layout that already ships (four occupants at the wide
   threshold already leave a single-digit center). Panes past the first are new
   capacity and can be gated without a regression.
+
+---
+
+## ADR-25: Anchored overlays instead of a floating-element ban
+
+**Choice**: a rect may be positioned against **another rect** — its *target* —
+instead of taking a share of a split. `session::overlay::Overlay` declares the
+side, whether flipping is allowed, and the extents; `Overlay::place` resolves it
+against the target and the owning pane's rect. `ui::overlay::OverlayLayer` holds
+one pane's declarations in order and hands them back **topmost first**, which is
+the order click hit-testing consults them in. The code-review compose box is the
+first consumer, replacing the bespoke placement in `render_compose_inline`.
+
+**Why**: the base layer's "nothing overlaps" invariant was never the whole
+truth. v1 already floats one element and did it with eleven lines local to one
+function — prefer below the selected diff line, else above it, else pin to the
+bottom edge, inset a column — reachable by nothing else. Every other surface
+that wants that shape (a completion dropdown, a context menu, a tooltip) had no
+route to it. The v2 design had answered with an `inlineAt` slot on the diff
+node, which blesses the one case that already existed and leaves the second
+consumer to re-open the question; retiring it *before* anything depends on it is
+what stops a pane being migrated twice.
+
+What actually changes is one invariant, narrowed rather than dropped: the
+**base** layer never overlaps; the **overlay** layer may, and is strictly
+ordered by declaration. Focus is untouched — an overlay belongs to its pane and
+is not a focus target, so exactly one pane still holds focus.
+
+**The port is exact by construction.** v1's three branches are the resolver's
+three steps (prefer the side, flip, dock to the clip's far edge), and its
+one-row target rect makes "below" mean `target.y + target.height`, so no offset
+is needed. `compose_anchor_reproduces_the_legacy_inline_placement` sweeps every
+anchor row across pane heights 3–23 and widths 2–60 against the old formula kept
+as an oracle.
+
+**The one divergence, named**: v1 computed the box's height as
+`area.height.clamp(3, 6)`, so a diff area of one or two rows got a three-row box
+docked at `bottom - 3` — *above* the pane, painting over its neighbour. The
+resolver clamps every extent to the clip first, so the box shrinks instead.
+Reachable only while composing in a pane under three rows tall, pinned by
+`compose_anchor_clamps_a_pane_too_short_for_the_box`.
+
+**Rejected**:
+
+- *Keep the ban* — it pushes every plugin toward a centered modal (wrong shape
+  for a dropdown) and keeps the diff's special case permanently.
+- *A `z-index` property* — familiar and unbounded. Declaration order is enough
+  for menus and compose boxes and cannot be escalated into a layering war.
+- *`anchor.to = "<node-id>"` now* — there is no id space to resolve against: a
+  pane's contents are Rust render functions, so callers pass the rect they
+  already hold. The lookup, and the "a dangling `to` renders nothing, logged
+  once" rule that belongs with it, land with the plugin node tree.
+- *A missing-target policy (`hide` vs `dock`)* — `hide` exists for a dangling
+  id, and nothing can dangle yet. One rule, dock, covers the only reachable case
+  (the target scrolled out of view) and is what v1 did.
+- *An `offset` nudge* — no surface wants one, and it needs three more specified
+  interactions (does the fit test use the shifted rect? the flip? the dock?) to
+  serve a hypothetical gap.
+- *A nesting cap of three* — nesting means anchoring to an anchored subtree,
+  which needs the same node ids. A cap on something that cannot happen is
+  unenforceable.
+- *Intersecting the resolved rect with the pane afterwards* — same containment,
+  worse result: a six-row box in a two-row pane would render its border and lose
+  its content, where clamping the extent first yields a coherent two-row box.
+- *Escaping the pane rect* — wanted for a dropdown at a narrow pane's edge, and
+  it needs cross-pane z-ordering plus an answer for the owning pane being hidden
+  mid-interaction.
