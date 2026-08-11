@@ -19,7 +19,10 @@
 //!   tasks port recorded as the gap blocking every remaining pane.
 //! - The pane still resolves that same window itself, for its click hitboxes and
 //!   its scrollbar. Both go through one shared windowing helper, so the rows the
-//!   user can click are the rows the renderer drew.
+//!   user can click are the rows the renderer drew. The scroll **track** is the
+//!   same arrangement one column over: the tree declares it, the renderer draws
+//!   it, and the pane re-derives the reserved column only to record it as a drag
+//!   target.
 //!
 //! The **search bar** below the tree is chrome, not tree, and is deliberately
 //! outside this split: it needs a bordered sub-block, a cursor cell, and a
@@ -788,14 +791,14 @@ fn render_rows(
         return (None, Vec::new());
     }
 
-    // Reserve the rightmost column for a scrollbar when the tree overflows.
+    // The tree carries *every* row, the cursor's index, and the fact that this
+    // pane wants a scroll track — so the renderer reserves the rightmost column,
+    // draws the thumb, and resolves the window from what is left. This second
+    // reservation is for the numbers only the pane can answer: which rows a click
+    // may land on, and the geometry the app records as a drag target. Both go
+    // through the same helpers the paint does, so the column a user can drag and
+    // the rows a user can click cannot drift from what was drawn.
     let (rows_area, track) = scrollbar::reserve_track(list_area, rows.len(), height);
-
-    // The tree carries *every* row plus the cursor's index, and the renderer
-    // resolves the window from `rows_area`. This second call is for the hitboxes
-    // and the scrollbar, which need the window as numbers rather than as a paint
-    // — the same function, so the rows a user can click cannot drift from the
-    // rows that were drawn.
     let (start, end) = visible_window(rows.len(), state.selected, rows_area.height as usize);
 
     paint(
@@ -804,7 +807,7 @@ fn render_rows(
             Some(state.selected),
             super::theme::current().nerd_font_enabled,
         ),
-        rows_area,
+        list_area,
         frame,
     );
 
@@ -812,8 +815,7 @@ fn render_rows(
     // reserved scrollbar column, so row clicks never overlap the track.
     let hitboxes = super::windowed_row_hitboxes(rows_area, start, end);
 
-    let geom = track
-        .and_then(|track| scrollbar::render_into(frame, track, rows.len(), height, state.selected));
+    let geom = track.and_then(|track| scrollbar::geom_for(track, rows.len(), height));
     (geom, hitboxes)
 }
 
@@ -821,9 +823,13 @@ fn render_rows(
 ///
 /// Carries no geometry: no row is fitted to a width and no row is windowed away,
 /// because the list node's selected child is what lets the *kernel* scroll it to
-/// the cursor from the height it has. `nerd_font` is a parameter rather than a
-/// global read so the tree is a pure function of what it is told — which is also
-/// what lets both glyph sets be tested without a theme switch.
+/// the cursor from the height it has. A populated tree also *declares* that it
+/// wants a scroll track, so the renderer reserves the rightmost column and draws
+/// the thumb — the pane still resolves the same reservation as numbers, for the
+/// hitboxes and the drag target, but nothing draws it twice. `nerd_font` is a
+/// parameter rather than a global read so the tree is a pure function of what it
+/// is told — which is also what lets both glyph sets be tested without a theme
+/// switch.
 ///
 /// `selected` is not required to be in range: an index past the last row
 /// highlights nothing and windows to the end, which is what this pane has always
@@ -832,7 +838,7 @@ pub fn file_tree(rows: &[FileRow], selected: Option<usize>, nerd_font: bool) -> 
     if rows.is_empty() {
         return ViewNode::list(vec![ViewNode::token("No folders", StyleToken::Muted)]);
     }
-    ViewNode::selectable_list(
+    ViewNode::scrolling_list(
         rows.iter()
             .enumerate()
             .map(|(i, row)| row_node(row, Some(i) == selected, nerd_font))
@@ -1410,10 +1416,28 @@ mod tests {
             &mut tree_buf,
         );
 
+        // The legacy side reserves and draws its own track, which is what
+        // `render_rows` did around this body before the tree declared one. Without
+        // it the comparison would only prove that the tree still paints rows at
+        // the pane's full width — the property the reservation deliberately
+        // changes.
+        let (legacy_rows, legacy_track) =
+            super::super::scrollbar::reserve_track(area, rows.len(), h as usize);
         let mut legacy_buf = Buffer::empty(area);
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal
-            .draw(|f| f.render_widget(legacy_body(rows, selected, nerd, h as usize), area))
+            .draw(|f| {
+                f.render_widget(legacy_body(rows, selected, nerd, h as usize), legacy_rows);
+                if let Some(track) = legacy_track {
+                    super::super::scrollbar::render_into(
+                        f,
+                        track,
+                        rows.len(),
+                        h as usize,
+                        selected,
+                    );
+                }
+            })
             .unwrap();
         legacy_buf.merge(terminal.backend().buffer());
         (tree_buf, legacy_buf)

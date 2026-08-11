@@ -118,7 +118,14 @@ export type Ui = {
     -- from its first row and is clipped. An index outside the children is an
     -- error naming the field — including `0`, so a 0-based index fails loudly
     -- rather than pinning the cursor to the first row.
-    list: (children: { ViewNode }?, selectedRow: number?) -> ViewNode,
+    --
+    -- `scrollbar` asks for the scroll track a pane shows on its rightmost column
+    -- when the list is longer than the lines it got. You declare *that* the list
+    -- scrolls; the host owns which column the track occupies, whether the list is
+    -- long enough to need one, and how the thumb looks — so nothing here reports a
+    -- width or a height back to you. A click on the track is never delivered as a
+    -- click on a row.
+    list: (children: { ViewNode }?, selectedRow: number?, scrollbar: boolean?) -> ViewNode,
     -- Like `line`, but soft-wraps onto further rows instead of clipping at the
     -- pane edge. Use it for text whose length you do not control; use `line`
     -- when a following row must not be pushed down. Same admissible children.

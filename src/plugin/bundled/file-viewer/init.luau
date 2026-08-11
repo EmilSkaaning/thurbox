@@ -132,7 +132,12 @@ return {
             table.insert(rows, rowNode(node, i == selected, nerdFont))
         end
         -- The cursor's row goes back to the host, which is what makes this list
-        -- scroll. One-based, like the table it indexes.
-        return ui.list(rows, selected)
+        -- scroll. One-based, like the table it indexes. The third argument asks
+        -- for the scroll track the native pane shows while the tree overflows;
+        -- which column it occupies is the host's, so this pane still learns no
+        -- dimension. It is inert here in a way the native pane's is not — the
+        -- thumb reports a cursor this plugin does not own, so there is nothing a
+        -- drag could move.
+        return ui.list(rows, selected, true)
     end,
 }

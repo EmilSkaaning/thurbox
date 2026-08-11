@@ -103,19 +103,49 @@ pub fn render_into(
     viewport: usize,
     position: usize,
 ) -> Option<ScrollbarGeom> {
-    if track.height == 0 || track.width == 0 {
-        return None;
-    }
+    draw_into(frame.buffer_mut(), track, content_len, viewport, position);
+    geom_for(track, content_len, viewport)
+}
 
+/// Draw the bar straight into a buffer, for a caller that has no [`Frame`].
+///
+/// The view-tree renderer is one: it paints into a buffer so that a pane's tree
+/// can be rendered off-screen and compared. A second thumb-drawing
+/// implementation is exactly what would let a native pane and the plugin
+/// reproducing it differ by a cell, so [`render_into`] is a thin wrapper over
+/// this rather than a parallel path.
+pub fn draw_into(
+    buf: &mut ratatui::buffer::Buffer,
+    track: Rect,
+    content_len: usize,
+    viewport: usize,
+    position: usize,
+) {
+    use ratatui::widgets::StatefulWidget as _;
+
+    if track.height == 0 || track.width == 0 {
+        return;
+    }
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
         .thumb_style(Style::default().fg(Theme::accent()))
         .track_style(Style::default().fg(Theme::text_muted()));
-
     let mut state = ScrollbarState::new(content_len)
         .position(position)
         .viewport_content_length(viewport);
-    frame.render_stateful_widget(scrollbar, track, &mut state);
+    scrollbar.render(track, buf, &mut state);
+}
 
+/// The geometry a drawn bar occupies, without drawing it.
+///
+/// Separate from [`draw_into`] because the two answer different callers: a pane
+/// that hands its rows to the tree renderer still has to record a drag target,
+/// and re-deriving "the rightmost column of the reserved track" at that call site
+/// is how the draggable column drifts from the drawn one. Returns `None` for a
+/// degenerate track, which is the same nothing [`draw_into`] draws.
+pub fn geom_for(track: Rect, content_len: usize, viewport: usize) -> Option<ScrollbarGeom> {
+    if track.height == 0 || track.width == 0 {
+        return None;
+    }
     // Hit-test only the column the bar occupies, not the full input rect.
     let bar_column = Rect {
         x: track.x + track.width - 1,

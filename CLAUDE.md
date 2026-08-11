@@ -980,7 +980,15 @@ rather than a refused node. The window is
 native pane and a plugin reproducing it paint the *same frame* rather than merely
 build the same tree. An index outside the children is a named conversion error
 rather than a clamp — including `0`, so a zero-based index fails loudly instead
-of pinning the cursor to the first row.
+of pinning the cursor to the first row. A third argument (`ui.list(children,
+selectedRow, scrollbar)`) asks for the **scroll track** a pane shows on its
+rightmost column while the list overflows: the kernel reserves the column
+(`ui::scrollbar::reserve_track`, what every native pane reserves with), draws the
+thumb at that cursor, and lays the rows out in what is left — the same trade one
+column over (ADR-39). It is deliberately *not* inferred from `selectedRow`, since
+three of thurbox's own panes draw selectable lists that overflow without a
+scrollbar. In a plugin pane the thumb is an **indicator**: it reports a cursor the
+plugin does not own, so no drag target is recorded for it.
 
 `row` and `line` differ in who
 owns the widths: a `row` splits its area into **equal shares** (a plugin cannot

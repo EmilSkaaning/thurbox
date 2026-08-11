@@ -419,13 +419,21 @@ fn build_ui_table(lua: &Lua) -> mlua::Result<Table> {
         )?;
     }
 
-    // `ui.list(children, selected?)` — the one container that may name the row
-    // its cursor is on, so the kernel can scroll it to that row from a height
-    // the plugin is never told. One-based, like the table it indexes.
+    // `ui.list(children, selected?, scrollbar?)` — the one container that may
+    // name the row its cursor is on, so the kernel can scroll it to that row from
+    // a height the plugin is never told. One-based, like the table it indexes.
+    // `scrollbar` asks for the track a scrolling pane shows on its rightmost
+    // column; which column that is, and whether the list is long enough to need
+    // one, stay the kernel's.
     ui.set(
         "list",
         lua.create_function(
-            |lua, (children, selected_row): (Option<Table>, Option<mlua::Value>)| {
+            |lua,
+             (children, selected_row, scrollbar): (
+                Option<Table>,
+                Option<mlua::Value>,
+                Option<mlua::Value>,
+            )| {
                 let node = lua.create_table()?;
                 node.set("kind", "list")?;
                 node.set("children", children.unwrap_or(lua.create_table()?))?;
@@ -434,6 +442,9 @@ fn build_ui_table(lua: &Lua) -> mlua::Result<Table> {
                 // that can disagree.
                 if let Some(row) = selected_row.filter(|v| !v.is_nil()) {
                     node.set("selectedRow", row)?;
+                }
+                if let Some(track) = scrollbar.filter(|v| !v.is_nil()) {
+                    node.set("scrollbar", track)?;
                 }
                 Ok(node)
             },

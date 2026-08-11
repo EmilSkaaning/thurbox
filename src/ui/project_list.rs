@@ -1118,10 +1118,7 @@ pub fn session_list_tree(items: &[SessionListItem]) -> ViewNode {
     let selected = items
         .iter()
         .position(|item| matches!(item, SessionListItem::Session(row) if row.selected));
-    ViewNode::List {
-        children: items.iter().map(session_item_node).collect(),
-        selected,
-    }
+    ViewNode::selectable_list(items.iter().map(session_item_node).collect(), selected)
 }
 
 /// One item's node: a group header, or a session row.

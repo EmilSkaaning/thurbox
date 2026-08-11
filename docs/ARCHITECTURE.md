@@ -1936,3 +1936,95 @@ keys stay the kernel's, with the reason checked rather than remembered: the
 tasks-plugin teardown row stays blocked — for a second, independent reason on top
 of ADR-37's — and the next person to try a handover meets the finding here rather
 than rediscovering it at `j`.
+
+## ADR-39: A scroll track is a list's declaration; the file viewer's keys are not portable
+
+**Context.** The file viewer was to be the next native pane *replaced*: bring the
+bundled `file-viewer` plugin to parity with all seven of its
+`KeyContext::FileViewer` actions, then delete `src/ui/file_viewer.rs`. As with the
+tasks pane (ADR-38) the attempt produced one closable rendering gap and one wall,
+and here the wall is higher.
+
+The rendering gap is the scroll track, recorded as *divergence 2* by
+`tests/bundled_file_viewer.rs`. The native pane reserved its rightmost column
+through `ui::scrollbar::reserve_track`, painted its rows into what was left, and
+drew the thumb itself — all *outside* the tree — so a plugin pane had no track at
+all. That test recorded the closure as Phase 6's business because the reservation
+sat outside the tree; the objection turns out to be answerable, because moving the
+reservation into the renderer leaves the native pane's rows in the rect they were
+already painted into.
+
+The wall is that **every one of the pane's seven keys writes view state**, and two
+of them need powers the vocabulary does not define at all: expanding a directory
+*reads it* (`FileViewerState::activate` → `read_dir_sorted`), and expanding a file
+*launches the configured editor*. Unlike the tasks pane there is not even a partial
+key surface — no file-viewer key is a record write. And the `/` sub-mode cannot
+meet the parity bar in principle: `App::focus_key_context` returns `Global` while a
+search is active so that every character types into the query, which is the
+opposite of "rebindable, and in the F1 editor".
+
+One structural fact is new, and it changes what deleting the pane would mean:
+**`src/ui/file_viewer.rs` is the pane's model, not only its renderer.**
+`FileViewerState` lives there, `App` owns one, and `App::build_files_snapshot`
+reads it — as does `visible_window`, the rule every *plugin* list is scrolled by
+(ADR-30) and four other native panes window with.
+
+**Decision.**
+
+- **`ViewNode::List` carries a `scrollbar` flag.** A list declares *that* it
+  scrolls; the kernel reserves the rightmost column through the same
+  `reserve_track` every native pane reserves with, draws the thumb at the declared
+  cursor, and lays the rows out in what remains. This is ADR-26's trade (the kernel
+  resolves the geometry, the plugin declares the intent) applied to one column, and
+  it is the fifth time reporting the resolved rect into a plugin was refused.
+- **It is not inferred from `selected`.** `ui::tasks_panel`,
+  `ui::automations_panel` and `ui::project_list` all draw selectable lists that
+  overflow *without* a scrollbar, so inferring a track would put one into three
+  panes that deliberately have none — and would move their frames.
+- **The drawing lives in one place.** `ui::scrollbar` gains `draw_into` (buffer,
+  for the tree renderer) with `render_into` as a `Frame` wrapper over it, and
+  `geom_for` (the recorded drag target, without drawing). The native pane keeps
+  calling `reserve_track` for the numbers only it can answer — its row hitboxes and
+  that drag target — which is the arrangement it already had for `visible_window`,
+  and for the same reason.
+- **A track with no cursor draws at position 0** rather than being refused: whether
+  a cursor is published belongs to whatever the pane reads (the file section drops
+  its cursor past `MAX_FILE_ROWS`), and a node shape that changed with it would
+  break the equality a port is measured by.
+- **`Capability::Files` is not widened.** The port was specified as needing more,
+  and the measurement says the missing parity is *powers, not facts*: a path is
+  only needed in order to act on a file and acting is a process launch; contents
+  are only needed to preview one, which this pane never does; and the query is
+  drawn only inside a bar the host surface cannot describe.
+- **No key is declared and the native pane is not replaced.** The bundled plugin
+  keeps `capabilities = ["render", "files"]` and `default_visible = false`, and the
+  input verdict is a gate (`tests/file_viewer_pane_input_gap.rs`), one probe per
+  missing power, tagged structural or vocabulary.
+
+**Rejected.** *Two `reserve_track` call sites, one per pane* — the arrangement
+ADR-30 rejected for the scroll window, one column over: nothing would force them
+to agree. *Draw the track as host chrome around a plugin's tree* — the host does
+not know a list's length or its cursor without walking the tree it was just
+handed, and every plugin pane would get a track whether its author wanted one or
+not. *Grant a filesystem capability so a plugin could expand a directory* — it
+would be the widest grant in the host, `tests/teardown_gate.rs` reserves the name
+for a different v1 power, and it is still not sufficient (ADR-30: expansion state,
+cursor and search verdict are the user's and the kernel's, so a plugin holding
+`read_dir` could draw *a* file tree but not *this pane*). *Let the plugin own its
+own cursor, expansion set and query* — two file trees with two cursors in one
+interface, whose `/` would filter nothing, and no equality test could be written.
+*Lift `FileViewerState` out of `ui` now as preparation* — motion without a
+destination: the pane cannot be handed over even with the model moved, so moving
+a state machine between modules to enable a blocked deletion is churn whose only
+proof is that the tests still pass.
+
+**Consequences.** The plugin's copy of the file viewer is now byte-identical to the
+native pane inside the frame the host draws — asserted as the same painted frame,
+thumb column included, and shown non-vacuous against a render without the
+declaration. The one divergence left inside the pane is the search **bar**, which
+is drawn *outside* the pane's block and so needs the pane-chrome row PHASE4 §13
+records rather than a node. A plugin pane's track is an **indicator**: the thumb
+reports a cursor the plugin does not own, so no drag target is recorded for it —
+one more consequence of the missing view write, pinned in the gate beside the
+others. And the file-viewer teardown row stays blocked for three independent
+reasons now: ADR-37's build, the view write, and the module that is the model.

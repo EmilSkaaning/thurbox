@@ -667,7 +667,9 @@ mod tests {
         assert!(rows[9].selected, "the cursor's row is marked");
         assert!(!rows[0].selected);
         match tasks_tree(&rows, cursor_row(&state), true) {
-            ViewNode::List { children, selected } => {
+            ViewNode::List {
+                children, selected, ..
+            } => {
                 assert_eq!(children.len(), 10);
                 assert_eq!(selected, Some(9), "the list declares its cursor");
             }

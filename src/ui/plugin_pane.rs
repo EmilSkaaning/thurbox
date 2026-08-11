@@ -619,7 +619,21 @@ fn paint(
         ViewNode::Column(children) => {
             render_stacked(children, area, palette, frames, buf, rows);
         }
-        ViewNode::List { children, selected } => {
+        ViewNode::List {
+            children,
+            selected,
+            scrollbar,
+        } => {
+            // A declared scroll track costs the rightmost column, and it costs it
+            // *before* the window is resolved so the rows are laid out in the
+            // width they will actually be drawn at. Reserved through the helper
+            // every native pane reserves with, so the plugin's track and the
+            // native pane's cannot land in different columns.
+            let (area, track) = if *scrollbar {
+                super::scrollbar::reserve_track(area, children.len(), area.height as usize)
+            } else {
+                (area, None)
+            };
             // The one place the kernel resolves a *height* on a plugin's behalf.
             // A plugin is never told how many rows it got, so a list that
             // declares which child the cursor is on hands the scroll decision
@@ -630,6 +644,19 @@ fn paint(
                 super::file_viewer::visible_window(children.len(), selected, area.height as usize)
             });
             let (start, end) = window.unwrap_or((0, children.len()));
+            if let Some(track) = track {
+                // Position 0 for a list that declares a track and no cursor: the
+                // cursor's presence is a decision of whatever the pane reads, and
+                // a node shape that changed with it would break the equality that
+                // is a port's deliverable.
+                super::scrollbar::draw_into(
+                    buf,
+                    track,
+                    children.len(),
+                    area.height as usize,
+                    selected.unwrap_or(0),
+                );
+            }
             let drawn = render_stacked(&children[start..end], area, palette, frames, buf, rows);
             if let Some(sink) = rows.as_mut() {
                 if !sink.claimed {
@@ -1214,6 +1241,76 @@ mod tests {
         ]);
         // 1 + 3 + max(1, 1)
         assert_eq!(height_of(&tree, 10, &palette(), &FrameTable::default()), 5);
+    }
+
+    // ── a declared scroll track ──────────────────────────────────────────────
+
+    /// Rows wide enough to reach the pane edge, so a reserved column is visible
+    /// as a *missing* glyph rather than only as a style.
+    fn wide_rows(n: usize, width: usize) -> Vec<ViewNode> {
+        (0..n).map(|_| ViewNode::text("X".repeat(width))).collect()
+    }
+
+    /// The last column of every row, as painted.
+    fn right_column(node: &ViewNode, w: u16, h: u16) -> String {
+        let rect = area(w, h);
+        let mut buf = Buffer::empty(rect);
+        render_tree(node, rect, &palette(), &FrameTable::default(), &mut buf);
+        (0..h)
+            .map(|y| buf[(w - 1, y)].symbol().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_declared_track_takes_the_rightmost_column_when_the_list_overflows() {
+        let list = ViewNode::scrolling_list(wide_rows(20, 10), Some(0));
+        let column = right_column(&list, 10, 4);
+        assert!(
+            !column.contains('X'),
+            "the track's column is not row content: {column:?}"
+        );
+        // The thumb sits at the top for a cursor on the first row, so the column
+        // is not merely blank.
+        assert!(
+            column.chars().any(|c| c != ' '),
+            "a thumb is drawn: {column:?}"
+        );
+    }
+
+    /// The declaration is what buys the column: the same overflowing list without
+    /// it keeps every column for its rows. This is what stops the three native
+    /// panes that overflow without a scrollbar from gaining one.
+    #[test]
+    fn an_undeclared_track_costs_no_column() {
+        let list = ViewNode::selectable_list(wide_rows(20, 10), Some(0));
+        assert_eq!(right_column(&list, 10, 4), "XXXX");
+    }
+
+    #[test]
+    fn a_declared_track_is_not_reserved_when_every_row_fits() {
+        let list = ViewNode::scrolling_list(wide_rows(3, 10), Some(0));
+        assert_eq!(
+            right_column(&list, 10, 4),
+            "XXX ",
+            "nothing to scroll, so nothing is taken from the rows"
+        );
+    }
+
+    /// A click on the thumb must not select a row, which is a property of the
+    /// hitboxes rather than of the paint.
+    #[test]
+    fn a_click_on_a_declared_track_is_not_a_click_on_a_row() {
+        let list = ViewNode::scrolling_list(wide_rows(20, 10), Some(0));
+        let hits = row_hits(&list, 10, 4);
+        assert!(!hits.is_empty());
+        for hit in hits {
+            assert_eq!(
+                hit.rect.x + hit.rect.width,
+                9,
+                "row {} reaches into the track's column",
+                hit.index
+            );
+        }
     }
 
     // ── clickable rows (ADR-36) ──────────────────────────────────────────────

@@ -393,7 +393,7 @@ looked cleaner and proved less.
 | Open gap | Native pane | The plugin's copy | Cheapest closure |
 |---|---|---|---|
 | the search bar | a bordered block carrying a query, a caret and a match counter | nothing; the rows still show the search's verdict | the three nodes above |
-| the scrollbar | a reserved rightmost column with a draggable thumb | nothing | a `scrollbar` field on the list node — the renderer already resolves the window, but the native pane reserves its track *outside* the tree, so moving it in is Phase 6 work |
+| the scrollbar | a reserved rightmost column with a draggable thumb | nothing | a `scrollbar` field on the list node — the renderer already resolves the window, but the native pane reserves its track *outside* the tree, so moving it in is Phase 6 work. **Closed in §16**, which is that work: the reservation moved into the renderer and the native pane's rows landed in the rect they were already painted into |
 | the tree is the pane's, lazily | filled on toggle, session change, or a search reveal | `No folders` until the native viewer has been opened once | rebuild the state on session change rather than on first draw |
 
 The third is a limitation of the *section*, not of the catalog, and it is a
@@ -571,7 +571,7 @@ is enumerable:
 | reviewed marks and folding | they belong to the headers, above |
 | the find sub-mode | its bar needs §9's three missing features (a frame node, a cursor appearance, a bottom-anchored region), and its in-row match highlight *replaces* the syntax colouring, which is a third styling mode |
 | the target picker, the footer, the compose box | chrome and sub-modes, each owning keys a plugin pane does not receive |
-| the scrollbar | chrome outside the rows, as for the file viewer |
+| the scrollbar | chrome outside the rows. It was the file viewer's position too until §16 moved that pane's track into its list node; this pane's stays outside, because a review's track is drawn beside a *centre*-pane surface a plugin cannot be seated in |
 | the central-pane seat | `PaneSlot` seats a plugin pane only on the right; the native review owns the centre *and* a column in the right slot |
 
 `the_out_of_scope_surface_is_absent_rather_than_approximated` asserts the plugin's
@@ -1072,3 +1072,129 @@ honest reading of the phase is now:
   installed plugin may do to the interface;
 - and `docs/PHASE6-TEARDOWN-READINESS.md`'s handover worklist should be read in
   that order: the release flip, then the view-write design, then the panes.
+
+## 16. The second handover attempted on a pane with keys: the file viewer
+
+§15 attempted the handover on the tasks pane and found a second blocker
+independent of §14's build one: a plugin pane's keys and the kernel's cursor
+cannot be live at the same time. This section is the attempt on the **file
+viewer**, whose whole interaction is keys, and it produces the same verdict for
+harder reasons plus one structural fact none of the five ports before it had.
+
+### What landed: the pane's copy grows its scroll track, proved by a frame
+
+§9's table left this pane three open rows. The second — *the scrollbar* — is now
+closed, and the record of *why* it was open is worth keeping: the native pane
+reserved its rightmost column **outside** the tree (`scrollbar::reserve_track` in
+`render_rows`, then a paint into what was left), so the closure was recorded as
+"Phase 6's business, not a reproduction's". This is Phase 6, and the objection
+answered: put the reservation in the renderer and the native pane's rows land in
+the rect they were already painted into, so nothing about the native pane moves.
+
+The shape is ADR-26's trade applied to one column (ADR-39). A list declares
+`scrollbar`; the kernel reserves the column, draws the thumb at the declared
+cursor, and lays the rows out in the remainder. Three consequences worth carrying:
+
+- **The claim rises to the whole frame.** `tests/bundled_file_viewer.rs` now
+  asserts the plugin paints the native frame *including the thumb's column*, and
+  asserts it non-vacuously — the same rows without the declaration paint a
+  different frame, so a passing comparison is evidence a track was drawn rather
+  than that neither pane drew one.
+- **It is not inferred from the cursor**, though every list that scrolls has one.
+  Three of thurbox's own panes (`tasks_panel`, `automations_panel`,
+  `project_list`) draw selectable lists that overflow *without* a scrollbar, so
+  inference would have put a track into panes that deliberately have none and
+  moved their frames. "A pane that overflows wants a scrollbar" is false in
+  thurbox, which is the kind of thing only reading the panes tells you (§6).
+- **A plugin's track is an indicator, not a control.** The thumb reports a cursor
+  the plugin does not own, so a drag has no destination to write: no scroll target
+  is recorded for a plugin pane. That is the missing view write again, from a
+  direction nobody had looked from, and it is pinned in the input gate rather than
+  left to be discovered.
+
+§9's other two rows are unchanged. The **search bar** stays out of scope, and this
+port sharpens why: the bar is drawn *outside* the pane's `Files` block, while a
+plugin pane's block is the host's — so even with a frame node the plugin's bar
+would sit *inside* its frame and the frames would differ. It is §13's
+pane-chrome row (a pane's border chrome is the host's), not a container-node row,
+and this is its fourth consumer. The lazily-filled tree is also unchanged.
+
+### The capability the brief expected to widen, and did not
+
+This port was specified as needing a wider `files`. It needs nothing, and the
+reason generalises past this pane: **the missing parity is powers, not facts.**
+
+| The section carries | It refuses | Why the refusal survives |
+|---|---|---|
+| a basename, a depth, an expansion state, a search verdict, a cursor, the nerd-font setting | a path | a path is only needed in order to **act** on a file, and acting is a process launch |
+| | a directory's unexpanded contents | expansion is a filesystem read the kernel performs on a keystroke; publishing what nobody expanded makes the tree the publisher's, not the user's |
+| | a file's contents | the native pane never shows contents — it opens an external editor — so no parity requirement asks for them |
+| | the search query | it is drawn only inside the bar above, which cannot be drawn |
+
+This is ADR-30's finding restated with more evidence: a plugin holding `read_dir`
+could draw *a* file tree but not *this pane*. `Capability::Fs` stays undeclared,
+reserved by `tests/teardown_gate.rs` for v1's "place a file in an agent's own
+config dir" power — adding a filesystem binding here would advance a teardown
+verdict as a side effect of drawing a tree.
+
+### What did not land: every key, and this pane has no partial surface
+
+| Action | What it writes | The power a plugin would need |
+|---|---|---|
+| `FileViewerDown` / `FileViewerUp` (`j`/`k`) | the cursor | a **view write** |
+| `FileViewerCollapse` (`h`) | the expansion set, and the cursor when it jumps to a parent | a view write |
+| `FileViewerExpand` (`l`/`Enter`) on a directory | the expansion set, **reading the directory** to fill it | a view write *or* a filesystem capability |
+| `FileViewerExpand` on a file | nothing in the tree — it **launches an editor process** | a process launch, wider than any capability defined |
+| `FileViewerSearch` (`/`) | the query, and the expansion set as matches are revealed | a view write, plus a sub-mode |
+| `FileViewerNextMatch` / `FileViewerPrevMatch` (`n`/`N`) | the cursor, and the expansion set | a view write |
+
+**The difference from §15 is the absence of an argument to have.** The tasks pane
+had two keys that needed no new host power and failed for a *second* reason
+(disjoint focus). Not one file-viewer key is a record write, so there is nothing
+to weigh: `not_one_of_the_panes_keys_is_a_record_write` derives that from the
+dispatch itself rather than asserting it here.
+
+**And the `/` sub-mode fails a different requirement than the keys do** — the one
+that says a ported pane's keys are rebindable and appear in the F1 editor. They
+are not, by design: `App::focus_key_context` returns `Global` while
+`search_active`, so every character types into the query and the sub-mode's keys
+are matched literally. A plugin declaring `input` *would* receive those
+keystrokes, and they would search nothing: the search's effect is revealing
+matches by expanding directories, moving the cursor between them, and marking
+which rows matched — kernel state with no channel inward. That is §10's objection
+to porting global search, met again from inside a surface that really is a pane.
+
+### The structural fact that is new: the module is the model
+
+For the five panes ported before this one, the module a handover deletes is a
+renderer over records something else owns — `tasks_panel.rs` over `Task` rows,
+`project_list.rs` over sessions, `info_panel.rs` over a session's info.
+`file_viewer.rs` is not. It holds `FileViewerState` — the roots, the expansion
+set, the cursor, the search — `App` owns one as a field, and
+`App::build_files_snapshot` reads it. It also owns `visible_window`, the rule
+**every plugin list** is scrolled by (ADR-30) and four other native panes window
+with.
+
+So for this pane "delete the native renderer" would delete the state the
+replacement reads *and* the scrolling every plugin pane depends on. Lifting the
+model out of `ui` is deliberately **not** done here: the pane cannot be handed
+over even with it moved, so it would be motion without a destination, and the
+question "which module owns a pane's model" is better answered in the change that
+has a consumer for the answer.
+
+### What this means for the phase
+
+The two blockers §15 named are unchanged, and this port adds a third that is
+narrower but real:
+
+1. **the build** (§14, ADR-37) — no released binary can draw a bundled pane; all
+   seven panes, one release decision;
+2. **input** (§15, ADR-38) — a pane whose keys move a cursor cannot be handed to a
+   plugin at all; five of the seven panes;
+3. **a pane whose module is its model** (this section, ADR-39) — the deletion
+   removes state and shared helpers, not only a renderer. One pane, and it is a
+   refactor rather than a design.
+
+The order for `docs/PHASE6-TEARDOWN-READINESS.md`'s worklist is unchanged by that:
+the release flip, then the view-write design, then the panes — with this pane's
+model move as a step inside its own handover.

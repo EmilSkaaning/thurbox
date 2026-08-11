@@ -175,14 +175,34 @@ above makes checkable. Phase 6 is two milestones downstream of where the tree is
    nothing a plugin holds writes view state. PHASE4 §15 records the measurement on
    the tasks pane — where the two keys that *are* expressible still cannot name a
    row, because a plugin holds the keys only while the kernel publishes no cursor
-   — and `tests/tasks_pane_input_gap.rs` holds the verdict as probes. Designing
+   — and PHASE4 §16 the measurement on the **file viewer**, which is worse: not
+   one of its seven keys is a record write, two of them need powers the vocabulary
+   does not define at all (expanding a directory *reads* it; expanding a file
+   *launches an editor*), and its `/` sub-mode's keys are fixed rather than
+   rebindable, so a ported sub-mode could not meet the parity bar even in
+   principle. `tests/tasks_pane_input_gap.rs` and
+   `tests/file_viewer_pane_input_gap.rs` hold both verdicts as probes. Designing
    this is deciding what an installed plugin may do to the user's interface, so it
    belongs before the handovers rather than inside one.
+
+   A consequence worth carrying into that design, found by giving a plugin's list
+   a scroll track (ADR-39): a plugin pane's **thumb is an indicator, not a
+   control**, because it reports a cursor the plugin does not own. Every drag,
+   click-to-position and wheel gesture over a plugin pane's content is the same
+   missing write.
 9. **The seven handovers** — `App::view` drawing each plugin in its native pane's
    place, which on top of steps 7 and 8 needs the pane seatable in the native
    one's region, answering its action and `[features]` flag, and rendering on
    events rather than on a 1 s poll (PHASE4 §14). Only then may a native renderer
    go.
+
+   One of the seven carries an extra step of its own. `src/ui/file_viewer.rs` is
+   the only pane module that is its pane's **model**: `FileViewerState` lives
+   there, `App` owns one, the published `files` section is derived from it, and
+   the module also owns `visible_window` — the rule every *plugin* list is
+   scrolled by and four other native panes window with. That pane's handover
+   therefore begins by lifting its model out of `ui`, which PHASE4 §16 records and
+   deliberately does not do in advance of a destination.
 
 Nothing on this list is unblocked by deleting something first, which is the
 whole finding: the teardown has no safe first step yet.

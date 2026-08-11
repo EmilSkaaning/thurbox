@@ -420,7 +420,9 @@ fn the_compared_tree_is_a_whole_pane() {
         .expect("the search case");
     let tree = case.native_tree(WIDE);
     let (rows, selected) = match &tree {
-        ViewNode::List { children, selected } => (children, selected),
+        ViewNode::List {
+            children, selected, ..
+        } => (children, selected),
         other => panic!("expected a list, got {}", other.kind_name()),
     };
     assert_eq!(rows.len(), 3);

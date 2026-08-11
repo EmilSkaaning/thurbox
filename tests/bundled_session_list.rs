@@ -490,7 +490,9 @@ fn the_compared_tree_is_a_whole_pane() {
         .expect("the everything case");
     let tree = case.native_tree(WIDE);
     let children = match &tree {
-        ViewNode::List { children, selected } => {
+        ViewNode::List {
+            children, selected, ..
+        } => {
             assert!(
                 selected.is_some(),
                 "the cursor's row is declared on the list"
@@ -600,13 +602,7 @@ fn the_empty_pane_is_the_one_place_the_plugin_differs() {
         "if these ever agree, the empty state became expressible and this \
          divergence should be retired"
     );
-    assert_eq!(
-        session_list_tree(&[]),
-        ViewNode::List {
-            children: Vec::new(),
-            selected: None
-        }
-    );
+    assert_eq!(session_list_tree(&[]), ViewNode::list(Vec::new()));
 }
 
 /// **Enumerated divergence 2: which rows are on screen.** The native pane hands
@@ -636,7 +632,9 @@ fn the_two_panes_window_a_long_list_by_different_rules() {
     thurbox::session::pane_context::publish(case.context(WIDE));
 
     let (children, selected) = match render(&host) {
-        ViewNode::List { children, selected } => (children.len(), selected),
+        ViewNode::List {
+            children, selected, ..
+        } => (children.len(), selected),
         other => panic!("expected a list, got {}", other.kind_name()),
     };
     // Eight rows plus the one group header, and the cursor's row is declared as a

@@ -313,7 +313,26 @@ fn convert_list(
         Some(n) if n >= 1 && (n as usize) <= children.len() => Some(n as usize - 1),
         Some(_) => return Err(bad()),
     };
-    Ok(ViewNode::selectable_list(children, selected))
+    // A scroll track is a declaration, not a description: the plugin says the list
+    // scrolls and the kernel owns the column it is shown in. Absent means absent,
+    // and a non-boolean is a named bad field rather than a truthiness test — Lua
+    // would call the string "false" true.
+    let scrollbar = match table.get::<Value>("scrollbar") {
+        Ok(Value::Nil) | Err(_) => false,
+        Ok(Value::Boolean(b)) => b,
+        Ok(_) => {
+            return Err(ViewError::BadField {
+                kind: kind.to_string(),
+                field: "scrollbar",
+                expected: "a boolean",
+            })
+        }
+    };
+    Ok(if scrollbar {
+        ViewNode::scrolling_list(children, selected)
+    } else {
+        ViewNode::selectable_list(children, selected)
+    })
 }
 
 /// Convert a `gauge` node.
@@ -947,6 +966,80 @@ mod tests {
             convert_src(r#"return { kind = "list", children = {} }"#).unwrap(),
             ViewNode::list(vec![])
         );
+    }
+
+    // ── a list's scroll track ──
+
+    #[test]
+    fn a_list_may_declare_a_scroll_track() {
+        let node = convert_src(
+            r#"return { kind = "list", selectedRow = 1, scrollbar = true, children = {
+                 { kind = "text", content = "a" },
+               }}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            node,
+            ViewNode::scrolling_list(vec![ViewNode::text("a")], Some(0))
+        );
+    }
+
+    /// A track and no cursor is a valid combination: whether a cursor is published
+    /// belongs to whatever the pane reads, and a node shape that changed with it
+    /// would break the equality a port is measured by.
+    #[test]
+    fn a_scroll_track_needs_no_cursor() {
+        let node = convert_src(
+            r#"return { kind = "list", scrollbar = true, children = {
+                 { kind = "text", content = "a" },
+               }}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            node,
+            ViewNode::scrolling_list(vec![ViewNode::text("a")], None)
+        );
+    }
+
+    /// Absent means absent, and `false` means the same — so a list is not given a
+    /// track by mentioning the field.
+    #[test]
+    fn an_undeclared_scroll_track_is_absent() {
+        for decl in ["scrollbar = nil", "scrollbar = false"] {
+            assert_eq!(
+                convert_src(&format!(
+                    r#"return {{ kind = "list", {decl}, children = {{
+                         {{ kind = "text", content = "a" }},
+                       }}}}"#
+                ))
+                .unwrap(),
+                ViewNode::list(vec![ViewNode::text("a")]),
+                "{decl}"
+            );
+        }
+    }
+
+    /// Not a truthiness test: Lua would call the string `"false"` true, and a pane
+    /// that grew a column from a typo would be a worse failure than a named error.
+    #[test]
+    fn a_scroll_track_that_is_not_a_boolean_is_refused() {
+        for decl in [r#"scrollbar = "false""#, "scrollbar = 1"] {
+            let err = convert_src(&format!(
+                r#"return {{ kind = "list", {decl}, children = {{
+                     {{ kind = "text", content = "a" }},
+                   }}}}"#
+            ))
+            .expect_err(decl);
+            assert_eq!(
+                err,
+                ViewError::BadField {
+                    kind: "list".to_string(),
+                    field: "scrollbar",
+                    expected: "a boolean",
+                },
+                "{decl}"
+            );
+        }
     }
 
     #[test]

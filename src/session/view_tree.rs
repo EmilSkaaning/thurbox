@@ -352,6 +352,20 @@ pub enum ViewNode {
         /// of rows; a child taller than one row is clipped by the bottom as in
         /// any list.
         selected: Option<usize>,
+        /// Whether the list wants a scroll track — the rightmost column of its
+        /// area, carrying a thumb, when it has more children than rows.
+        ///
+        /// The same trade `selected` makes for height, applied to the one column
+        /// a track occupies: the list declares *that* it scrolls and the kernel
+        /// decides where that is shown. A plugin is told neither dimension, so it
+        /// could not place a track itself.
+        ///
+        /// Deliberately **not** inferred from `selected`. Three of thurbox's own
+        /// panes draw selectable lists that overflow without a scrollbar
+        /// (`ui::tasks_panel`, `ui::automations_panel`, `ui::project_list`), so
+        /// inferring one would put a track into panes that deliberately have
+        /// none — and would move their frames.
+        scrollbar: bool,
     },
     /// A horizontal rule filling the available width.
     Divider,
@@ -553,13 +567,32 @@ impl ViewNode {
         ViewNode::List {
             children,
             selected: None,
+            scrollbar: false,
         }
     }
 
     /// Build a list whose `selected` child (zero-based) the kernel keeps in
     /// view.
     pub fn selectable_list(children: Vec<ViewNode>, selected: Option<usize>) -> ViewNode {
-        ViewNode::List { children, selected }
+        ViewNode::List {
+            children,
+            selected,
+            scrollbar: false,
+        }
+    }
+
+    /// Build a list that also asks for a scroll track — the shape a pane which
+    /// reserves its rightmost column for a thumb declares.
+    ///
+    /// Separate from [`ViewNode::selectable_list`] rather than a fourth argument
+    /// on it, so the lists that want no track (most of them, including three of
+    /// thurbox's own overflowing panes) stay as short to write as they were.
+    pub fn scrolling_list(children: Vec<ViewNode>, selected: Option<usize>) -> ViewNode {
+        ViewNode::List {
+            children,
+            selected,
+            scrollbar: true,
+        }
     }
 
     /// Build a fill run, sanitizing its glyph the way text is sanitized.

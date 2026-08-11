@@ -12,8 +12,11 @@
 //! That is the property a file tree could not do without.
 //!
 //! What is *not* reproduced is stated rather than hidden: the search **bar** below
-//! the tree, and the scrollbar. Both are pinned as enumerated divergences with the
-//! host features that would close them named.
+//! the tree, pinned as an enumerated divergence with the host features that would
+//! close it named. The **scroll track** used to be the second such divergence and
+//! is now part of the frame equality
+//! ([`the_plugin_paints_the_native_frame_including_the_scroll_track`]): a list
+//! declares that it scrolls and the kernel reserves the column.
 //!
 //! It lives in `tests/` for the same reason as the others: this is the one place
 //! that must see both `ui::file_viewer` and `plugin::PluginHost`, and an
@@ -313,12 +316,17 @@ fn the_compared_tree_is_a_whole_pane() {
         .find(|c| c.name == "an expanded tree with a collapsed directory")
         .expect("the tree case");
     let tree = case.native_tree();
-    let (children, selected) = match &tree {
-        ViewNode::List { children, selected } => (children, selected),
+    let (children, selected, scrollbar) = match &tree {
+        ViewNode::List {
+            children,
+            selected,
+            scrollbar,
+        } => (children, selected, scrollbar),
         other => panic!("expected a list, got {}", other.kind_name()),
     };
     assert_eq!(children.len(), 6);
     assert_eq!(*selected, Some(0), "the list carries its cursor");
+    assert!(*scrollbar, "the list asks for its scroll track");
     // Every row is a line of two runs — the prefix and the name — which one text
     // node could not have styled apart.
     assert!(
@@ -370,44 +378,68 @@ fn the_search_bar_is_out_of_scope_but_its_effect_on_the_rows_is_not() {
     }
 }
 
-/// **Enumerated divergence 2: the scrollbar.** The native pane reserves its
-/// rightmost column for a draggable track *before* the tree is painted, so the
-/// track is chrome outside the tree — like the pane border. A plugin pane has no
-/// scrollbar.
+/// **Divergence 2 is closed: the plugin's copy grows the scroll track.**
 ///
-/// Closing it would be a `scrollbar` field on the list node: the renderer already
-/// resolves the window, so it has the numbers. It is deliberately not added,
-/// because the native pane reserves its track outside the tree and moving the
-/// reservation inside changes the native pane's layout — Phase 6's business, not a
-/// reproduction's.
+/// It used to be chrome the native pane reserved *around* its tree, so a plugin
+/// pane had no track at all. The list node now declares that it scrolls and the
+/// renderer reserves the column, which means the two panes agree about the
+/// thumb's column as well as about the rows — the whole frame, not the rows in it.
+///
+/// The track a plugin draws is an **indicator**, not a control: the thumb reports
+/// a cursor the plugin does not own, so a drag has no destination to write. That
+/// consequence is recorded in `tests/file_viewer_pane_input_gap.rs` beside the
+/// other missing view writes, not here.
 #[test]
-fn the_scrollbar_is_the_native_panes_chrome_only() {
+fn the_plugin_paints_the_native_frame_including_the_scroll_track() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
     let host = host();
+    // A cursor a third of the way down a list five times the pane's height, so the
+    // thumb is neither at the top nor at the bottom — a track drawn at the wrong
+    // position would still be a track.
     let rows: Vec<FileRow> = (0..20).map(|i| file(&format!("f{i}.rs"), 0)).collect();
     let case = Case {
         name: "overflowing",
-        selected: Some(0),
+        selected: Some(7),
         rows,
         nerd_font: false,
     };
     thurbox::session::pane_context::publish(case.context());
 
-    // The tree the plugin returns is the tree the native pane builds — the track
-    // is not in either of them, because the native pane draws it around the tree
-    // rather than inside it.
-    assert_eq!(render(&host), case.native_tree());
-    let mut text = String::new();
-    fn walk(node: &ViewNode, out: &mut String) {
-        if let ViewNode::Text { content, .. } = node {
-            out.push_str(content);
-        }
-        node.children().iter().for_each(|c| walk(c, out));
-    }
-    walk(&render(&host), &mut text);
-    for glyph in ["█", "░", "▐", "│"] {
-        assert!(!text.contains(glyph), "no track in the tree: {text:?}");
-    }
+    const WIDTH: u16 = 16;
+    const HEIGHT: u16 = 4;
+    let plugin = paint(&render(&host), WIDTH, HEIGHT);
+    assert_eq!(
+        plugin,
+        paint(&case.native_tree(), WIDTH, HEIGHT),
+        "the plugin's frame is not the native frame"
+    );
+
+    // And the equality is not vacuous: the same rows without the declaration paint
+    // a *different* frame, so what passed above is evidence that a track was drawn
+    // rather than that neither pane drew one.
+    let untracked = ViewNode::selectable_list(
+        match case.native_tree() {
+            ViewNode::List { children, .. } => children,
+            other => panic!("expected a list, got {}", other.kind_name()),
+        },
+        case.selected,
+    );
+    assert_ne!(
+        plugin,
+        paint(&untracked, WIDTH, HEIGHT),
+        "a pane with no track must not paint the same frame as one with it"
+    );
+
+    // The track is where the pane's rows are not: the rightmost column carries no
+    // row content, and it is not blank either.
+    let column: String = (0..HEIGHT)
+        .map(|y| plugin[(WIDTH - 1, y)].symbol().to_string())
+        .collect();
+    assert!(!column.contains('f'), "row text in the track: {column:?}");
+    assert!(
+        column.chars().any(|c| c != ' '),
+        "a thumb is drawn: {column:?}"
+    );
 }
 
 /// The plugin must hold no surface a user's plugin could not declare: its reach is

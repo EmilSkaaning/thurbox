@@ -382,7 +382,9 @@ fn the_compared_tree_is_a_whole_pane() {
         .expect("the token case");
     let tree = case.native_tree();
     let (children, selected) = match &tree {
-        ViewNode::List { children, selected } => (children, selected),
+        ViewNode::List {
+            children, selected, ..
+        } => (children, selected),
         other => panic!("expected a list, got {}", other.kind_name()),
     };
     assert_eq!(children.len(), 6);

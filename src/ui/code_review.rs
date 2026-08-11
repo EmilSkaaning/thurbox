@@ -2333,7 +2333,9 @@ mod tests {
             })
             .collect();
         match diff_stream_tree(&lines, Some(3), 2) {
-            ViewNode::List { children, selected } => {
+            ViewNode::List {
+                children, selected, ..
+            } => {
                 assert_eq!(children.len(), 5);
                 assert_eq!(selected, Some(3));
             }
@@ -2341,7 +2343,9 @@ mod tests {
         }
         // The empty state carries no cursor and one muted line.
         match diff_stream_tree(&[], None, 2) {
-            ViewNode::List { children, selected } => {
+            ViewNode::List {
+                children, selected, ..
+            } => {
                 assert_eq!(selected, None);
                 assert_eq!(children.len(), 1);
             }
