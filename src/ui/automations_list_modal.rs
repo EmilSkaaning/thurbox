@@ -15,6 +15,43 @@ pub struct AutomationsListEntry {
     pub enabled: bool,
 }
 
+/// Compose an automation's summary tail from its parts:
+/// `<schedule> · <action> · <when>`.
+///
+/// The three-way `when` precedence is the whole content: a disabled automation says so
+/// rather than counting down to a run that will not happen, an enabled one with a next
+/// run counts down, and an enabled one with none shows a placeholder.
+///
+/// **Why it lives here.** It was `ui::automations_panel`'s, shared with this modal so
+/// the two native surfaces could not disagree; the handover deleted that pane
+/// (ADR-56), and this modal is the surface that still composes it. Not `ui/mod.rs`,
+/// which is the layer's *shared* vocabulary (where [`super::format_countdown`] belongs,
+/// because three surfaces format a countdown) — this is one surface's row format. Not
+/// `app::automation`, beside the `format_automation_summary` that calls it: this is
+/// display-text composition, and putting it in the coordinator would split one rule
+/// across two layers with its own helper left behind in `ui`.
+///
+/// The bundled automations plugin composes the same string from the same published
+/// parts, and `tests/bundled_automations_panel.rs` compares the two against **this**
+/// function rather than against a third copy written in a test. That edge outlives the
+/// handover precisely because this function does.
+pub fn row_summary(
+    schedule: &str,
+    action: &str,
+    enabled: bool,
+    due_in_secs: Option<u64>,
+) -> String {
+    let when = if !enabled {
+        "disabled".to_string()
+    } else if let Some(secs) = due_in_secs {
+        // `format_countdown` already includes the "in " prefix.
+        super::format_countdown(secs)
+    } else {
+        "—".to_string()
+    };
+    format!("{schedule} · {action} · {when}")
+}
+
 pub struct AutomationsListState<'a> {
     pub entries: &'a [AutomationsListEntry],
     pub selected_index: usize,
@@ -131,5 +168,25 @@ mod tests {
         let out = truncate("héllo wörld", 6);
         assert_eq!(out, "hél...");
         assert_eq!(out.chars().count(), 6);
+    }
+
+    /// The summary's three-way `when` precedence, which is the whole content of the
+    /// composition — moved here with the function (ADR-56).
+    #[test]
+    fn the_summary_precedence_is_disabled_then_countdown_then_placeholder() {
+        assert_eq!(
+            row_summary("daily 09:00", "spawn", false, Some(30)),
+            "daily 09:00 · spawn · disabled",
+            "a disabled automation says so rather than counting down"
+        );
+        assert_eq!(
+            row_summary("daily 09:00", "spawn", true, Some(7_200)),
+            "daily 09:00 · spawn · in 2h"
+        );
+        assert_eq!(
+            row_summary("once", "exec", true, None),
+            "once · exec · —",
+            "enabled with no next run"
+        );
     }
 }

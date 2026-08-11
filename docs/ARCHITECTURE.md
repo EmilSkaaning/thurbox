@@ -2372,7 +2372,8 @@ view write for an unrelated reason, and nothing would say so. So
 `tests/automations_pane_handover_gap.rs` (10 rows) each hold one row per unmet
 requirement with its probe, derive the verdict from the rows rather than stating
 it, and assert both directions — today's answer, and a table where every row
-landed.
+landed. (The automations half was retired when that pane was handed over; its rows are
+preserved in ADR-56, because none of the powers they named was granted.)
 
 Each row is tagged by **why** it is missing, and a third kind joins the two the
 earlier gates used:
@@ -3550,3 +3551,149 @@ This is also the first pane to depend on ADR-52's "consecutive yielding runs sha
 budget" rule in practice. A name split at a global search's matched offsets is several
 runs and one string to a reader, and this pane's recordings include three matched
 offsets inside a multi-byte name.
+
+## ADR-56: The automations pane is deleted, and a plugin is the pane — keys given back
+
+**Context.** `tests/automations_pane_handover_gap.rs` recorded ten rows. Four had
+closed (the seat, ADR-46; the focused border, ADR-51; the render trigger, ADR-49; the
+fitted name, ADR-55). Of the six left, **five stopped being requirements** the moment
+the pane took ADR-51's route instead of holding its own keys — and each row said so in
+its own words, because the gate was written to measure the other route.
+
+The pane's port (ADR-41) was the furthest any had got: `input`, `automations-write`, a
+cursor of its own across renders, five of seven keys reaching the database. It could
+never reach the other two. `n` creates a record, and the write seam has no creation
+operation *by construction* (ADR-35: creation has no id to address, so a grant to
+create is a grant to add rows without bound). `Enter`/`e` opens a **central-pane**
+editor, which is text authoring `automations-write` is defined to exclude, into a focus
+a plugin cannot take. And a pane focused as `InputFocus::PluginPane` loses the editor
+*and* the run history outright, because `App::render_central_pane` branches on three
+native focuses — which is what the gate's deciding row said.
+
+**Decision.** `src/ui/automations_panel.rs` is deleted. The band beneath the session
+list is `src/plugin/bundled/automations/init.luau`, drawn from the existing
+`left-bottom` seat, gated by `[features] automations`, declaring
+`key_context = "Automations"` — and declaring **neither** `input` nor
+`automations-write`, nor any binding of its own.
+
+All seven scoped actions resolve while the pane holds focus and the kernel performs
+them: `j`/`k` move its cursor and wrap into the session list, `Space` toggles, `r`
+requests a run, `d` deletes, `n` creates, `Enter`/`e` opens the central editor. The
+editor and the run history appear because the pane is focused as
+`InputFocus::Automations`, which the branch above already names.
+
+**The finding is the reduction.** The pane that looked like it needed the widest grants
+needs the fewest: four capabilities to two, and its five ported keys — the first
+evidence that a plugin pane's keys *can* act — turn out never to have been how this pane
+should be driven. This is the first handover that makes a shipped manifest's reach
+smaller.
+
+Five decisions beyond that.
+
+**`row_summary` moves to `src/ui/automations_list_modal.rs`.** It was the pane's, shared
+with the `Ctrl+P` list modal so two native surfaces could not disagree; the modal is the
+surface that still composes it. Not `ui/mod.rs` (the layer's *shared* vocabulary, where
+`format_countdown` belongs because three surfaces format a countdown) — this is one
+surface's row format. Not `app::automation` beside the `format_automation_summary` that
+calls it: it is display-text composition, and the coordinator is the wrong layer for it
+with its own helper left behind in `ui`.
+
+**`show_automations_pane` becomes a claim, not a flag.** `layout_for` reads
+`seat_taken(PaneSlot::LeftBottom)`. ADR-50's rule for its reason: a flag nobody paints
+from still carves a band.
+
+**The pane seeds visible, and that generalised a rule rather than breaking it.** Every
+previous bundled pane seeds hidden, and both earlier handovers replaced a kernel flag
+initialised to `false`. This band was **always on screen** and had no toggle action at
+all, so `tests/bundled_manifests.rs` now records the native default per entry and
+asserts the replacement seeds *at* it — with "a pane that seeds hidden must bind an
+action" as the consequence rather than a second rule. That is stronger, not weaker: it
+also catches a pane seeding hidden when the band it replaced was visible, which the old
+form silently permitted. The test's own doc had predicted this ("a later handover of a
+pane that *did* default to visible (none does today) would want the opposite value for
+the same reason").
+
+**The band arrives after the first frame, and that is accepted.**
+`docs/SPIKE-SESSION-LIST.md` predicted it: the host starts detached, the first frame
+does not wait for it, so "a plugin session list either pops in a moment after the first
+frame … or the first frame has to block on a VM". The info panel and the tasks pane both
+seed hidden, so neither exhibited it. This one does — the left column is the session
+list alone until the host publishes, then it splits. Carving the band from the feature
+flag instead would leave it *blank* whenever the pane is absent for any other reason (a
+plugin that failed to compile, a manifest with no such pane, a build with no host),
+which is the empty-column failure the teardown gate exists to prevent; and blocking the
+first frame is forbidden by `plugin-host/panes`. The residual cost is a startup
+question — how soon the host publishes — and it is the same question for every pane that
+follows.
+
+**The wrap is decided: it stays the kernel's, and needs no owner.** The left column is
+one circular list, and with both its panes becoming plugins "where does the wrap live"
+looks like a new question. It is not. The wrap is four lines in two kernel handlers
+moving `self.focus` between `InputFocus::SessionList` and `InputFocus::Automations`, and
+on ADR-51's route a handed-over pane is focused *as* the kernel's pane of that name — so
+both ends are kernel focuses whoever draws either pane. It survives one handover, both,
+or neither. What changes is its **condition**: `features.automations` was a proxy that
+held only while the kernel drew the band unconditionally, and it becomes "a pane
+provides the automations list", or `j` at the last session would drop focus into a pane
+nobody can see. The plugin's own declining half is deleted, since on this route the
+plugin is never asked.
+
+**The oracle keeps its recordings, loses the builder, and keeps one rule.** The thirteen
+`.snap` files are byte-identical after the deletion (`git status tests/snapshots/` empty
+— the payoff of ADR-42). The `automations_tree`/`resolve_rows` edges go, and the five
+key tests go with the keys they measured. But
+`the_plugin_composes_the_summary_thurbox_composes` **stays**: its right-hand side is
+`row_summary`, which survives because the modal composes it, so that edge is not
+differential — and it is the only assertion holding the pane to a *rule* rather than to
+a fixed set of cases (192 combinations of schedule × action × enabled × countdown). The
+general lesson, now in `migration/handover`: deciding what a handover deletes means
+asking of each edge whether its right-hand side is going, not whether the change is a
+handover.
+
+**Rejected.** *Keep `input` and add the two missing operations* — two new grants, one
+refused on its merits and one excluded by the capability's own definition, to reach a
+strictly worse outcome: the pane would still lose the editor and the run history,
+because those follow a focus. *Teach `render_central_pane` about a plugin pane* — the
+same fact ADR-51 already encodes, and encodes better by reusing `InputFocus`, so the
+key-context resolver, the ring, the editor's return paths and `Esc` need no arm; a
+second mechanism for one fact is how a handed-over pane comes to *almost* work. *Carve
+the band from the feature flag* — see above. *Move `row_summary` to `app`* — see above.
+*Keep the pane's five bindings alongside the declaration* — the manifest refuses both
+routes in one pane, and a pane holding capabilities nothing exercises is reach an
+installed plugin should not have.
+
+**Consequences.** `tests/automations_pane_handover_gap.rs` is retired. Its five
+structural rows are preserved here rather than deleted, because **none of the powers
+they named was granted** — the pane is handed over because the keys were never the
+plugin's to hold, and these are still the answer for a pane that wants keys of its own:
+
+| Row | What it named | Still absent? |
+|---|---|---|
+| `central-seat-follows-the-native-focus` | a plugin pane driving the central seat | yes — the branch names three native focuses and no plugin pane |
+| `no-creation-operation` | a creation binding on the write seam | yes — ADR-35, by construction |
+| `no-authoring-operation` | an operation writing a field the user typed | yes — `automations-write` excludes text authoring |
+| `wrap-out-of-the-pane-is-unowned` | an action meaning "leave this pane downward" | yes — no such action; the kernel's own handlers do the wrap instead |
+| `pane-is-not-told-its-own-focus` | a published per-pane focus flag | yes — `session::pane_visibility` publishes visibility only |
+
+The teardown gate's `automations-plugin` row is the third `ready` pane row, and
+`EXAMPLE_BLOCKED_PANE` moves to the **file viewer** — the closest of the four that
+remain, whose refusal (ADR-54) is the record of what it still needs.
+
+One new behaviour found while driving it, worth stating because nothing asked for it:
+every pane gets generated `<plugin>.<pane>.{show,hide,toggle}` commands (ADR-32), so a
+user can now **hide the automations band** with `thurbox-cli command run
+automations.automations.hide` and the choice persists. Since the pane binds no toggle
+action there is no keyboard way back — the same command with `show` is the way. That is
+strictly more than v1 offered (which had only `[features] automations = false`, a config
+edit), and it is not a trap: `thurbox-cli plugin list` names the pane and its visibility.
+A pane that binds an action would not have this shape, which is the reason
+`a_handed_over_pane_seeds_at_the_native_panes_default` requires an action of a pane that
+seeds *hidden* and forbids one of a pane that seeds visible.
+
+**Breaking:** a build with no plugin host (`--no-default-features`) has no automations
+band, and with it no central automation editor and no run history — the pane is the only
+door to `InputFocus::Automations`. It is a smaller loss than the tasks pane's:
+`thurbox-cli automation` is untouched, the TUI still fires due schedules, the heartbeat
+keeper still fires them headless, and `Ctrl+P` still opens the list modal and its
+overlay editor, which is a complete authoring surface reached through a `Modal` rather
+than a pane. `plugins` is in the default feature set, so no install is in this position.

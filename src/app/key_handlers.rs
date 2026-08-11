@@ -1608,10 +1608,18 @@ impl App {
 
     /// Session-list `Ctrl+J`: step to the next session, or flow into the
     /// automations pane past the last so the left column reads as one list.
-    /// With automations disabled there is no pane to flow into, so the list
-    /// wraps onto itself.
+    /// With no pane providing the automations list there is nothing to flow into,
+    /// so the list wraps onto itself.
+    ///
+    /// The gate is "a pane provides that list", not `features.automations`
+    /// (ADR-56). The flag was a proxy that held only while the kernel drew the band
+    /// unconditionally; the band is a plugin's pane now, so the flag can be on with
+    /// no band on screen — and this key would then drop focus into a pane nobody can
+    /// see. The wrap itself stays where it always was: both ends are kernel focuses
+    /// whoever draws either pane, which is what makes it survive a handover of
+    /// either without needing an owner.
     fn act_session_list_next(&mut self) {
-        if self.features.automations && self.active_is_last_in_order() {
+        if self.automations_pane_provided() && self.active_is_last_in_order() {
             self.focus = InputFocus::Automations;
             self.automation_ui.automation_panel_index = 0;
             self.refresh_automation_view();
@@ -1620,10 +1628,16 @@ impl App {
         }
     }
 
+    /// Whether some pane provides the interface's automations list, which is the
+    /// question the left column's wrap asks. See [`Self::act_session_list_next`].
+    fn automations_pane_provided(&self) -> bool {
+        self.pane_keyboard_taken(crate::session::KeyContext::Automations)
+    }
+
     /// Session-list `Ctrl+K`: step to the previous session, or flow into the
     /// automations pane (last row) above the first.
     fn act_session_list_prev(&mut self) {
-        if self.features.automations && self.active_is_first_in_order() {
+        if self.automations_pane_provided() && self.active_is_first_in_order() {
             self.focus = InputFocus::Automations;
             self.automation_ui.automation_panel_index = self
                 .automation_ui

@@ -1,96 +1,66 @@
-# thurbox's automations pane, as a plugin.
+# thurbox's automations pane.
 #
-# The sixth pane of Phase 4 and the last native pane that had no plugin at all.
-# It is also the first bundled plugin that **takes input and writes**: every port
-# before it shipped a read-only reproduction.
+# Not a reproduction any more: `src/ui/automations_panel.rs` is deleted and this is the
+# pane (ADR-56). It is the third of thurbox's own panes the kernel does not draw, and
+# the first that is on screen **without being asked for** — the native band always was,
+# and a handover changes which code draws a pane, not whether the pane is on screen.
 #
-# What that changed. The tasks port (ADR-38) recorded a pane's keys as unportable
-# because a plugin "cannot name the row the user is looking at" — true of the
-# *kernel's* cursor, which is marked only while thurbox's own pane holds focus.
-# A plugin granted `input` receives keys only while its **own** pane is focused,
-# and a VM persists across renders, so the row the user is looking at is the row
-# this plugin's own cursor is on. That cursor starts as the one the host published
-# (so an undriven pane reproduces the native one exactly) and moves from there.
+# `tests/bundled_automations_panel.rs` still holds it to the native pane's tree: the
+# thirteen checked-in recordings under `tests/snapshots/` were generated from
+# `ui::automations_panel::automations_tree` while it existed, so they are a statement
+# about the pane rather than about this file. One edge of that oracle is *not* a
+# recording and survives the deletion — the row summary is compared against
+# `ui::automations_list_modal::row_summary`, which the `Ctrl+P` list modal still
+# composes, over all 192 combinations of schedule, action, enabled and countdown.
 #
-# Five of the pane's seven keys ship: `j`/`k` (and the arrows) move the cursor,
-# `Space` toggles enabled, `r` runs now, `d` deletes. The two that do not are
-# `n` (creating an automation — the write seam has no creation binding, by
-# construction) and `Enter`/`e` (the central-pane editor — text authoring
-# `automations-write` is defined to exclude, into a focus a plugin cannot take).
+# **This pane used to hold keys, and gave them up.** The port (ADR-41) declared `input`
+# and `automations-write` and five bindings of its own; it reached five of the pane's
+# seven keys and could never reach the other two — `n` creates a record, which the write
+# seam has no operation for by construction (ADR-35), and `Enter`/`e` opens a
+# central-pane editor, which is text authoring `automations-write` is defined to exclude,
+# into a focus a plugin cannot take. It also lost the editor and the run history
+# outright, because `App::render_central_pane` follows a *focus*.
 #
-# `r` is a **request**, and the property matters here because an automation the
-# *user* authored may run a shell command: the binding marks it due and the
-# kernel fires it on its own pass. Nothing runs on this plugin's thread, and a
-# plugin can neither author nor edit an automation — so the set of programs
-# reachable is exactly the set already scheduled.
+# So the handover took the other route (ADR-51): `key_context = "Automations"` means *I
+# am thurbox's automations pane*, and all seven scoped actions resolve while this pane
+# holds focus, performed by the kernel against its own state — the cursor `j`/`k` move
+# (including its wrap into the session list), the flag `Space` toggles, the run `r`
+# requests, the row `d` deletes, the record `n` creates, the editor `Enter`/`e` opens.
+# Still rebindable in F1, and this plugin never sees a key.
 #
-# Four capabilities, and that is the whole reach: it renders, it reads the
-# automations thurbox has scheduled, it receives keys while its own pane is
-# focused, and it changes the three things `automations-write` defines. It reads
-# no session, runs no command, and touches no file.
-#
-# Nothing here knows the pane's size, and the rows still scroll *and* fit: the pane
-# names the row its cursor is on, and declares that the name's runs yield their width
-# (ADR-52) so the host cuts them with one ellipsis and leaves the marker and the whole
-# summary tail their columns (ADR-55). Before that declaration a long name was clipped
-# at the pane's edge and took the schedule, the action and the countdown with it.
-#
-# A *reproduction*, not a replacement — the pane seeds hidden, so the native pane
-# is what the left column shows until a user asks for this one, and the kernel
-# keeps every key and every surface the native pane has (its editor, its run
-# history, its wrap into the session list). `tests/bundled_automations_panel.rs`
-# asserts this plugin builds the identical view tree, paints the identical frame
-# when the pane scrolls and when a name overflows the column, and reaches the same
-# database rows its keys do.
+# The result is the finding rather than the cost: the pane that looked like it needed the
+# widest grants needs the fewest. Two capabilities, and that is the whole reach — it
+# renders, and it reads the automations thurbox has scheduled. Answering a key needs no
+# capability at all, because the kernel performs the action.
 name = "automations"
 api_version = 1
 
-capabilities = ["render", "automations", "input", "automations-write"]
+capabilities = ["render", "automations"]
 
 [[panes]]
 id = "automations"
-title = "Automations (plugin)"
-# The seat the native pane occupies: the band beneath the session list, whose
-# height the kernel grows with the row count this pane's tree stacks (ADR-46).
-# Showing this pane therefore compares the two in the *same* rect rather than in
-# two different ones.
+# The native pane's title, not "Automations (plugin)": a name that marks the pane as a
+# plugin is right for a copy drawn beside the original and wrong for the pane.
+title = "Automations"
+# The seat the native pane occupied: the band beneath the session list, whose height the
+# kernel grows with the row count this pane's tree stacks (ADR-46).
 slot = "left-bottom"
-# Off by default. The native pane is still what the band draws until this one is
-# shown, and a bundled pane must not arrive on screen unasked. Turn it on to
-# compare them — and, since this one has keys, to drive it.
-default_visible = false
-
-# One binding per ported key. A `[[keybindings]]` entry carries **one** chord
-# where a kernel `Action` carries a list, so the letter is declared (which is what
-# the F1 editor shows and rebinds) and the arrow equivalents are handled as raw
-# key names in `onKey`. Recorded in the change's design §6 rather than worked
-# around silently: the natural closure is `chord` accepting a list.
-[[keybindings]]
-id = "next"
-pane = "automations"
-title = "Next automation"
-chord = "j"
-
-[[keybindings]]
-id = "prev"
-pane = "automations"
-title = "Previous automation"
-chord = "k"
-
-[[keybindings]]
-id = "toggle"
-pane = "automations"
-title = "Toggle enabled"
-chord = "space"
-
-[[keybindings]]
-id = "run"
-pane = "automations"
-title = "Run now"
-chord = "r"
-
-[[keybindings]]
-id = "delete"
-pane = "automations"
-title = "Delete automation"
-chord = "d"
+# The switch that always gated the automations pane. Off, this is not a pane: not shown,
+# no seat, not rendered — and the user's stored visibility survives, so turning it back
+# on restores what they had. It still gates the TUI's *firing* of schedules and the
+# `Ctrl+P` surface, neither of which is this pane.
+feature = "automations"
+# thurbox's automations keyboard (ADR-51). See the header: seven actions, none of them
+# this plugin's.
+key_context = "Automations"
+# **Visible**, unlike every other bundled pane, because the band it replaces was always
+# on screen while `[features] automations` was on. There is no `toggle_action` for the
+# same reason: the native pane had no toggle, so there is no key whose meaning this pane
+# would be taking over.
+#
+# The host starts detached and a pane does not exist until it publishes, so the band
+# arrives a moment after the first frame and the left column is the session list alone
+# until then. That is the accepted cost (ADR-56): carving the seat from the feature flag
+# instead would leave a blank band whenever the pane is absent for any other reason, and
+# the first frame must never wait for a VM.
+default_visible = true

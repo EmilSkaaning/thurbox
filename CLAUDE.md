@@ -1646,7 +1646,19 @@ by `Database::claim_due_automation` (atomic CAS), so the TUI, the
 keeper, and an OS timer never double-fire.
 
 In the TUI, automations also get a dedicated **Automations pane**
-beneath the session list (left column). It is always present
+beneath the session list (left column). Since ADR-56 that pane is
+**a bundled plugin**, not a native renderer: `src/ui/automations_panel.rs`
+is deleted and `src/plugin/bundled/automations/` draws the band from
+the `left-bottom` seat, declaring `key_context = "Automations"` — so
+all seven scoped actions still resolve and the *kernel* performs them
+against its own state (nothing is granted to the plugin; it declares
+only `render` + `automations`). Two consequences a reader needs: the
+band is carved by a **claim**, so it arrives a moment after the first
+frame rather than being reserved empty, and a build with no plugin
+host (`--no-default-features`) has no band, no central automation
+editor and no run history — `thurbox-cli automation`, the TUI's
+firing, and `Ctrl+P`'s list modal + overlay editor are all unaffected.
+It is always present
 (showing `none` when empty) — unless disabled via `[features]
 automations = false` in settings.toml, which hides the pane (the
 session list takes the whole column and `j`/`k` wrap within it),

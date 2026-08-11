@@ -1057,12 +1057,12 @@ pub(crate) fn automation_due_in_secs(auto: &Automation, now: u64) -> Option<u64>
 /// One-line summary of an automation for the list modal:
 /// `<schedule> · <action> · <when>`.
 ///
-/// The adapter over [`crate::ui::automations_panel::row_summary`]: it resolves the
-/// parts from a stored `Automation` and the composition lives in `ui` beside the
-/// pane's tree builder, so the modal, the pane and the bundled plugin's
-/// reproduction are all measured against one rule.
+/// The adapter over [`crate::ui::automations_list_modal::row_summary`]: it resolves
+/// the parts from a stored `Automation` and the composition lives in `ui` beside the
+/// modal that draws it, so the modal and the pane plugin's copy are measured against
+/// one rule. It sat in the pane's module until that pane was handed over (ADR-56).
 pub(crate) fn format_automation_summary(auto: &Automation, now: u64) -> String {
-    crate::ui::automations_panel::row_summary(
+    crate::ui::automations_list_modal::row_summary(
         &automation_schedule_label(auto),
         auto.action.kind(),
         auto.enabled,

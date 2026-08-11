@@ -199,12 +199,29 @@ const REPLACEMENTS: &[Replacement] = &[
         native_module: Some("tasks_panel"),
         oracle: Some("bundled_tasks_panel"),
     },
-    pane(
-        "automations-plugin",
-        "the automations pane",
-        "automations_panel",
-        Some("bundled_automations_panel"),
-    ),
+    // The third pane handed over (ADR-56), and the first that was **always on screen**:
+    // `src/ui/automations_panel.rs` is deleted, the bundled plugin draws the band from the
+    // `left-bottom` seat, and its manifest declares the `Automations` key context so all
+    // seven of the pane's scoped actions still fire — including the two no write
+    // capability could express, and the wrap into the session list. It is also the first
+    // handover that *reduced* a shipped manifest's reach: the port held `input` and
+    // `automations-write` and gave both up.
+    Replacement {
+        id: "automations-plugin",
+        v1_capability: "the automations pane",
+        v2_home: "a bundled plugin under src/plugin/bundled/, drawn instead of the native pane",
+        ready: true,
+        probe: |root, id| {
+            pane_is_handed_over(
+                bundled_plugin_exists(root, id),
+                view_draws_native_pane(root, id),
+                plugin_host_reaches_the_installed_build(root),
+                pane_oracle_records_the_native_tree(root, id),
+            )
+        },
+        native_module: Some("automations_panel"),
+        oracle: Some("bundled_automations_panel"),
+    },
     pane(
         "file-viewer-plugin",
         "the file viewer",
@@ -678,7 +695,7 @@ fn readiness_is_derived_from_the_verdicts() {
         .collect();
     assert_eq!(
         handed_over,
-        vec!["info-panel-plugin", "tasks-plugin"],
+        vec!["info-panel-plugin", "tasks-plugin", "automations-plugin"],
         "the handed-over set is a deliberate list, so a pane joining it is a decision made \
          here and not a side effect"
     );
@@ -688,7 +705,7 @@ fn readiness_is_derived_from_the_verdicts() {
     {
         assert!(blocked.contains(&r.id), "{} is recorded ready", r.id);
     }
-    for handed in ["info-panel-plugin", "tasks-plugin"] {
+    for handed in ["info-panel-plugin", "tasks-plugin", "automations-plugin"] {
         assert!(
             !blocked.contains(&handed),
             "{handed} is handed over, so its row is not a blocker"
@@ -750,8 +767,11 @@ fn a_reproduced_pane_is_not_a_replaced_one() {
 /// The pane the test above illustrates with, named once.
 ///
 /// A `const` rather than a literal in four places, so moving the example after the
-/// next handover is one edit and cannot be done halfway.
-const EXAMPLE_BLOCKED_PANE: &str = "automations-plugin";
+/// next handover is one edit and cannot be done halfway. It has been the info panel
+/// (until ADR-50), the tasks pane (until ADR-53) and the automations pane (until
+/// ADR-56); the file viewer is the closest of the four that remain, and its refusal
+/// (ADR-54) is the record of what it still needs.
+const EXAMPLE_BLOCKED_PANE: &str = "file-viewer-plugin";
 
 /// The example must name a pane that is still drawn natively, or the illustration
 /// above comes to assert the opposite of the tree and the passing repair is to

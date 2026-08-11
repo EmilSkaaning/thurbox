@@ -901,10 +901,11 @@ fn render_empty_sessions(frame: &mut Frame, area: Rect, block: ratatui::widgets:
 /// Distinct from [`SessionInfo`] because this is the *view* row — the search's
 /// verdict has been applied, the cursor has folded in the pane's focus, and
 /// `status_text` has been fitted to the column — so building the tree from it
-/// needs no width, no focus and no session set. It mirrored the tasks pane's own
-/// resolved row, which is gone with that renderer (ADR-53): the shape survives here
-/// and in `ui::automations_panel`, and this pane still fits `status_text` itself
-/// rather than declaring a yielding run (ADR-52) — one adoption its own handover owes.
+/// needs no width, no focus and no session set. It mirrored the tasks and automations
+/// panes' own resolved rows, both gone with their renderers (ADR-53, ADR-56): this is
+/// the last of the three, and unlike the automations pane (ADR-55) it still fits
+/// `status_text` itself rather than declaring a yielding run (ADR-52) — one adoption its
+/// own handover owes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRow {
     /// The session's status; picks the glyph and its colour role.

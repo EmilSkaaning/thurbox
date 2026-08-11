@@ -17,10 +17,9 @@ use crate::session::{KeyBindings, KeyChord, SessionInfo};
 use crate::ui::selection;
 use crate::ui::theme::Theme;
 use crate::ui::{
-    agent_picker_modal, automation_editor_modal, automations_list_modal, automations_panel,
-    branch_selector_modal, file_viewer, global_search, project_list, restore_sessions_modal,
-    session_name_modal, status_bar, task_editor_modal, terminal_view, theme_picker_modal,
-    worktree_name_modal,
+    agent_picker_modal, automation_editor_modal, automations_list_modal, branch_selector_modal,
+    file_viewer, global_search, project_list, restore_sessions_modal, session_name_modal,
+    status_bar, task_editor_modal, terminal_view, theme_picker_modal, worktree_name_modal,
 };
 
 #[cfg(feature = "plugins")]
@@ -205,9 +204,9 @@ impl App {
 
         self.render_header(frame, areas.header);
         self.render_left_panel(frame, areas.left_panel);
-        self.render_automations_pane(frame, areas.automations_panel);
-        // No `render_info_panel`: the Info column is a bundled plugin's pane
-        // (ADR-50), painted by `render_plugin_panes` from the `center-left` seat.
+        // No `render_automations_pane` and no `render_info_panel`: the automations band
+        // (ADR-56) and the Info column (ADR-50) are bundled plugins' panes, painted by
+        // `render_plugin_panes` from the `left-bottom` and `center-left` seats.
         #[cfg(feature = "plugins")]
         self.render_plugin_panes(frame, &areas);
         self.render_file_viewer(frame, areas.file_viewer);
@@ -281,18 +280,20 @@ impl App {
                         | ClickAction::RepoFocus(_)
                 )
             } else {
-                // The tasks row target is listed separately because it exists only in
-                // a build with the plugin host: the pane that records it is a plugin's
-                // (ADR-53).
+                // The tasks and automations row targets are listed separately because
+                // they exist only in a build with the plugin host: the panes that
+                // record them are plugins' (ADR-53, ADR-56).
                 #[cfg(feature = "plugins")]
-                let a_task_row = matches!(t.action, ClickAction::SelectTask(_));
+                let a_plugin_pane_row = matches!(
+                    t.action,
+                    ClickAction::SelectTask(_) | ClickAction::SelectAutomation(_)
+                );
                 #[cfg(not(feature = "plugins"))]
-                let a_task_row = false;
-                a_task_row
+                let a_plugin_pane_row = false;
+                a_plugin_pane_row
                     || matches!(
                         t.action,
                         ClickAction::SelectSession(_)
-                            | ClickAction::SelectAutomation(_)
                             | ClickAction::SelectFileRow(_)
                             | ClickAction::Global(_)
                             | ClickAction::ReviewButton(_)
@@ -475,71 +476,6 @@ impl App {
             ClickAction::SelectSession,
             left_area,
             InputFocus::SessionList,
-        );
-    }
-
-    /// Render the automations pane beneath the session list (when present).
-    ///
-    /// A plugin pane that claimed this seat draws it instead (ADR-46).
-    fn render_automations_pane(&mut self, frame: &mut Frame, auto_area: Option<Rect>) {
-        let Some(auto_area) = auto_area else {
-            return;
-        };
-        if self.seat_taken(PaneSlot::LeftBottom) {
-            return;
-        }
-        let now = crate::sync::current_time_millis();
-        self.metrics.bump(|p| &mut p.automation_entries_built);
-        let search = self.global_search_query();
-        let entries: Vec<automations_panel::AutomationPaneEntry> = self
-            .automation_ui
-            .cached_automations
-            .iter()
-            .map(|a| {
-                let m = search.and_then(|q| crate::fuzzy::fuzzy_match(q, &a.name));
-                automations_panel::AutomationPaneEntry {
-                    id: a.id,
-                    name: a.name.clone(),
-                    // The summary's *parts*: the pane composes it, so the tree it
-                    // builds and the tree a plugin builds from the published
-                    // snapshot are composed by the same rule.
-                    schedule: super::automation::automation_schedule_label(a),
-                    action: a.action.kind(),
-                    enabled: a.enabled,
-                    due_in_secs: super::automation::automation_due_in_secs(a, now),
-                    match_positions: m.as_ref().map(|m| m.positions.clone()).unwrap_or_default(),
-                    // When searching, rows that didn't match are dimmed.
-                    dimmed: search.is_some() && m.is_none(),
-                }
-            })
-            .collect();
-        // Editing / browsing history in the central pane reports `Active`, which
-        // this pane currently draws exactly as `Inactive`: its border matches only
-        // on `Focused`, and `resolve_rows` marks the cursor's row only on
-        // `Focused` or a search preview. Kept because the distinction is real state
-        // the pane could use (the row being worked on is a candidate for a marker).
-        let focus = self.pane_focus_level(crate::session::KeyContext::Automations);
-        let selected = self
-            .automation_ui
-            .automation_panel_index
-            .min(entries.len().saturating_sub(1));
-        let preview_selected =
-            self.global_search_preview_kind() == Some(crate::app::search::SearchKind::Automation);
-        let rows = automations_panel::render_automations_pane(
-            frame,
-            auto_area,
-            &automations_panel::AutomationsPaneState {
-                entries: &entries,
-                selected,
-                focus,
-                preview_selected,
-            },
-        );
-        self.record_row_clicks(
-            rows,
-            ClickAction::SelectAutomation,
-            auto_area,
-            InputFocus::Automations,
         );
     }
 

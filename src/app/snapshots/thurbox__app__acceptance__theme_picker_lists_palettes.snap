@@ -27,8 +27,8 @@ expression: h.render()
 │                 │  Rosé Pine                ║                                  │                 │
 │                 │  Oxocarbon                ║                                  │                 │
 │                 │  GitHub Dark              ▼                                  │                 │
-╰─────────────────│  theme id: default                                           │                 │
-╭ Automations ────│j/k navigate  PgUp/PgDn page  / filter        Select   Cancel │                 │
-│none             ╰──────────────────────────────────────────────────────────────╯                 │
+│                 │  theme id: default                                           │                 │
+│                 │j/k navigate  PgUp/PgDn page  / filter        Select   Cancel │                 │
+│                 ╰──────────────────────────────────────────────────────────────╯                 │
 ╰───────────────────────╯└─────────────────────────────────────────────────────────────────────────┘
  Sessions  Help · F1   Info · F2   Files · F3   Theme · F4   Tasks · F5   Settings · F6   Quit · ^Q

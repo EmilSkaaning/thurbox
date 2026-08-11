@@ -1,51 +1,50 @@
 --!strict
 -- thurbox's automations pane, in Luau.
 --
--- A faithful reproduction of `ui::automations_panel::automations_tree`: the same
--- two markers, the same colour role per state, the same
--- selected > dimmed > resting precedence, the same emphasis on matched
--- characters, the same summary composition, the same empty-state line.
--- `tests/bundled_automations_panel.rs` asserts the two view trees are *equal*.
+-- Not a reproduction any more: `src/ui/automations_panel.rs` is deleted and this **is**
+-- the pane (ADR-56). `tests/bundled_automations_panel.rs` still holds it to the native
+-- pane's tree — the thirteen checked-in recordings were generated from
+-- `ui::automations_panel::automations_tree` while it existed — so this file is measured
+-- against the pane rather than against itself.
 --
--- Three things are worth reading for what they imply about writing a pane:
+-- Four things are worth reading, because together they are the v2 pane model:
 --
--- 1. **The summary is composed here, from parts.** The host publishes a schedule
---    *label*, an action *name* and a duration in seconds — the two things a
---    sandbox cannot derive (thurbox's cron vocabulary, and a clock) plus one it
---    can. The separator, the ordering and the three-way `when` precedence are
---    this plugin's, and the test compares them against thurbox's own rule rather
---    than against a third copy.
--- 2. **The cursor is this plugin's own.** Every earlier bundled pane was
---    read-only, and the tasks port recorded a pane's keys as unportable because a
---    plugin "cannot name the row the user is looking at". That is true of
---    *thurbox's* cursor: the host marks it only while thurbox's own pane holds
---    focus, which is never while this pane does. But a plugin holding `input`
---    receives keys only while its own pane is focused, and this VM persists
---    across renders — so `cursor` below is ordinary state, and the row the user
---    is looking at is the row it names. It starts as `nil`, meaning "follow the
---    host's", which is what makes an undriven pane an exact copy.
--- 3. **A write addresses a row by id, never by index.** `entries[i].id` is what
---    the three write bindings take. The pane a user is driving and the list the
---    host published are the same rows in the same order, but an index would
---    silently act on the wrong record the moment they were not.
+-- 1. **This file draws; it does not drive.** The manifest declares
+--    `key_context = "Automations"`, so all seven of the pane's scoped actions resolve
+--    while the pane holds focus and the *kernel* performs them against its own state —
+--    `j`/`k` move its cursor (and wrap into the session list), `Space` toggles enabled,
+--    `r` requests a run, `d` deletes, `n` creates, `Enter`/`e` opens the central editor.
+--    Nothing here receives a key, and nothing here needed a capability to be driven.
 --
--- What it cannot do, and does not pretend to: create an automation (`n` — the
--- write seam has no creation binding) or open the central-pane editor
--- (`Enter`/`e` — a seat the pane-slot vocabulary does not offer). And it cannot
--- complete the left column's circular wrap: at either edge it *declines* the key,
--- which is the honest half, and moving focus into the session list is the
--- kernel's, because focus is view state no capability writes.
+--    This is a *reduction*: the port that preceded the handover held `input` and
+--    `automations-write`, kept a cursor of its own across renders, and answered five of
+--    those seven keys. It could not answer the other two — creating a record has no
+--    write operation by construction, and the central editor is a focus a plugin cannot
+--    take — and it lost the editor and the run history entirely. Giving the keys back to
+--    the kernel answers all seven and costs two capabilities. What that port proved is
+--    kept in ADR-56, because it is still the answer for a pane that wants keys of its
+--    own.
 --
--- One interaction differs from thurbox's pane, and it is the visible cost of not
--- being told about its own focus: a write key does nothing until a movement key has
--- placed a cursor this pane draws. thurbox's pane can act immediately because the
--- kernel knows it is focused and is already drawing a cursor; this one would be
--- acting on a row the user cannot see, so it refuses instead of guessing.
+-- 2. **The summary is composed here, from parts.** The host publishes a schedule
+--    *label*, an action *name* and a duration in seconds — the two things a sandbox
+--    cannot derive (thurbox's cron vocabulary, and a clock) plus one it can. The
+--    separator, the ordering and the three-way `when` precedence are this plugin's, and
+--    the test compares them against thurbox's own rule
+--    (`ui::automations_list_modal::row_summary`, which the `Ctrl+P` modal still
+--    composes) rather than against a third copy.
 --
--- Nothing here knows the pane's size, and the rows still scroll *and* fit. The pane
--- names the row its cursor is on and the host windows the list to it; it declares
--- that the name's runs yield their width (`ellipsize`) and the host cuts them with
--- one ellipsis, keeping the marker's and the summary's columns (ADR-52/ADR-55).
+-- 3. **The cursor is the host's.** `list.cursor` is the row thurbox's keyboard is on and
+--    `list.cursorVisible` is whether it is drawn — two answers rather than one, because
+--    this pane windows to its cursor even while the cursor is not drawn (an unfocused
+--    pane still shows the part of the list the keyboard is in). Nothing here tracks a
+--    cursor: the keys that move it are the kernel's.
+--
+-- 4. **Nothing here knows the pane's size**, and the rows still scroll *and* fit. It
+--    names the row the cursor is on and the host windows the list to it; it declares
+--    that the name's runs yield their width (`ellipsize`) and the host cuts them with
+--    one ellipsis, keeping the marker's and the whole summary's columns (ADR-52/ADR-55).
+--    Both are the same trade the gauge node made: declare the intent, the kernel
+--    resolves the geometry.
 
 local thurbox = require("@thurbox")
 local ui = thurbox.ui
@@ -241,86 +240,12 @@ local function rowNode(entry: AutomationEntry, selected: boolean): ViewNode
     return ui.line(runs)
 end
 
--- ── this pane's own cursor ──────────────────────────────────────────────────
-
--- `nil` means "whatever the host says", which is how an undriven pane stays an
--- exact copy of thurbox's. The first movement key adopts the host's row and moves
--- from there; from then on this is the pane's cursor and thurbox's is untouched.
---
--- One value rather than one per pane id because this plugin declares one pane.
-local cursor: number? = nil
+-- ── the pane ────────────────────────────────────────────────────────────────
 
 local function readAutomations(): AutomationList?
     local read = thurbox.automations
     return if read then read() else nil
 end
-
--- The row the pane draws its cursor on: its own once it has one, else the host's.
-local function anchor(list: AutomationList?): number?
-    if cursor then
-        return cursor
-    end
-    return if list then list.cursor else nil
-end
-
--- Whether that row is drawn *as* the cursor.
---
--- Once this plugin has a cursor of its own it draws it unconditionally, because
--- the host tells a pane nothing about its **own** focus — `list.focused` is
--- thurbox's pane, not this one. The consequence is enumerated in the port rather
--- than hidden: after `Esc` the highlight stays. Before the first key the host's
--- answer is used, which is what keeps the reproduction exact.
-local function cursorDrawn(list: AutomationList?): boolean
-    if cursor then
-        return true
-    end
-    return if list then list.cursorVisible else false
-end
-
--- Move the cursor by `delta`, or **decline** the key when there is nowhere to go.
---
--- Declining at an edge is this plugin's half of the left column's circular wrap:
--- in thurbox's own pane the same keypress moves focus into the session list, and
--- moving focus is view state no capability writes. Returning `false` says "I could
--- not move"; completing it is the kernel's, and it does not yet.
-local function move(list: AutomationList?, delta: number): boolean
-    local entries = if list then list.entries else {}
-    if #entries == 0 then
-        return false
-    end
-    local from = anchor(list) or 1
-    local to = from + delta
-    if to < 1 or to > #entries then
-        return false
-    end
-    cursor = to
-    return true
-end
-
--- The automation the cursor is on, or `nil` when there is no row a write may
--- safely act on.
---
--- **Gated on the cursor being drawn**, which is the one place the missing
--- pane-focus fact costs behaviour rather than only appearance. While this pane
--- holds focus thurbox's does not, so `cursorVisible` is false and the pane draws
--- no cursor until a movement key gives it one of its own — and a `Space` in that
--- state would toggle whichever row thurbox's cursor happened to be left on, which
--- the user cannot see. Refusing is the honest answer: press `j`/`k` first, and the
--- row you act on is the row that is highlighted. Never guess at a row nobody is
--- looking at.
-local function selectedEntry(list: AutomationList?): AutomationEntry?
-    if not cursorDrawn(list) then
-        return nil
-    end
-    local entries = if list then list.entries else {}
-    local at = anchor(list)
-    if not at or at < 1 or at > #entries then
-        return nil
-    end
-    return entries[at]
-end
-
--- ── the pane ────────────────────────────────────────────────────────────────
 
 return {
     render = function(_paneId: string): ViewNode
@@ -328,102 +253,31 @@ return {
         local entries = if list then list.entries else {}
 
         if #entries == 0 then
-            -- Whatever the pane last had a cursor on is gone with the rows.
-            cursor = nil
-            -- The empty state names the key that adds an automation only when the
-            -- pane can receive it — which is thurbox's pane, since that key is one
-            -- this plugin cannot reproduce. So it is the host's `focused` here, not
-            -- a fact about this pane.
+            -- The empty state names the key that adds an automation only when the pane
+            -- can receive it, which is what `focused` is for. The chord is spelled out
+            -- here, and that is a known wart rather than an oversight: it is
+            -- *rebindable* and no published section carries a keymap, so a user who
+            -- moved `OpenAutomations` sees the wrong letter. It is inside the pane's
+            -- rows, so moving it into kernel seat chrome would change the pane's
+            -- content — and the native pane printed exactly this.
             local focused = if list then list.focused else false
             local hint = if focused then "none — Ctrl+N to add" else "none"
             return ui.list({ ui.text(hint, "muted") })
         end
 
-        -- A list that shortened under the cursor: clamp rather than draw nothing,
-        -- which is what thurbox's pane does with a stale selection.
-        if cursor and cursor > #entries then
-            cursor = #entries
-        end
-
-        local at = anchor(list)
-        local drawn = cursorDrawn(list)
+        -- The host's cursor: which row thurbox's keyboard is on, and whether it is
+        -- drawn. Two answers, because this pane windows to its cursor even while the
+        -- cursor is not drawn — an unfocused pane still shows the part of the list the
+        -- keyboard is in.
+        local at = if list then list.cursor else nil
+        local drawn = if list then list.cursorVisible else false
         local rows: { ViewNode } = {}
         for i, entry in ipairs(entries) do
             table.insert(rows, rowNode(entry, drawn and i == at))
         end
-        -- Declaring the anchor is what makes the pane scroll: the host keeps that
-        -- row in view from a height this plugin is never told. It is declared even
-        -- when the cursor is not *drawn*, because a list still has to scroll to
-        -- where it is — see `AutomationList` in `thurbox.d.luau`.
+        -- Declaring the anchor is what makes the pane scroll: the host keeps that row
+        -- in view from a height this plugin is never told. It is declared even when the
+        -- cursor is not *drawn* — see `AutomationList` in `thurbox.d.luau`.
         return ui.list(rows, at)
-    end,
-
-    -- Switch on the binding id, not the key: the user may rebind the chord in the
-    -- F1 editor and the id does not change when they do. The arrow keys are
-    -- handled by name because a `[[keybindings]]` entry declares one chord where
-    -- thurbox's own action declares a list, so `j` is declared and `down` is not.
-    onKey = function(_paneId: string, key: string, binding: string?): boolean
-        local list = readAutomations()
-
-        if binding == "next" or key == "down" then
-            return move(list, 1)
-        elseif binding == "prev" or key == "up" then
-            return move(list, -1)
-        end
-
-        -- The three write keys act on the row this pane drew its cursor on,
-        -- addressed by the id the host published with it.
-        local entry = selectedEntry(list)
-        if not entry then
-            return false
-        end
-
-        if binding == "toggle" then
-            local setEnabled = thurbox.setAutomationEnabled
-            if not setEnabled then
-                return false
-            end
-            setEnabled(entry.id, not entry.enabled)
-            return true
-        elseif binding == "run" then
-            local run = thurbox.runAutomation
-            if not run then
-                return false
-            end
-            -- A *request*: this marks the automation due and the kernel fires it
-            -- on its own pass, under the claim that de-duplicates a running TUI
-            -- and a headless tick. Nothing runs on this thread — which is the
-            -- property that makes the key safe to hand a plugin at all, since an
-            -- automation the user authored may run a shell command.
-            run(entry.id)
-            return true
-        elseif binding == "delete" then
-            local remove = thurbox.deleteAutomation
-            if not remove then
-                return false
-            end
-            remove(entry.id)
-            -- The row under the cursor is gone; step back so the cursor does not
-            -- sit past the end until the next publication arrives.
-            if cursor and cursor > 1 then
-                cursor = cursor - 1
-            end
-            return true
-        end
-
-        return false
-    end,
-
-    -- A click selects, exactly as it does in thurbox's pane. `row` is the index in
-    -- this pane's outermost list, which is the same numbering `ui.list`'s
-    -- `selected` uses — so the row highlighted and the row clicked are one number.
-    onClick = function(_paneId: string, row: number): boolean
-        local list = readAutomations()
-        local entries = if list then list.entries else {}
-        if row < 1 or row > #entries then
-            return false
-        end
-        cursor = row
-        return true
     end,
 }

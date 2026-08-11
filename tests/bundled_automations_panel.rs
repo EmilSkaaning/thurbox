@@ -1,91 +1,59 @@
-//! The bundled automations plugin renders — and **drives** — the native pane.
+//! The bundled automations plugin **is** thurbox's automations pane.
 //!
-//! The claim `tests/bundled_tasks_panel.rs` makes for the tasks pane, for the
-//! sixth ported pane and the last native pane that had no plugin at all: the Luau
-//! plugin's view tree must **equal** the one
-//! `ui::automations_panel::automations_tree` builds from the same rows, and paint
-//! the same frame at a height where the pane scrolls.
+//! `src/ui/automations_panel.rs` is deleted (ADR-56), so the claim this file makes is
+//! the one `tests/bundled_tasks_panel.rs` makes: the plugin's view tree must equal the
+//! **recording** of the native pane's tree, and the recordings were generated from
+//! `ui::automations_panel::automations_tree` while it existed (ADR-42/48). They are the
+//! reason a handover has evidence at all — a comparison against the builder the
+//! deletion removes could not fail afterwards.
 //!
-//! What is new here, and is why this file is longer than its four predecessors:
-//! this is the first bundled plugin that takes **input** and **writes**. So the
-//! claim is not only "it draws the same pane" but "its keys do what the native
-//! keys do", asserted through the database the native keys write rather than by
-//! reading the plugin's own state. Three properties are pinned that no previous
-//! port could state:
+//! ## What this file lost, and the one thing it kept
 //!
-//! - the cursor a key moves is the **plugin's own**, and thurbox's is untouched
-//!   ([`the_keys_move_the_plugins_own_cursor`]);
-//! - `runAutomation` only marks an automation **due** — the kernel fires it, so no
-//!   plugin thread runs the shell command a user's `Exec` automation names
-//!   ([`running_marks_the_automation_due_and_executes_nothing`]);
-//! - the left column's circular wrap stays **kernel-owned**: the plugin declines
-//!   the key at its edge and nothing completes it
-//!   ([`the_wrap_out_of_the_pane_stays_kernel_owned`]).
+//! Before the handover the pane held its **own** keys — `input`, `automations-write`,
+//! five bindings and a cursor of its own across renders — and five tests here measured
+//! them against the database. Those keys are gone: the pane declares
+//! `key_context = "Automations"` and the *kernel* performs all seven scoped actions, so
+//! there is nothing here to send a key to. The tests went with them, and what they
+//! proved is preserved in ADR-56, because it is still the answer for a pane that wants
+//! keys of its own.
 //!
-//! **No divergence is enumerated any more**, and both of the two this file used to
-//! carry are kept pointing the other way rather than deleted. The **placement** went
-//! first (ADR-46): the reproduction declares the seat its native counterpart occupies,
-//! so showing it compares the two panes in one rect
-//! ([`the_pane_is_placed_where_the_native_one_sits`]). The **fitted name** went with
-//! ADR-55: neither side cuts a name any more — both declare that the name's runs yield
-//! their width and the kernel cuts them — so the assertion is now frame equality at a
-//! width where the fit fires, which is the pane's real size
-//! ([`the_two_panes_paint_the_same_frame_when_a_name_overflows`]).
+//! What is **kept**, and would have been wrong to drop with the rest, is
+//! [`the_plugin_composes_the_summary_thurbox_composes`]. Its right-hand side is
+//! `ui::automations_list_modal::row_summary`, which survives the deletion because the
+//! `Ctrl+P` list modal composes it too — so that edge is not differential, and it is the
+//! only assertion here that holds the plugin to a *rule* rather than to a fixed set of
+//! cases (192 combinations of schedule, action, enabled and countdown; no snapshot set
+//! covers that). Deciding what a handover deletes means asking of each edge whether its
+//! right-hand side is going, not whether the change is a handover.
 //!
-//! It lives in `tests/` for its predecessors' reason: this is the one place that
-//! must see both `ui::automations_panel` and `plugin::PluginHost`, and an
-//! integration test is not part of the library's module graph, so
+//! Two enumerated divergences were retired before the handover and both are kept
+//! pointing the other way: the **placement** (ADR-46 — the pane declares the seat the
+//! native band occupied) and the **fitted name** (ADR-55 — neither side cuts a name; the
+//! runs declare that they yield their width and the kernel cuts them).
+//!
+//! It lives in `tests/` for its predecessors' reason: it must see both `plugin::PluginHost`
+//! and `ui`, and an integration test is not part of the library's module graph, so
 //! `tests/architecture_rules.rs` stays untouched.
-//!
-//! ## Two edges, because a handover deletes one of them
-//!
-//! The tree equality is **differential** — it names `automations_tree`, which
-//! lives in `src/ui/automations_panel.rs`, the module a handover removes. On that
-//! day the comparison has nothing on its right-hand side, and the repair that
-//! compiles is to drop it: what survives is a test that the plugin renders without
-//! erroring, satisfied equally by a pane drawing one wrong row and by one drawing
-//! twenty. So each case asserts **both** edges while both sides exist (ADR-42):
-//! the recording in `tests/snapshots/` equals the *native* tree — the edge that
-//! gives it provenance, establishable only now — and the plugin equals the native
-//! tree, the port's original proof. Their conjunction is what a handover inherits.
-//!
-//! The keys are not recorded this way and cannot be: their oracle is the database
-//! a native key writes, which no handover deletes.
 
 #![cfg(feature = "plugins")]
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 use thurbox::plugin::{discovery, ExecutionBounds, PluginHost};
-use thurbox::session::automation::{AutomationAction, AutomationSchedule};
 use thurbox::session::motion::FrameTable;
 use thurbox::session::pane_context::{AutomationRowSnapshot, AutomationsSnapshot, PaneContext};
 use thurbox::session::plugin_manifest::Capability;
-use thurbox::session::plugin_mutations::KernelWriter;
 use thurbox::session::view_tree::ViewNode;
-use thurbox::storage::automations::NewAutomation;
-use thurbox::storage::plugins::DbKernelWriter;
-use thurbox::storage::Database;
-use thurbox::ui::automations_panel::{
-    automations_tree, resolve_rows, row_summary, AutomationPaneEntry, AutomationRow,
-    AutomationsPaneState,
-};
+use thurbox::ui::automations_list_modal::row_summary;
 use thurbox::ui::FocusLevel;
 
 /// The recorder that turns a view tree into the checked-in expectation, shared
 /// with the other panes that record one (see its module note for why this is
 /// shared while the input gates' source-reading helpers are copied).
 mod view_tree_record;
-
-/// The bound the UI thread waits on plugin input, so a wedged plugin costs a
-/// dropped key rather than a hang. Generous here: a test machine under load is not
-/// a wedged plugin.
-const KEY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The process-wide snapshot slot is global, so every case here runs one at a
 /// time — otherwise one case's publication would answer another's reader.
@@ -127,45 +95,11 @@ struct Case {
 }
 
 impl Case {
-    fn entries(&self) -> Vec<AutomationPaneEntry> {
-        self.rows
-            .iter()
-            .enumerate()
-            .map(|(i, r)| AutomationPaneEntry {
-                id: i as i64 + 1,
-                name: r.name.to_string(),
-                schedule: r.schedule.to_string(),
-                action: r.action,
-                enabled: r.enabled,
-                due_in_secs: r.due,
-                match_positions: r.matches.clone(),
-                dimmed: r.dimmed,
-            })
-            .collect()
-    }
-
-    /// The rows the native pane resolves. Every row, in the model's order: the
-    /// window is the renderer's, resolved from the cursor below — and since ADR-55
-    /// so is the fit, so this takes no width at all.
-    fn native_rows(&self) -> Vec<AutomationRow> {
-        let entries = self.entries();
-        resolve_rows(&AutomationsPaneState {
-            entries: &entries,
-            selected: self.selected,
-            focus: self.focus,
-            preview_selected: self.preview,
-        })
-    }
-
     /// The cursor's row, clamped — the one rule `cursor_row` and
     /// `App::build_automations_snapshot` share, since the host refuses a list whose
     /// cursor is not an index into its children.
     fn cursor(&self) -> Option<usize> {
         (!self.rows.is_empty()).then(|| self.selected.min(self.rows.len() - 1))
-    }
-
-    fn native_tree(&self) -> ViewNode {
-        automations_tree(&self.native_rows(), self.cursor(), self.is_focused())
     }
 
     /// The recording's name: the case name, slugified.
@@ -468,35 +402,14 @@ fn host() -> PluginHost {
     host
 }
 
-/// The same host, able to write — the shape `main.rs` wires for the write seam.
-fn host_with_writer(db_path: &Path) -> PluginHost {
-    let path = db_path.to_path_buf();
-    let factory: thurbox::session::plugin_mutations::KernelWriterFactory = Arc::new(move || {
-        Database::open(&path)
-            .ok()
-            .map(|db| Box::new(DbKernelWriter::from_db(db)) as Box<dyn KernelWriter>)
-    });
-    let outcome = discovery::discover_in(&[plugin_dir()], None);
-    let mut host =
-        PluginHost::from_discovery(outcome, ExecutionBounds::default()).with_kernel_writer(factory);
-    assert_eq!(host.start_all(), 1, "the plugin must reach Running");
-    host
-}
-
 fn render(host: &PluginHost) -> ViewNode {
     host.render_pane("automations", "automations")
         .expect("the pane renders")
 }
 
-fn press(host: &PluginHost, key: &str, binding: Option<&str>) -> bool {
-    host.send_key("automations", "automations", key, binding, KEY_TIMEOUT)
-        .expect("the plugin is granted input")
-}
-
-/// Paint a tree into a bare buffer of the given size.
-///
-/// The renderer both panes use, so a frame comparison is a statement about the
-/// trees rather than about two painters.
+/// Paint a tree into a bare buffer of the given size — the renderer the host paints a
+/// seated pane's tree through, so a frame assertion here is a statement about what the
+/// interface draws.
 fn paint(tree: &ViewNode, width: u16, height: u16) -> Buffer {
     let area = Rect::new(0, 0, width, height);
     let mut buf = Buffer::empty(area);
@@ -516,14 +429,6 @@ fn row_text(buf: &Buffer, width: u16) -> String {
     (0..width).map(|x| buf[(x, 0)].symbol()).collect()
 }
 
-/// Which row a tree's list names as its cursor.
-fn tree_cursor(tree: &ViewNode) -> Option<usize> {
-    match tree {
-        ViewNode::List { selected, .. } => *selected,
-        other => panic!("expected a list, got {}", other.kind_name()),
-    }
-}
-
 /// Every text run in a tree, concatenated — for asserting on what a pane shows
 /// without depending on how its runs are split.
 fn text_of(tree: &ViewNode) -> String {
@@ -538,76 +443,36 @@ fn text_of(tree: &ViewNode) -> String {
     out
 }
 
-/// The headline claim: for every case, the plugin's tree equals the native pane's.
-/// Equal trees paint identically, so this is byte-identity of the pane's rows.
+/// The headline claim: for every case, the pane's tree is the one recorded from the
+/// native builder before it was deleted.
 ///
-/// The recorded edge is asserted **first**, so a run in which both edges break
-/// reports the recording — the fact about the pane — rather than only that two
-/// implementations disagree.
+/// The recording is the whole evidence now (ADR-42): `automations_tree` is gone, so a
+/// differential comparison has no right-hand side, and the recordings were deliberately
+/// **not** regenerated by the handover — byte-identical after the deletion is the payoff.
+/// Equal trees paint identically, so this is byte-identity of the pane's rows.
 #[test]
-fn the_plugin_builds_the_native_panes_view_tree() {
+fn the_pane_draws_the_recorded_tree() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
     let host = host();
 
     for case in cases() {
         thurbox::session::pane_context::publish(case.context());
-        let plugin = render(&host);
-        let native = case.native_tree();
-        // Edge one: the checked-in expectation is the native pane's tree — the
-        // edge that outlives `automations_tree`, and one only establishable while
-        // that builder is here to generate it.
-        insta::assert_snapshot!(case.snapshot_name(), view_tree_record::tree(&native));
-        // Edge two: the plugin reproduces that recording — asserted through the
-        // records, so a failure names the line that moved instead of printing two
-        // structural dumps to diff by eye.
-        view_tree_record::assert_matches(case.name, &plugin, &native);
-        // Edge three: the port's original claim, exact rather than legible.
-        assert_eq!(
-            plugin, native,
-            "the plugin's tree diverges from the native pane for `{}`",
-            case.name
-        );
+        insta::assert_snapshot!(case.snapshot_name(), view_tree_record::tree(&render(&host)));
     }
 }
 
-/// The equality above holds at **every** width, because neither side resolves one.
-///
-/// It used to be a statement about a chosen comparison size: `resolve_rows` fitted
-/// the name, so the trees could only be equal where the fit was a no-op, and the
-/// narrow case was an enumerated divergence. ADR-55 took the fit out of the tree, so
-/// this now pins the stronger fact — no row's name is cut before the renderer sees
-/// it — which is what makes
-/// [`the_two_panes_paint_the_same_frame_when_a_name_overflows`] a comparison of
-/// panes rather than of paddings.
-#[test]
-fn the_tree_carries_no_fitted_name() {
-    for case in cases() {
-        let rows = case.native_rows();
-        assert_eq!(
-            rows.len(),
-            case.rows.len(),
-            "`{}` lost rows before the tree, which windows nothing",
-            case.name
-        );
-        for (resolved, original) in rows.iter().zip(&case.rows) {
-            assert_eq!(
-                resolved.name, original.name,
-                "`{}` had a name fitted before the tree",
-                case.name
-            );
-        }
-    }
-}
-
-/// The compared tree must be a whole pane, or the equality could pass on two
-/// nearly-empty lists.
+/// The compared tree must be a whole pane, or the recording could be satisfied by a
+/// nearly-empty list.
 #[test]
 fn the_compared_tree_is_a_whole_pane() {
+    let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
+    let host = host();
     let case = cases()
         .into_iter()
         .find(|c| c.name == "a running search")
         .expect("the search case");
-    let tree = case.native_tree();
+    thurbox::session::pane_context::publish(case.context());
+    let tree = render(&host);
     let (rows, selected) = match &tree {
         ViewNode::List {
             children, selected, ..
@@ -625,9 +490,14 @@ fn the_compared_tree_is_a_whole_pane() {
 /// The summary the plugin composes equals thurbox's rule, for every combination of
 /// the three parts — not only the ones a fixture happens to contain.
 ///
-/// The comparison is against `ui::automations_panel::row_summary` rather than
-/// against a string written here, which is the point: the test cannot agree with
-/// the plugin about a rule thurbox does not follow.
+/// The comparison is against `ui::automations_list_modal::row_summary` rather than
+/// against a string written here, which is the point: the test cannot agree with the
+/// plugin about a rule thurbox does not follow.
+///
+/// **The one edge the handover kept.** That function survives the deletion because the
+/// `Ctrl+P` list modal composes it too, so this comparison is not differential — and it
+/// is the only assertion in this file that holds the pane to a rule rather than to a
+/// fixed set of recorded cases.
 #[test]
 fn the_plugin_composes_the_summary_thurbox_composes() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
@@ -685,13 +555,12 @@ fn the_plugin_composes_the_summary_thurbox_composes() {
     assert_eq!(compared, 192, "every combination is compared");
 }
 
-/// **The gap the file viewer closed, held here.** The plugin names the row its
-/// cursor is on and the *renderer* resolves the window, so both panes scroll
-/// through one implementation. Tree equality alone could not say it — the two
-/// trees are equal at every height — so only a paint shows the window was resolved
-/// the same way.
+/// **The gap the file viewer closed, held here.** The pane names the row its cursor is
+/// on and the *renderer* resolves the window, so a pane that knows no height still
+/// scrolls. The recordings cannot say it — a tree is the same tree at every height — so
+/// only a painted frame shows the window was resolved from the declared cursor.
 #[test]
-fn the_plugin_paints_the_native_frame_when_the_pane_scrolls() {
+fn the_pane_scrolls_to_its_cursor_from_a_height_it_is_never_told() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
     let host = host();
     const NAMES: [&str; 12] = [
@@ -723,18 +592,14 @@ fn the_plugin_paints_the_native_frame_when_the_pane_scrolls() {
     // summary tails take 31 and their names 13, so anything below 47 would fit the
     // name instead — and the assertions below would then be about the *fit* rather
     // than about the window, which is
-    // `the_two_panes_paint_the_same_frame_when_a_name_overflows`' subject.
+    // `an_overflowing_name_is_cut_and_keeps_its_summary`' subject.
     const WIDTH: u16 = 60;
     const HEIGHT: u16 = 3;
-    let plugin = paint(&render(&host), WIDTH, HEIGHT);
-    let native = paint(&case.native_tree(), WIDTH, HEIGHT);
-    assert_eq!(plugin, native, "the plugin's frame is not the native frame");
+    let painted = paint(&render(&host), WIDTH, HEIGHT);
 
-    // And that frame is the *scrolled* one — otherwise the two could agree by both
-    // being wrong.
     let text: String = (0..HEIGHT)
         .flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
-        .map(|(x, y)| plugin[(x, y)].symbol().to_string())
+        .map(|(x, y)| painted[(x, y)].symbol().to_string())
         .collect();
     assert!(
         text.contains("automation 11"),
@@ -746,23 +611,17 @@ fn the_plugin_paints_the_native_frame_when_the_pane_scrolls() {
     );
 }
 
-/// **The retired divergence: a name wider than the column.** This was the pane's
-/// last enumerated difference, and it is now its opposite.
+/// **The retired divergence: a name wider than the column.** This was the pane's last
+/// enumerated difference and it became its opposite before the handover (ADR-55).
 ///
-/// The native pane used to cut the name itself, reserving the marker's and the whole
-/// summary's room from a width the plugin is never told; the plugin drew the name
-/// whole and the renderer clipped it at the pane's edge, taking the schedule, the
-/// action and the countdown with it. Since ADR-55 **neither** side fits: both trees
-/// mark the name's runs as yielding their width, and the kernel cuts them with the
-/// same `ui::truncate_ellipsis`. So the claim is frame equality at a width where the
-/// fit actually fires — the pane's real size, where the equality above could
-/// previously say nothing.
-///
-/// Asserted as a paint rather than as tree equality, which the case above already
-/// covers: the fit happens in the renderer, so only a painted frame shows the two
-/// panes cut in the same column.
+/// The native pane cut the name itself from a width the plugin is never told, and the
+/// plugin drew it whole and let the renderer clip at the pane's edge — which took the
+/// schedule, the action and the countdown with it. Now the name's runs declare that they
+/// yield their width and the kernel cuts them with `ui::truncate_ellipsis`, keeping every
+/// other run's columns. The recordings cannot say it, since the tree carries the whole
+/// name; only a painted frame at a width where the fit fires can.
 #[test]
-fn the_two_panes_paint_the_same_frame_when_a_name_overflows() {
+fn an_overflowing_name_is_cut_and_keeps_its_summary() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
     let host = host();
     let case = Case {
@@ -777,35 +636,22 @@ fn the_two_panes_paint_the_same_frame_when_a_name_overflows() {
     const NARROW: u16 = 44;
 
     thurbox::session::pane_context::publish(case.context());
-    let plugin = paint(&render(&host), NARROW, 1);
-    let native = paint(&case.native_tree(), NARROW, 1);
-    assert_eq!(
-        plugin, native,
-        "the two panes must cut the name in the same column"
-    );
-
-    // And that frame is the *fitted* one — otherwise the two could agree by both
-    // clipping. The marker leads, the name ends in an ellipsis, and the whole
-    // summary tail survives, which is the half a clip at the pane edge lost.
-    let drawn = row_text(&plugin, NARROW);
+    // The marker leads, the name ends in an ellipsis, and the whole summary tail
+    // survives — which is the half a clip at the pane's edge lost.
+    let drawn = row_text(&paint(&render(&host), NARROW, 1), NARROW);
     assert!(drawn.contains('…'), "the name is ellipsized: {drawn:?}");
     assert!(
         drawn.contains("daily 09:00 · spawn · in 2m"),
         "the summary tail keeps its columns: {drawn:?}"
     );
 
-    // At a width where the marker and the tail leave the name no columns at all both
-    // panes drop it — `truncate_ellipsis` returns nothing rather than a lone `…` that
-    // carries no information — and they still agree, which is the edge the enumerated
-    // divergence used to be sharpest at.
+    // At a width where the marker and the tail leave the name no columns at all it is
+    // dropped entirely — `truncate_ellipsis` returns nothing rather than a lone `…` that
+    // carries no information, which is the native pane's rule and the renderer applies
+    // it. This is where the retired divergence used to be sharpest: the two panes showed
+    // different *information*, not different punctuation.
     const CRAMPED: u16 = 30;
-    let plugin = paint(&render(&host), CRAMPED, 1);
-    let native = paint(&case.native_tree(), CRAMPED, 1);
-    assert_eq!(
-        plugin, native,
-        "they agree where the name does not fit at all"
-    );
-    let drawn = row_text(&plugin, CRAMPED);
+    let drawn = row_text(&paint(&render(&host), CRAMPED, 1), CRAMPED);
     assert!(
         !drawn.contains("an automation"),
         "a name with no columns is dropped: {drawn:?}"
@@ -817,10 +663,10 @@ fn the_two_panes_paint_the_same_frame_when_a_name_overflows() {
 /// only the right-hand column, while the native pane is the band beneath the
 /// session list. ADR-46 gave that band a slot, and this pane declares it.
 ///
-/// Kept rather than deleted, pointing the other way: it now pins that the shipped
-/// manifest names the seat its native counterpart occupies, so the two panes are
-/// compared in the same rect. A regression to the right column would make every
-/// equality claim above one about content alone again.
+/// Kept rather than deleted, pointing the other way: it pins that the shipped manifest
+/// names the seat its native counterpart occupied, which after the handover is not a
+/// comparison aid but the pane's *position*. A regression to the right column would move
+/// the automations band into the tasks/file-viewer column.
 #[test]
 fn the_pane_is_placed_where_the_native_one_sits() {
     use thurbox::session::plugin_manifest::{PaneSlot, PluginManifest};
@@ -858,32 +704,34 @@ fn the_pane_is_placed_where_the_native_one_sits() {
     );
 }
 
-/// The plugin must hold no surface a user's plugin could not declare: its reach is
-/// exactly its manifest's capability list, and it is four things — two more than
-/// any previous bundled pane, because this is the first that takes input and
-/// writes.
+/// The pane must hold no surface a user's plugin could not declare: its reach is exactly
+/// its manifest's capability list, and it is **two** things.
+///
+/// It was four. The port held `input` and `automations-write` and answered five of the
+/// pane's seven keys with a cursor of its own; the handover took ADR-51's route instead,
+/// so the kernel performs all seven and the plugin sees no key. That the pane with the
+/// most keys in thurbox ends up with the *fewest* capabilities is the finding, not a
+/// side effect — so this test asserts the absence of the two it gave up as firmly as the
+/// presence of the two it kept.
 #[test]
-fn the_plugin_declares_every_power_it_uses() {
+fn the_pane_declares_every_power_it_uses_and_only_those() {
     let outcome = discovery::discover_in(&[plugin_dir()], None);
     let plugin = outcome.get("automations").expect("discovered");
     let declared = &plugin.manifest.capabilities;
-    for required in [
-        Capability::Render,
-        Capability::Automations,
-        Capability::Input,
-        Capability::AutomationsWrite,
-    ] {
+    for required in [Capability::Render, Capability::Automations] {
         assert!(declared.contains(&required), "{required} must be declared");
     }
     assert_eq!(
         declared.len(),
-        4,
+        2,
         "a bundled pane that quietly asked for more would stop being evidence \
          about what a third party can build: {declared:?}"
     );
-    // Notably absent: `tasks-write`, `sessions`, `spawn`, `state-*`. The pane
-    // changes automations and reads automations; nothing else.
+    // The two the handover gave up, and the ones no version of this pane ever had.
+    // Answering a key needs none of them: the kernel performs the action (ADR-51).
     for absent in [
+        Capability::Input,
+        Capability::AutomationsWrite,
         Capability::TasksWrite,
         Capability::Sessions,
         Capability::Spawn,
@@ -891,438 +739,50 @@ fn the_plugin_declares_every_power_it_uses() {
     ] {
         assert!(!declared.contains(&absent), "{absent} must not be declared");
     }
-    // Additive port: the pane must not appear on anyone's screen unasked, since
-    // the native pane is still the one thurbox draws.
+    // And no bindings of its own: a pane on the kernel-keyboard route may declare
+    // none, and one that declared both routes is refused at validation.
     assert!(
-        !plugin.manifest.panes[0].default_visible,
-        "the reproduction must be hidden by default"
+        plugin.manifest.keybindings.is_empty(),
+        "the pane declares bindings: {:?}",
+        plugin.manifest.keybindings
     );
-    // One binding per ported key, each with a chord — a binding shipped without
-    // one would be a key the pane advertises and nobody can press.
-    let bindings = &plugin.manifest.keybindings;
-    let ids: Vec<&str> = bindings.iter().map(|b| b.id.as_str()).collect();
-    assert_eq!(ids, ["next", "prev", "toggle", "run", "delete"]);
-    for b in bindings {
-        assert_eq!(b.pane, "automations");
-        assert!(b.chord.is_some(), "`{}` declares no chord", b.id);
-    }
-    // And the two keys that cannot be ported are *not* declared, because the host
-    // refuses to register a binding it cannot deliver and a plugin shipping a key
-    // that does nothing is the same failure one layer up.
-    for unportable in ["new", "edit", "open"] {
-        assert!(
-            !ids.contains(&unportable),
-            "`{unportable}` needs a host power the vocabulary does not define"
-        );
-    }
-}
-
-/// The keys move the **plugin's own** cursor, and thurbox's is untouched.
-///
-/// This is the property ADR-38 could not state, and the reason this pane's keys are
-/// portable where the tasks pane's were not: the row the user is looking at is the
-/// row the *pane receiving the key* draws its cursor on, and a VM persists across
-/// renders, so that cursor is ordinary plugin state needing no view write.
-#[test]
-fn the_keys_move_the_plugins_own_cursor() {
-    let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
-    let host = host();
-    let case = Case {
-        name: "driven",
-        rows: (0..5).map(|_| row("an automation")).collect(),
-        selected: 1,
-        // Unfocused, which is the real situation: while the *plugin's* pane holds
-        // focus, thurbox's does not — so the published cursor is not drawn, and a
-        // plugin acting on it would act on a row nobody is looking at.
-        focus: FocusLevel::Inactive,
-        preview: false,
-    };
-    let published = case.context();
-    thurbox::session::pane_context::publish(published.clone());
-
-    // Before any key: the plugin follows the host, which is what keeps the
-    // reproduction exact.
-    assert_eq!(tree_cursor(&render(&host)), Some(1));
-
-    assert!(press(&host, "j", Some("next")), "the key is consumed");
     assert_eq!(
-        tree_cursor(&render(&host)),
-        Some(2),
-        "the plugin's own cursor moved"
+        plugin.manifest.panes[0].key_context,
+        Some(thurbox::session::KeyContext::Automations),
+        "the pane must declare that it *is* thurbox's automations pane"
     );
-    // The publication is untouched: the plugin wrote no kernel state.
-    assert_eq!(
-        thurbox::session::pane_context::published()
-            .unwrap()
-            .automations,
-        published.automations,
-        "a plugin's cursor is its own; thurbox's did not move"
-    );
-
-    assert!(press(&host, "k", Some("prev")));
-    assert_eq!(tree_cursor(&render(&host)), Some(1));
-
-    // The arrows work too, by raw key name, because a manifest binding declares one
-    // chord where thurbox's action declares a list.
-    assert!(press(&host, "down", None));
-    assert!(press(&host, "down", None));
-    assert_eq!(tree_cursor(&render(&host)), Some(3));
-    assert!(press(&host, "up", None));
-    assert_eq!(tree_cursor(&render(&host)), Some(2));
-
-    // A click selects the row it landed on, in the same numbering `ui.list` uses.
-    assert!(host
-        .send_click("automations", "automations", 5, KEY_TIMEOUT)
-        .expect("granted input"));
-    // Row 5 in the plugin's one-based numbering is index 4 in the converted tree.
-    assert_eq!(tree_cursor(&render(&host)), Some(4));
-    // A click past the last row is declined rather than inventing a cursor.
-    assert!(!host
-        .send_click("automations", "automations", 9, KEY_TIMEOUT)
-        .expect("granted input"));
-
-    // Once driven, the cursor is *drawn* even though the host says its own pane's
-    // is not — the enumerated consequence of a pane not being told about its own
-    // focus. Asserted so that publishing that fact fails here.
-    let tree = render(&host);
+    // Visible, because the band it replaced always was — the first bundled pane of
+    // which that is true, and the reason it binds no toggle action.
     assert!(
-        !published.automations.cursor_visible,
-        "the fixture's native pane draws no cursor"
+        plugin.manifest.panes[0].default_visible,
+        "the pane replaces an always-visible band, so it seeds visible"
     );
-    let selected_runs = match &tree {
-        ViewNode::List { children, .. } => children[4]
-            .children()
-            .iter()
-            .filter(|r| matches!(r, ViewNode::Text { style, .. } if style.bold))
-            .count(),
-        other => panic!("expected a list, got {}", other.kind_name()),
-    };
     assert!(
-        selected_runs > 0,
-        "a driven pane draws its own cursor: {tree:#?}"
+        plugin.manifest.panes[0].toggle_action.is_none(),
+        "the native band had no toggle, so there is no key for this pane to take over"
     );
 }
 
-/// The left column's circular wrap stays **kernel-owned**.
+/// Before the host has published anything the reader answers "no automations", so the
+/// pane's first render must produce the empty-state pane rather than an error.
 ///
-/// In thurbox's pane, `k` on the first row hands focus to the session list and `j`
-/// past the last loops to its top. Both are `App` writing `self.focus` — view
-/// state, which no capability writes. The plugin does the half it can: it
-/// **declines** the key at its edge. This asserts both that, and that nothing
-/// completes it, so adding either half fails here and the finding is revisited.
-#[test]
-fn the_wrap_out_of_the_pane_stays_kernel_owned() {
-    let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
-    let host = host();
-    let case = Case {
-        name: "edges",
-        rows: (0..3).map(|_| row("an automation")).collect(),
-        selected: 0,
-        focus: FocusLevel::Inactive,
-        preview: false,
-    };
-    thurbox::session::pane_context::publish(case.context());
-
-    // At the first row, "previous" is declined.
-    assert!(
-        !press(&host, "k", Some("prev")),
-        "the plugin declines at its first row rather than wrapping its own cursor, \
-         which would be a behaviour the native pane does not have"
-    );
-    // Walk to the last row, where "next" is declined.
-    assert!(press(&host, "j", Some("next")));
-    assert!(press(&host, "j", Some("next")));
-    assert_eq!(
-        tree_cursor(&render(&host)),
-        Some(2),
-        "the last of three rows"
-    );
-    assert!(!press(&host, "j", Some("next")), "declined at the last row");
-
-    // An empty pane declines both, since there is nowhere to be.
-    thurbox::session::pane_context::publish(PaneContext::default());
-    assert!(!press(&host, "j", Some("next")));
-    assert!(!press(&host, "k", Some("prev")));
-
-    // The kernel's half: an unconsumed key from a focused plugin pane resolves in
-    // the *global* context, where no single-letter action lives, so it does
-    // nothing. Two probes, because either alone would be the wrong claim.
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let keybindings = std::fs::read_to_string(root.join("src/session/keybindings.rs")).unwrap();
-    let contexts = keybindings
-        .split_once("pub enum KeyContext {")
-        .expect("KeyContext is declared")
-        .1
-        .split_once('}')
-        .expect("and closed")
-        .0;
-    assert!(
-        !contexts.to_lowercase().contains("plugin"),
-        "a plugin pane has no key context of its own — if it gained one, a key a \
-         pane declined can now resolve to a scoped action, and the wrap should be \
-         completed here rather than left declining"
-    );
-    let handlers = std::fs::read_to_string(root.join("src/app/key_handlers.rs")).unwrap();
-    let resolve = handlers
-        .split_once("pub(crate) fn focus_key_context(")
-        .expect("focus_key_context exists")
-        .1
-        .split_once("\n    }")
-        .expect("and closes")
-        .0;
-    assert!(
-        !resolve.contains("PluginPane"),
-        "the plugin-pane focus still falls through to the global context, so a \
-         declined movement key does nothing — completing the wrap means mapping it \
-         somewhere, which is the change that should revisit this"
-    );
-}
-
-/// Fixture for the write half: a real database with three automations in it.
-struct WriteFixture {
-    _tmp: tempfile::TempDir,
-    db_path: PathBuf,
-    ids: Vec<i64>,
-}
-
-impl WriteFixture {
-    fn new() -> Self {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db_path = tmp.path().join("thurbox.db");
-        let db = Database::open(&db_path).expect("database");
-        let ids = ["first", "second", "third"]
-            .iter()
-            .map(|name| {
-                db.create_automation(&NewAutomation {
-                    name: (*name).to_string(),
-                    enabled: true,
-                    schedule: AutomationSchedule::Cron {
-                        expr: "0 9 * * *".to_string(),
-                    },
-                    action: AutomationAction::Exec {
-                        command: "true".to_string(),
-                    },
-                    prompt: String::new(),
-                    timezone: None,
-                    next_run_at: None,
-                })
-                .expect("automation")
-            })
-            .collect();
-        Self {
-            _tmp: tmp,
-            db_path,
-            ids,
-        }
-    }
-
-    fn db(&self) -> Database {
-        Database::open(&self.db_path).expect("database")
-    }
-
-    /// Publish the fixture's rows so the plugin's cursor has something to name.
-    fn publish(&self, enabled: &[bool]) {
-        thurbox::session::pane_context::publish(PaneContext {
-            automations: AutomationsSnapshot {
-                entries: self
-                    .ids
-                    .iter()
-                    .zip(enabled)
-                    .map(|(id, enabled)| AutomationRowSnapshot {
-                        id: *id,
-                        name: format!("automation {id}"),
-                        enabled: *enabled,
-                        action: "exec",
-                        schedule: "daily 09:00".to_string(),
-                        due_in_secs: None,
-                        dimmed: false,
-                        match_positions: Vec::new(),
-                    })
-                    .collect(),
-                cursor: Some(0),
-                cursor_visible: false,
-                focused: false,
-            },
-            ..PaneContext::default()
-        });
-    }
-}
-
-/// The keys reach the database — the same rows the native keys write, through the
-/// write seam, addressed by the id the published row carried.
-///
-/// Asserted against storage rather than against the plugin's own state: a pane that
-/// moved a cursor and called nothing would pass a test of its cursor.
-#[test]
-fn the_write_keys_change_the_rows_the_native_keys_change() {
-    let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
-    let f = WriteFixture::new();
-    let host = host_with_writer(&f.db_path);
-    // A freshly created automation is enabled.
-    let enabled: Vec<bool> = f.ids.iter().map(|_| true).collect();
-    f.publish(&enabled);
-
-    // A write key **before** any movement is refused: the fixture publishes
-    // `cursor_visible = false` (which is the real state while the plugin's pane
-    // holds focus and thurbox's does not), so the pane draws no cursor and there is
-    // no row the user can see to act on. Asserted first, because acting here would
-    // toggle whichever row thurbox's cursor was left on.
-    assert!(
-        !press(&host, " ", Some("toggle")),
-        "a write with no drawn cursor is declined rather than guessing at a row"
-    );
-    assert!(
-        f.db()
-            .get_automation(f.ids[0])
-            .unwrap()
-            .expect("there")
-            .enabled,
-        "and nothing was written"
-    );
-
-    // A movement key places a cursor the pane draws; from the published row 1, one
-    // step down is row 2.
-    assert!(press(&host, "j", Some("next")));
-    assert!(press(&host, " ", Some("toggle")));
-    let db = f.db();
-    assert!(
-        !db.get_automation(f.ids[1]).unwrap().expect("there").enabled,
-        "the toggle key disabled the row the cursor was on"
-    );
-    assert!(
-        db.get_automation(f.ids[0]).unwrap().expect("there").enabled,
-        "and only that row"
-    );
-    drop(db);
-
-    // Move to the third and delete it, which must not touch its neighbours.
-    f.publish(&[true, false, true]);
-    assert!(press(&host, "j", Some("next")));
-    assert!(press(&host, "d", Some("delete")));
-    let db = f.db();
-    assert!(
-        db.get_automation(f.ids[2]).unwrap().is_none(),
-        "the delete key removed the row the cursor was on"
-    );
-    assert!(db.get_automation(f.ids[0]).unwrap().is_some());
-    assert!(db.get_automation(f.ids[1]).unwrap().is_some());
-}
-
-/// `runAutomation` marks the automation **due** and executes nothing.
-///
-/// The property that makes this key safe to hand a plugin at all: an automation the
-/// *user* authored may run a shell command (this fixture's action is `Exec`), and a
-/// plugin can neither author nor edit one — so the set of programs reachable is
-/// exactly the set already scheduled, and the kernel is what fires them.
-#[test]
-fn running_marks_the_automation_due_and_executes_nothing() {
-    let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
-    let f = WriteFixture::new();
-    let host = host_with_writer(&f.db_path);
-    f.publish(&[true, true, true]);
-
-    // A movement key first, for `the_write_keys_change_the_rows_the_native_keys_change`'s
-    // reason: a write with no drawn cursor is refused. One step down from the
-    // published row 1 lands on row 2, so the run target is `ids[1]`.
-    assert!(press(&host, "j", Some("next")));
-    let target = f.ids[1];
-
-    let before = f.db().get_automation(target).unwrap().expect("there");
-    assert!(
-        matches!(before.action, AutomationAction::Exec { .. }),
-        "the fixture's action is the one that runs a shell command"
-    );
-
-    assert!(press(&host, "r", Some("run")));
-
-    let db = f.db();
-    let after = db.get_automation(target).unwrap().expect("there");
-    let now = thurbox::sync::current_time_millis();
-    assert!(
-        after.next_run_at.is_some_and(|at| at <= now),
-        "the automation is marked due, so the kernel's next pass fires it: {:?}",
-        after.next_run_at
-    );
-    // Nothing ran: firing records a run, and only the kernel's scheduler does that.
-    assert!(
-        db.list_automation_runs(target, 10).unwrap().is_empty(),
-        "no run was recorded, so no plugin thread executed the command"
-    );
-}
-
-/// A write is refused until the pane draws a cursor of its own — the one place the
-/// missing pane-focus fact costs *behaviour*, not only appearance.
-///
-/// While the plugin's pane holds focus thurbox's does not, so the published
-/// `cursor_visible` is false and the pane draws nothing. A write then would act on
-/// whichever row thurbox's cursor was left on, which the user cannot see. The
-/// plugin refuses. Pinned separately from the write test because the property is
-/// "never guess at a row nobody is looking at", and it would be easy to "fix" the
-/// refusal into a guess.
-#[test]
-fn a_write_is_refused_until_the_pane_draws_its_own_cursor() {
-    let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
-    let f = WriteFixture::new();
-    let host = host_with_writer(&f.db_path);
-    f.publish(&[true, true, true]);
-
-    for (key, binding) in [(" ", "toggle"), ("r", "run"), ("d", "delete")] {
-        assert!(
-            !press(&host, key, Some(binding)),
-            "`{binding}` must be declined while no cursor is drawn"
-        );
-    }
-    let db = f.db();
-    for id in &f.ids {
-        let row = db.get_automation(*id).unwrap().expect("still there");
-        assert!(row.enabled, "nothing was toggled");
-        assert!(row.next_run_at.is_none(), "nothing was marked due");
-    }
-    drop(db);
-
-    // The counterpart: when the *host* is drawing the cursor — a global-search
-    // preview, the one case where an unfocused native pane shows one — the write is
-    // permitted without the plugin having moved anything, because there is a row the
-    // user can see.
-    thurbox::session::pane_context::publish(PaneContext {
-        automations: AutomationsSnapshot {
-            entries: vec![AutomationRowSnapshot {
-                id: f.ids[0],
-                name: "previewed".to_string(),
-                enabled: true,
-                action: "exec",
-                schedule: "daily 09:00".to_string(),
-                due_in_secs: None,
-                dimmed: false,
-                match_positions: Vec::new(),
-            }],
-            cursor: Some(0),
-            cursor_visible: true,
-            focused: false,
-        },
-        ..PaneContext::default()
-    });
-    assert!(press(&host, " ", Some("toggle")));
-    assert!(
-        !f.db()
-            .get_automation(f.ids[0])
-            .unwrap()
-            .expect("there")
-            .enabled
-    );
-}
-
-/// Before the host has published anything the reader answers "no automations", so
-/// the plugin's first render must produce the empty-state pane rather than an
-/// error.
+/// Asserted against the recording of the unfocused empty case rather than against the
+/// deleted builder: "an empty publication and an empty automation list draw the same
+/// pane" is the claim, and the recording is what says what that pane is.
 #[test]
 fn the_first_render_before_any_publication_succeeds() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
     let host = host();
+    let empty = cases()
+        .into_iter()
+        .find(|c| c.name == "none, unfocused")
+        .expect("the unfocused empty case");
     thurbox::session::pane_context::publish(PaneContext::default());
+    let before_publication = view_tree_record::tree(&render(&host));
+    thurbox::session::pane_context::publish(empty.context());
     assert_eq!(
-        render(&host),
-        automations_tree(&[], None, false),
+        before_publication,
+        view_tree_record::tree(&render(&host)),
         "an empty publication draws the same pane an empty automation list does"
     );
 }

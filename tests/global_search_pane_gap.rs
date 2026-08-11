@@ -135,18 +135,24 @@ const BLOCKERS: &[Blocker] = &[
             // plugin's tree cannot carry it. The outward direction — a published
             // row's `dimmed`/`match_positions` — is asserted separately, since
             // it is this row's *evidence* rather than its verdict.
+            // One native pane left of the three this row names: the session list. The
+            // other two are handed over (ADR-53, ADR-56), which is why the second half
+            // below reads their plugins instead of their modules.
             let native_panes_highlight_themselves =
-                ["src/ui/project_list.rs", "src/ui/automations_panel.rs"]
-                    .iter()
-                    .all(|pane| source(root, pane).contains("highlight"));
-            // The tasks pane is handed over (ADR-53), and it makes this row's point
-            // in Luau rather than weakening it: the *plugin* applies the verdict from
-            // the published per-row facts, because nothing carries a query into it.
-            let handed_over_pane_reads_the_verdict =
-                source(root, "src/plugin/bundled/tasks/init.luau").contains("matchPositions");
+                source(root, "src/ui/project_list.rs").contains("highlight");
+            // The tasks pane and the automations band are handed over, and they make this
+            // row's point in Luau rather than weakening it: the *plugin* applies the
+            // verdict from the published per-row facts, because nothing carries a query
+            // into it.
+            let handed_over_panes_read_the_verdict = [
+                "src/plugin/bundled/tasks/init.luau",
+                "src/plugin/bundled/automations/init.luau",
+            ]
+            .iter()
+            .all(|pane| source(root, pane).contains("matchPositions"));
             let renderer = source(root, "src/ui/plugin_pane.rs").to_lowercase();
             native_panes_highlight_themselves
-                && handed_over_pane_reads_the_verdict
+                && handed_over_panes_read_the_verdict
                 && !renderer.contains("highlight")
                 && !renderer.contains("query")
         },
@@ -548,20 +554,28 @@ fn the_search_verdict_crosses_outward_but_no_query_comes_back() {
              cross-pane row's evidence moved, so the row's wording needs revisiting"
         );
     }
-    for pane in ["src/ui/project_list.rs", "src/ui/automations_panel.rs"] {
+    // One native pane left of the three this row names — the session list. The other
+    // two are handed over (ADR-53, ADR-56), which is why the loop below reads their
+    // plugins instead.
+    const NATIVE: &str = "src/ui/project_list.rs";
+    assert!(
+        source(&root, NATIVE).contains("highlight"),
+        "{NATIVE} no longer highlights its own rows — the cross-pane blocker's evidence moved"
+    );
+    // And the two surfaces that are plugins do the same from the *published* verdict,
+    // which is this row's direction: outward as a per-row fact, never inward as a
+    // query (ADR-53 and ADR-56 handed those panes over; the argument did not move with
+    // them).
+    for pane in [
+        "src/plugin/bundled/tasks/init.luau",
+        "src/plugin/bundled/automations/init.luau",
+    ] {
         assert!(
-            source(&root, pane).contains("highlight"),
-            "{pane} no longer highlights its own rows — the cross-pane blocker's evidence moved"
+            source(&root, pane).contains("matchPositions"),
+            "{pane} no longer applies the search's verdict itself — the cross-pane \
+             blocker's evidence moved"
         );
     }
-    // And the one surface that is a plugin does the same from the *published* verdict,
-    // which is this row's direction: outward as a per-row fact, never inward as a
-    // query (ADR-53 handed this pane over; the argument did not move with it).
-    assert!(
-        source(&root, "src/plugin/bundled/tasks/init.luau").contains("matchPositions"),
-        "the handed-over tasks pane no longer applies the search's verdict itself — the \
-         cross-pane blocker's evidence moved"
-    );
     let renderer = source(&root, "src/ui/plugin_pane.rs").to_lowercase();
     assert!(
         !renderer.contains("highlight") && !renderer.contains("query"),

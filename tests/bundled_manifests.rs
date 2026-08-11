@@ -12,9 +12,11 @@
 //!
 //! So the rule binds the whole bundled set rather than the manifests that
 //! happened to remember it, and [`PANES_DRAWN_IN_A_NATIVE_PANES_PLACE`] is where a
-//! handover argues its exception. The one entry there is the info panel, whose
-//! native renderer is deleted (ADR-50) — and it still seeds hidden, which is what
-//! [`a_handed_over_pane_seeds_at_the_native_panes_default`] pins.
+//! handover argues its exception. Two of its three entries still seed hidden, because
+//! the kernel flags they replaced initialised to `false`; the third replaced a band that
+//! was **always on screen**, so it seeds visible. Which value is right is not this
+//! rule's to choose — [`a_handed_over_pane_seeds_at_the_native_panes_default`] compares
+//! against the native default the list records.
 //!
 //! Like `tests/teardown_gate.rs`, the manifests are read from the source tree
 //! rather than through `plugin::discovery`, so the check runs and means the same
@@ -34,14 +36,50 @@ use thurbox::session::plugin_manifest::PluginManifest;
 /// drawing the native one, which is the point of the list: a pane that is visible
 /// *and* duplicated is the mistake, and the two facts live in one commit.
 ///
-/// The exemption **permits** a visible seed; it does not ask for one. The info
-/// panel is here and still seeds hidden, because `App::show_info_panel` initialised
-/// to `false` — a handover changes which code draws a pane, not whether the pane is
-/// on screen (ADR-50). So the list is also the answer to "which bundled panes are no
-/// longer reproductions", which is why an entry earns its place even when the seed
-/// did not change.
-const PANES_DRAWN_IN_A_NATIVE_PANES_PLACE: &[(&str, &str)] =
-    &[("info-panel", "info"), ("tasks", "tasks")];
+/// The exemption **permits** a visible seed; it does not ask for one. A handover changes
+/// which code draws a pane, not whether the pane is on screen — so each entry records the
+/// visibility its native counterpart defaulted to, and that is what
+/// [`a_handed_over_pane_seeds_at_the_native_panes_default`] compares against. The info
+/// panel and the tasks pane replaced `App::show_info_panel` / `show_tasks_panel`, both
+/// initialised to `false`; the automations band had no flag and no toggle at all, because
+/// it was always on screen while `[features] automations` was on (ADR-56).
+///
+/// So the list is also the answer to "which bundled panes are no longer reproductions",
+/// which is why an entry earns its place even when the seed did not change.
+const PANES_DRAWN_IN_A_NATIVE_PANES_PLACE: &[HandedOver] = &[
+    HandedOver::hidden("info-panel", "info"),
+    HandedOver::hidden("tasks", "tasks"),
+    HandedOver::visible("automations", "automations"),
+];
+
+/// One handed-over pane: which plugin and pane id, and whether the native pane it
+/// replaced was on screen by default.
+struct HandedOver {
+    plugin: &'static str,
+    pane: &'static str,
+    /// The native pane's default visibility, which the replacement must seed at.
+    native_default_visible: bool,
+}
+
+impl HandedOver {
+    /// A pane replacing one that was hidden until an action showed it.
+    const fn hidden(plugin: &'static str, pane: &'static str) -> Self {
+        Self {
+            plugin,
+            pane,
+            native_default_visible: false,
+        }
+    }
+
+    /// A pane replacing one that was always on screen while its feature was on.
+    const fn visible(plugin: &'static str, pane: &'static str) -> Self {
+        Self {
+            plugin,
+            pane,
+            native_default_visible: true,
+        }
+    }
+}
 
 fn bundled_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/plugin/bundled")
@@ -83,7 +121,7 @@ fn every_bundled_pane_seeds_hidden() {
         for pane in &manifest.panes {
             let exempt = PANES_DRAWN_IN_A_NATIVE_PANES_PLACE
                 .iter()
-                .any(|(plugin, id)| *plugin == manifest.name && *id == pane.id);
+                .any(|h| h.plugin == manifest.name && h.pane == pane.id);
             if pane.default_visible && !exempt {
                 visible.push(format!("{dir_name}/plugin.toml: pane `{}`", pane.id));
             }
@@ -109,31 +147,48 @@ fn every_bundled_pane_seeds_hidden() {
 /// install that nobody asked for, with the duplication that made a reproduction
 /// obviously wrong now absent.
 ///
-/// `App::show_info_panel` initialised to `false` and `F2` showed the panel, so the
-/// pane that replaced it seeds `false` too. The assertion names the fact rather than
-/// the field, because a later handover of a pane that *did* default to visible
-/// (none does today) would want the opposite value for the same reason.
+/// It compares against the **native default** each entry records rather than requiring
+/// one particular value (ADR-56). Asserting `!default_visible` was right while every
+/// handed-over pane replaced a hidden one, and it is not a weaker rule to generalise it:
+/// this direction also catches a pane that seeds *hidden* while the band it replaced was
+/// always on screen, which the old form silently permitted — and which would remove a
+/// pane from every install as surely as the case it was written for adds one.
+///
+/// The second half follows from the first rather than being a separate rule: a pane that
+/// seeds hidden must bind an action, or nothing could ever reveal it. A pane that seeds
+/// visible needs none — and must not invent one, since a native pane that was always on
+/// screen had no toggle whose meaning the replacement could take over.
 #[test]
 fn a_handed_over_pane_seeds_at_the_native_panes_default() {
-    for (plugin, pane_id) in PANES_DRAWN_IN_A_NATIVE_PANES_PLACE {
-        let manifest = manifest_at(&bundled_dir().join(plugin));
+    for handed in PANES_DRAWN_IN_A_NATIVE_PANES_PLACE {
+        let manifest = manifest_at(&bundled_dir().join(handed.plugin));
         let pane = manifest
             .panes
             .iter()
-            .find(|p| p.id == *pane_id)
-            .unwrap_or_else(|| panic!("{plugin} declares no pane `{pane_id}`"));
-        assert!(
-            !pane.default_visible,
-            "{plugin}/{pane_id} replaces a native pane that defaulted to hidden, so \
-             it must seed hidden: the handover changes which code draws the pane, \
-             not whether the pane is on screen"
+            .find(|p| p.id == handed.pane)
+            .unwrap_or_else(|| panic!("{} declares no pane `{}`", handed.plugin, handed.pane));
+        assert_eq!(
+            pane.default_visible,
+            handed.native_default_visible,
+            "{}/{} must seed at the visibility the native pane defaulted to \
+             ({}): the handover changes which code draws the pane, not whether the \
+             pane is on screen",
+            handed.plugin,
+            handed.pane,
+            if handed.native_default_visible {
+                "visible"
+            } else {
+                "hidden"
+            }
         );
-        // And it is reachable, or seeding it hidden would hide it for good: the
-        // pane must name the action that showed the native one.
-        assert!(
+        assert_eq!(
             pane.toggle_action.is_some(),
-            "{plugin}/{pane_id} seeds hidden and binds no action, so nothing could \
-             show it"
+            !handed.native_default_visible,
+            "{}/{}: a pane that seeds hidden must bind the action that showed the \
+             native one, and a pane that seeds visible must bind none — the native \
+             pane it replaced had no toggle",
+            handed.plugin,
+            handed.pane
         );
     }
 }
@@ -144,16 +199,17 @@ fn a_handed_over_pane_seeds_at_the_native_panes_default() {
 /// panes drawn as focused, and a cursor a user moves in one while looking at the
 /// other.
 ///
-/// The field is not a reproduction's to declare; it is the handover's. Exempted per
-/// pane by the list above, exactly as the visibility seed is, so the day a pane is
-/// handed over this test asks for the declaration instead of forbidding it.
+/// The field is not a reproduction's to declare; it is the handover's. So a
+/// handed-over pane is not merely exempted — it is **required** to declare one, since
+/// a pane that is the interface's pane for a keyboard and does not say so is a pane
+/// whose keys stopped resolving. Both directions come off the same list.
 #[test]
 fn only_a_handed_over_pane_declares_a_kernel_keyboard() {
     for (plugin, dir) in bundled_plugins() {
         for pane in manifest_at(&dir).panes {
             let handed_over = PANES_DRAWN_IN_A_NATIVE_PANES_PLACE
                 .iter()
-                .any(|(p, id)| *p == plugin && *id == pane.id);
+                .any(|h| h.plugin == plugin && h.pane == pane.id);
             if handed_over {
                 continue;
             }

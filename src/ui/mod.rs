@@ -2,7 +2,6 @@ pub mod agent_picker_modal;
 pub mod automation_detail;
 pub mod automation_editor_modal;
 pub mod automations_list_modal;
-pub mod automations_panel;
 pub mod branch_selector_modal;
 pub mod code_review;
 pub mod confirm_delete_modal;

@@ -312,6 +312,42 @@ impl Harness {
         self
     }
 
+    /// Seat the pane that provides the automations list, mirroring
+    /// `src/plugin/bundled/automations/plugin.toml` (ADR-56).
+    ///
+    /// Seeded **visible** and binding no toggle action, like the manifest: the band it
+    /// replaced was always on screen while `[features] automations` was on, so there is
+    /// no key whose meaning this pane takes over.
+    ///
+    /// **Appends** rather than replacing, unlike [`Self::seat_tasks_pane`], because the
+    /// left column's wrap tests also want the tasks pane in some cases and
+    /// `set_plugin_panes` takes the whole list.
+    #[cfg(feature = "plugins")]
+    fn seat_automations_pane(&mut self) -> &mut Self {
+        use crate::session::plugin_manifest::PaneSlot;
+        use crate::session::settings::FeatureFlag;
+        use crate::session::KeyContext;
+
+        let mut pane = crate::plugin::PluginPane::loading(
+            "automations",
+            "automations",
+            "Automations",
+            PaneSlot::LeftBottom,
+            true,
+        );
+        pane.feature = Some(FeatureFlag::Automations);
+        pane.key_context = Some(KeyContext::Automations);
+        // A tree, so the band has rows to click and a frame to paint.
+        pane.apply(Ok(crate::session::view_tree::ViewNode::selectable_list(
+            vec![crate::session::view_tree::ViewNode::text("an automation")],
+            Some(0),
+        )));
+        let mut panes = self.app.plugin_panes.clone();
+        panes.push(pane);
+        self.app.set_plugin_panes(panes);
+        self
+    }
+
     /// Whether the interface's task list is on screen — the question
     /// `App::show_tasks_panel` used to answer before the pane was handed over.
     #[cfg(feature = "plugins")]
@@ -3377,10 +3413,10 @@ fn assert_invariants(app: &App, ctx: &str) {
         "[{ctx}] automation pane selection out of bounds"
     );
 
-    // Panel visibility never outlives its feature flag. The tasks pane is not here:
-    // it is a plugin pane (ADR-53) whose `[features]` switch is enforced by
-    // `PluginPane::is_shown` on every read, which the focus rule below is what
-    // exercises.
+    // Panel visibility never outlives its feature flag. Neither the tasks pane nor the
+    // automations band is here: both are plugin panes (ADR-53, ADR-56) whose
+    // `[features]` switch is enforced by `PluginPane::is_shown` on every read, which
+    // the focus rules below are what exercise.
     assert!(
         !app.show_file_viewer || app.features.file_viewer,
         "[{ctx}] file viewer shown with the feature disabled"
@@ -3418,12 +3454,19 @@ fn assert_invariants(app: &App, ctx: &str) {
                 app.focus
             );
         }
+        // Since the handover this says something stronger, and says it in both builds:
+        // a pane has to *provide* the automations list for any of its three focuses to
+        // be reachable, and in a build with no plugin host nothing can — so this asserts
+        // that build never reaches them at all (ADR-56). It subsumes the old
+        // `features.automations` check, because the pane declares that flag and
+        // `PluginPane::is_shown` enforces it on every read.
         InputFocus::Automations
         | InputFocus::AutomationEditor
         | InputFocus::AutomationRunHistory => {
             assert!(
-                app.features.automations,
-                "[{ctx}] automations focus with the feature disabled"
+                app.pane_keyboard_taken(crate::session::KeyContext::Automations),
+                "[{ctx}] focus {:?} but no pane provides the automations list",
+                app.focus
             );
             assert!(
                 app.show_session_list,
@@ -5865,10 +5908,14 @@ fn pane_context_bounds_how_many_task_rows_it_publishes() {
 
 /// The automations section is the pane's whole list — in pane order, with the
 /// parts its summary is composed from and *no* composed summary.
+#[cfg(feature = "plugins")]
 #[test]
 fn pane_context_describes_the_automations_pane() {
     let _demand = DemandGuard::new(true);
     let mut h = Harness::standard(1);
+    // The band is a plugin's pane (ADR-56), and `j` past the last session only flows into
+    // it when one provides the list — which is what the second half of this test drives.
+    h.seat_automations_pane();
     let ids = automation_fixture(&mut h, &["nightly", "paused"]);
     h.app.db.set_automation_enabled(ids[1], false).unwrap();
     h.app.refresh_automations();

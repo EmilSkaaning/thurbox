@@ -2831,3 +2831,92 @@ at all** — the state the tasks pane reached immediately before its handover (�
 `the-module-is-a-model-too` narrowed with it: `ui::automations_panel` no longer owns a
 width step, so what remains of that row is `row_summary`, which `src/app/automation.rs`
 calls for the `Ctrl+P` modal, and which a handover has to move rather than delete.
+
+## 31. The third handover, and the pane that gave its keys back (ADR-56)
+
+The automations pane is handed over. `src/ui/automations_panel.rs` is deleted and
+`src/plugin/bundled/automations/init.luau` is the band beneath the session list.
+
+What makes it worth a section is not that it happened but **how the ten-row gate
+collapsed**. Five of its six outstanding rows were not closed by building anything;
+they stopped being requirements, because the pane took the other route.
+
+### The five rows, and the route that retired them
+
+| Row | On the plugin-keys route | On the kernel-keyboard route |
+|---|---|---|
+| `central-seat-follows-the-native-focus` | the editor and the run history disappear — the branch names three *native* focuses | the pane **is** `InputFocus::Automations`, so the branch fires |
+| `no-creation-operation` (`n`) | needs a creation binding ADR-35 refuses | the kernel performs `AutomationsNew` |
+| `no-authoring-operation` (`Enter`/`e`) | needs field-writing `automations-write` excludes | the kernel performs `AutomationsOpen` |
+| `wrap-out-of-the-pane-is-unowned` | needs an action meaning "leave downward" | both ends are kernel focuses; the existing handlers wrap |
+| `pane-is-not-told-its-own-focus` | needs a published per-pane focus flag | the published `focused`/`cursorVisible` **are** this pane's focus |
+
+Not one of those powers was granted. §26 counted this route across four panes and
+predicted six grants; the running total after three handovers is **zero**.
+
+### The finding: the pane with the most keys ends with the fewest capabilities
+
+The port (§17, ADR-41) was the high-water mark of the plugin-keys route: `input`,
+`automations-write`, a cursor persisting across renders, five of seven keys verified
+against the database. The handover **deletes** all of it. The manifest goes from four
+capabilities to two, its five `[[keybindings]]` to none, and `init.luau` loses its
+cursor, its `onKey` and its `onClick`.
+
+That is the first handover to make a shipped manifest's reach *smaller*, and it is the
+clearest statement so far of what ADR-51 bought: a pane's keyboard is not something a
+plugin needs to be given. The port's evidence is not wasted — it is the only
+demonstration that a plugin pane's keys can act at all, which is why ADR-56 preserves its
+five claims rather than deleting them with the tests.
+
+### The one row that was real work
+
+`the-module-is-a-model-too`: `row_summary` composed the row tail for this pane **and**
+for the `Ctrl+P` list modal. It moved to `src/ui/automations_list_modal.rs` — the modal
+that still composes it. Not `ui/mod.rs`, which is the layer's shared vocabulary (that is
+where `format_countdown` belongs, because three surfaces format a countdown), and not
+`app::automation` beside its caller, because a display-text composition in the
+coordinator would split one rule across two layers.
+
+ADR-55 had already narrowed this row by taking the *width* step out of the module, which
+is why one relocation finished it.
+
+### Two things this handover had to decide that the earlier two did not
+
+**It seeds visible.** The band was always on screen and had **no toggle action**, unlike
+`show_info_panel`/`show_tasks_panel`, which initialised to `false` and had `F2`/`F5`. So
+`tests/bundled_manifests.rs` records each handed-over pane's *native default* and asserts
+the replacement seeds at it, with "a pane that seeds hidden must bind an action" falling
+out as the consequence. The rule got stronger: it now also catches a pane seeding hidden
+when the band it replaced was visible.
+
+**The band arrives after the first frame.** This is the spike's prediction landing. The
+host starts detached and a pane does not exist until it publishes, so the left column is
+the session list alone and then splits. The two alternatives are both worse: carving the
+band from the feature flag leaves it *blank* whenever the pane is missing for any other
+reason (the empty-column failure the teardown gate exists for), and blocking the first
+frame on a VM is forbidden outright. The residual cost belongs to **startup**, not to
+this pane, and it is now the same question for every pane that follows.
+
+### The wrap, decided
+
+The left column is one circular list, and with both its panes becoming plugins the
+obvious question is who owns the wrap. **Nobody new.** It is four lines in two kernel
+handlers moving focus between two `InputFocus` values, and a handed-over pane is focused
+as the kernel's own pane of that name — so the wrap survives one handover, both, or
+neither, unchanged. What the handover changes is its *condition*:
+`features.automations` becomes "a pane provides the automations list", or `j` at the last
+session would drop focus into a band nobody can see.
+
+This is the answer for the session list too, and it is the reason that pane's handover
+does not have to invent anything here.
+
+### Where the left column now stands
+
+| Pane | Native renderer | Drawn by |
+|---|---|---|
+| Session list | `src/ui/project_list.rs` | the native pane |
+| Automations | **deleted** (ADR-56) | the plugin |
+
+One pane left in the column, and its own gate keeps three drawing rows plus a module
+that is the kernel's navigation, reorder, sort and search model. Nothing in this handover
+closed any of them.

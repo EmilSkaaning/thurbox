@@ -30,10 +30,11 @@ struct Segment {
 ///
 /// **Test-only since Phase 4.** Every list pane now names its resting style as a
 /// [`crate::session::view_tree::StyleToken`] and lets the tree's renderer resolve
-/// it, so this stays compiled as the *oracle* the ports are differentiated
-/// against: `tasks_panel` and `automations_panel` each keep their pre-port span
-/// renderer, and this is the function those renderers resolved a row's base
-/// through. Deleting it would delete what proves the token spellings are right.
+/// it, so this stays compiled as the *oracle* the ports were differentiated
+/// against: a pane's pre-port span renderer resolved a row's base through this
+/// function, and the surviving one is [`super::project_list`]'s. The tasks and
+/// automations panes kept one too until their handovers deleted them (ADR-53,
+/// ADR-56). Deleting this would delete what proves the token spellings are right.
 #[cfg(test)]
 pub(crate) fn row_base_style(selected: bool, dimmed: bool, normal: Style) -> Style {
     if selected {

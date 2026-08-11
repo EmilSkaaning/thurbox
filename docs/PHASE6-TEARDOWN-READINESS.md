@@ -9,8 +9,9 @@ Every claim below is traced to the code that makes it true, and each is enforced
 by `tests/teardown_gate.rs` (ADR-23) so it cannot quietly go stale — if you
 implement one of these replacements, that test will tell you to come back here.
 
-Status: **3 of 14 replacements ready.** Two units are deleted: the info panel's native
-renderer (ADR-50) and the tasks pane's (ADR-53). No other unit is deletable.
+Status: **4 of 14 replacements ready.** Three units are deleted: the info panel's native
+renderer (ADR-50), the tasks pane's (ADR-53) and the automations pane's (ADR-56). No
+other unit is deletable.
 
 ## 1. The deletion targets are real and exactly the claimed size
 
@@ -66,7 +67,7 @@ Getting any of that wrong fails silently: the binary compiles, sessions launch,
 and status reporting stops. That is why it is one change with the switch-over in
 it, not a refactor done in pieces.
 
-## 3. Phase 4 has handed over one pane of seven
+## 3. Phase 4 has handed over three panes of seven
 
 `src/plugin/bundled/` contains `hello`, `info-panel`, `tasks`, `file-viewer`,
 `code-review`, `session-list` and `automations`. Every native pane a plugin can be
@@ -76,7 +77,7 @@ written for now has one.
 |---|---|---|---|
 | Info panel | **deleted** (ADR-50) | `info-panel` | **the plugin** |
 | Tasks | **deleted** (ADR-53) | `tasks` | **the plugin** |
-| Automations | `src/ui/automations_panel.rs` | `automations` (its rows **and** five of its seven keys, PHASE4 §17) | the native pane |
+| Automations | **deleted** (ADR-56) | `automations` | **the plugin** |
 | File viewer | `src/ui/file_viewer.rs` | `file-viewer` | the native pane (refused, ADR-54: three decisions, no capability) |
 | Global search | `src/ui/global_search.rs` | none possible yet (PHASE4 §10) | the native pane |
 | Code review | `src/ui/code_review.rs` | `code-review` (the diff stream only, PHASE4 §11) | the native pane |
@@ -112,28 +113,40 @@ compose box — with the reason each is unported. That row therefore needs both 
 handover *and* the remaining surface before `src/ui/code_review.rs` can go, which
 is a longer list than any other pane's.
 
-The automations row is the first where a port's **keys ship** (PHASE4 §17,
-ADR-41): a plugin holding `input` keeps a cursor of its own across renders, so five
-of the pane's seven keys act on the row it drew, through `automations-write` — which
-had no consumer before. That narrows the tasks blocker rather than closing it: what
-remains unportable is a key that writes **kernel** view state (a cursor thurbox
-owns, a focus, an active session), plus record creation, text authoring, a central
-seat, a modal, and reaching an agent. The pane's own circular wrap with the session
-list is on that list, and stays the kernel's — a wrap is a claim about adjacency,
-and the reproduction cannot be seated adjacent to anything (`PaneSlot` names only
-the right column).
+The automations row was the first where a port's **keys ship** (PHASE4 §17, ADR-41): a
+plugin holding `input` kept a cursor of its own across renders, so five of the pane's
+seven keys acted on the row it drew, through `automations-write`. Its handover was then
+attempted and refused (ADR-43) for a reason the port had not predicted — not the keys but
+the **central seat**, since `App::render_central_pane` branches on three *native* focuses
+and a plugin-keys pane is `InputFocus::PluginPane`, so the editor and the run history
+disappeared from a pane that still looked complete.
 
-That row's handover has since been attempted and refused (ADR-43), and the refusal
-moved the reason: not the keys, but the **central seat**. Focusing the native pane
-is what draws the automation editor and its run history in the central pane, and
-`App::render_central_pane` branches on the pane's three *native* focuses — so a
-plugin pane taking focus removes both surfaces. `n` and `Enter`/`e` are not two
-keys short of parity; they are the pane's whole authoring surface, and it needs a
-seat rather than a grant. The session list's row was refused the same day for the
-opposite reason: its keys move the **active session**, which is kernel view state
-no capability writes.
+**That pane is now handed over** (ADR-56, PHASE4 §31), and the way it went is the
+strongest evidence yet for ADR-51's route: five of the six rows in its gate stopped being
+requirements rather than being closed, and the port's four capabilities came **down** to
+two. The pane with the most keys in thurbox ends up with the fewest grants, because the
+kernel performs the actions. The one row that was real work was the module's second
+consumer — `row_summary`, shared with the `Ctrl+P` modal — and it moved to that modal's
+own module.
 
-**Two panes are handed over.** The tasks pane went second (ADR-53, PHASE4 §28) and is
+The session list's row was refused the same day as the automations one, for a reason that
+still stands: its keys move the **active session**, which is kernel view state no
+capability writes. ADR-51 answers that (the kernel moves it, as it always did), so what
+holds the pane now is three drawing rows and a module that is the kernel's navigation,
+reorder, sort and search model.
+
+**Three panes are handed over.** The automations pane went third (ADR-56, PHASE4 §31)
+and is the first that was **always on screen**: it seeds visible, binds no toggle action
+(the band never had one), and its band therefore arrives a moment after the first frame —
+the spike's predicted pop-in, accepted because carving from the feature flag would leave a
+*blank* band whenever the pane is absent for any other reason. It is also the handover
+that made a shipped manifest's reach **smaller**: the port's `input` and
+`automations-write` are gone, since the kernel performs all seven of the pane's actions.
+And it settled the left column's circular wrap — it stays in the kernel's own handlers,
+because both ends are kernel focuses whoever draws either pane; only its *condition*
+changed, from the feature flag to "a pane provides that list".
+
+The tasks pane went second (ADR-53, PHASE4 §28) and is
 the first **with a keyboard**: `src/ui/tasks_panel.rs` is deleted, the bundled plugin
 draws the column from a new `tasks` seat, and `key_context = "Tasks"` is what keeps all
 ten of its scoped actions firing — against kernel state, still rebindable in F1, with
@@ -158,16 +171,16 @@ change never resized the sessions, and an input-less pane was swallowing clicks 
 front of drag-select.
 
 **A pane's row is ready only on handover, not on existence.** The four remaining panes
-show why the distinction is load-bearing rather than pedantic: each plugin exists and
-reproduces its pane (two exactly, code review in the part it declares, the session list
-in its rows), while the native renderer is still what the interface draws. Deleting
-`src/ui/automations_panel.rs` today would remove the pane every user is looking at. So
+show why the distinction is load-bearing rather than pedantic: three of them have a plugin
+that reproduces the pane (the file viewer exactly, the code review in the part it declares,
+the session list in its rows), while the native renderer is still what the interface draws.
+Deleting `src/ui/file_viewer.rs` today would remove the pane every user is looking at. So
 `tests/teardown_gate.rs`'s pane probe is a four-way conjunction, and
 `a_reproduced_pane_is_not_a_replaced_one` pins that reasoning so it cannot be
-"simplified" back to a directory check — with the **automations pane** as its worked
-example now (the info panel until ADR-50, the tasks pane until ADR-53), guarded by a
-test that fails if that pane is handed over without moving the example, because the
-repair that passes is to flip the assertions.
+"simplified" back to a directory check — with the **file viewer** as its worked example
+now (the info panel until ADR-50, the tasks pane until ADR-53, the automations pane until
+ADR-56), guarded by a test that fails if that pane is handed over without moving the
+example, because the repair that passes is to flip the assertions.
 
 Two of the gate's own rules had to be **scoped to blocked rows** for the same reason,
 and it is worth naming as a class: a handover inverts the direction they read the tree
@@ -319,26 +332,30 @@ that gates Stage C and `2.0.0`, not the handovers.
    whose `pane_context::SystemSnapshot` is already that module's spelling of the same
    numbers.
 
-   One of the seven is **done** (the info panel, ADR-50). Two others have had a
-   handover **attempted and refused**, and their remaining requirements are enforced
-   rather than described (ADR-43): the
-   **automations pane** (`tests/automations_pane_handover_gap.rs`, 10 rows) and the
-   **session list** (`tests/session_list_pane_handover_gap.rs`, 9 rows). Each row
-   is re-derived from the source and tagged structural / vocabulary / wiring, and
-   each gate derives its verdict from its rows — so a requirement that closes for
-   an unrelated reason fails the gate instead of expiring silently. The
-   automations pane's deciding row is not one §17 predicted: focusing the *native*
-   pane is what turns the **central** pane into the automation editor plus its run
-   history, so a plugin pane taking focus removes both. The session list's is the
-   spike's own second condition — the cursor stays kernel state — which is right,
-   and is exactly what forbids a plugin pane from driving it.
+   **Three of the seven are done** (the info panel ADR-50, the tasks pane ADR-53, the
+   automations pane ADR-56). The automations pane's own gate
+   (`tests/automations_pane_handover_gap.rs`, 10 rows) is **retired**, and how it went is
+   the most useful thing in this list: five of its six outstanding rows stopped being
+   requirements when the pane took ADR-51's route, and none of the powers they named was
+   granted — so ADR-56 preserves the table rather than deleting it, because those rows are
+   still the answer for a pane that wants keys of its *own*.
 
-   Five of those nineteen rows are **shared** by both panes: the left seat, the
-   render trigger, a pane that is not told its own focus, and the
-   module-as-model class. So step 9's remaining cost is concentrated in a few host
-   decisions rather than spread across seven panes.
+   The remaining refusals are enforced rather than described: the **session list**
+   (`tests/session_list_pane_handover_gap.rs`, 9 rows), the **file viewer**
+   (`tests/file_viewer_pane_input_gap.rs`, 6 rows, ADR-54) and the **code review**
+   (`tests/code_review_pane_handover_gap.rs`, ADR-45). Each row is re-derived from the
+   source and tagged structural / vocabulary / wiring, and each gate derives its verdict
+   from its rows — so a requirement that closes for an unrelated reason fails the gate
+   instead of expiring silently.
 
-The teardown's first safe step has been taken — one pane, the one with no gap file —
-and it did not unblock the rest: each remaining pane still waits on focus and on its
-own recorded rows, and the extension system waits on six capabilities that do not
-exist. Nothing else on this list is unblocked by deleting something first.
+**Three panes are down and the left column has one left.** None of the three unblocked
+another: what remains is per-pane — three drawing rows and a module that is the kernel's
+navigation model (the session list), a module that is also the pane's model plus an
+unwritten seat-precedence rule (the file viewer), a surface the port reproduces only in
+part (the code review) — and the extension system still waits on six capabilities that do
+not exist. Nothing else on this list is unblocked by deleting something first.
+
+What the three *did* establish is that a pane's keyboard costs no grant (ADR-51, applied
+twice), that a handover's evidence is its recording (ADR-42/48, held three times with the
+`.snap` files unmoved), and that a handover may make a plugin's reach **smaller** rather
+than larger (ADR-56). The remaining four are not blocked on any of those.

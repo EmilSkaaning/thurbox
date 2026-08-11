@@ -760,6 +760,11 @@ pub(crate) enum ClickAction {
     #[cfg(feature = "plugins")]
     SelectTask(usize),
     /// Select the automation at this index in the automations pane.
+    ///
+    /// Recorded only by the pane that provides the automations list, which is a
+    /// plugin's since ADR-56 — so like [`ClickAction::SelectTask`] it exists only
+    /// where a plugin can exist. A build with no plugin host has no band to click.
+    #[cfg(feature = "plugins")]
     SelectAutomation(usize),
     /// Select + activate the file-viewer row at this flattened tree index
     /// (expand/collapse a directory, open a file).
@@ -1726,6 +1731,10 @@ impl App {
         {
             self.focus = self.focus_fallback();
         }
+        // The automations band hides *itself* when this flag goes off — it declares
+        // `feature = "automations"` (ADR-47) — but focus does not follow, and a focus
+        // left on a pane that is gone keeps the central pane drawing an editor for a
+        // list nobody can see. Same shape as the tasks rescue above (ADR-56).
         if !self.features.automations
             && matches!(
                 self.focus,
@@ -3418,6 +3427,7 @@ impl App {
                 self.on_focus_changed();
                 true
             }
+            #[cfg(feature = "plugins")]
             ClickAction::SelectAutomation(i) => {
                 self.focus = InputFocus::Automations;
                 let len = self.automation_ui.cached_automations.len();
@@ -7609,12 +7619,13 @@ impl App {
 
     /// The automations pane's rows as the published snapshot carries them.
     ///
-    /// Built from the same `cached_automations` the pane draws from, through the
-    /// same two resolvers (`automation_schedule_label` /
-    /// `automation_due_in_secs`), so the published row and the drawn one cannot
-    /// disagree about a schedule's label or a countdown. What it does **not** do is
-    /// compose the summary — that is the pane's, so both panes compose it through
-    /// one `ui::automations_panel::row_summary`.
+    /// Built from the same `cached_automations` the deleted native pane drew from,
+    /// through the same two resolvers (`automation_schedule_label` /
+    /// `automation_due_in_secs`), so what the pane shows and what the `Ctrl+P` modal
+    /// shows cannot disagree about a schedule's label or a countdown. What it does
+    /// **not** do is compose the summary — that is the pane's, and the modal composes
+    /// it through `ui::automations_list_modal::row_summary`, which is what the pane's
+    /// oracle compares the plugin against.
     fn build_automations_snapshot(
         &self,
         now_ms: u64,
@@ -7648,7 +7659,7 @@ impl App {
         // The scroll anchor, published whatever holds focus — a pane windows to its
         // cursor even while the cursor is not being drawn.
         //
-        // Clamped into the rows, matching `ui::automations_panel::cursor_row`: a
+        // Clamped into the rows, as the deleted native pane's `cursor_row` was: a
         // stale selection left by a shortened list anchors on the last row, and the
         // appearance follows the anchor because the host refuses a list whose cursor
         // is not an index into its children. Past the *published bound* is a
@@ -7662,16 +7673,17 @@ impl App {
         pc::AutomationsSnapshot {
             entries,
             cursor,
-            // Exactly `ui::automations_panel::resolve_rows`'s rule: the pane draws
-            // its cursor while it holds focus, or while a global search is
+            // Exactly the rule the native pane's `resolve_rows` applied: the pane
+            // draws its cursor while it holds focus, or while a global search is
             // previewing a row here (so the moving cursor is visible even though
             // focus is in the search strip). A plugin can observe neither, so it is
             // resolved here.
             //
-            // Deliberately **not** the editor/run-history focuses. `view.rs` maps
-            // those to `FocusLevel::Active`, which this pane draws identically to
-            // `Inactive` — so including them here would publish a cursor the native
-            // pane does not draw, and the two panes would disagree.
+            // Deliberately **not** the editor/run-history focuses, which
+            // `App::pane_focus_level` reports as `FocusLevel::Active` — a level the
+            // pane draws identically to `Inactive`. Including them would publish a
+            // cursor the pane does not draw, so the recordings and the pane would
+            // disagree.
             cursor_visible: matches!(self.focus, InputFocus::Automations)
                 || self.global_search_preview_kind()
                     == Some(crate::app::search::SearchKind::Automation),
@@ -8664,22 +8676,26 @@ impl App {
     /// kernel keeps the policy and reads the count off the seated pane's tree
     /// (ADR-46). A pane that has not rendered yet counts as one row, which is
     /// what its "loading…" line occupies.
+    ///
+    /// There is no longer a fallback to the automation count: the kernel's own
+    /// occupant of the band is deleted (ADR-56), so with no seated pane the band is
+    /// not carved at all and this answer is unused.
     #[cfg(feature = "plugins")]
     fn lower_left_rows(&self) -> usize {
-        match self.plugin_seat(PaneSlot::LeftBottom) {
-            Some(pane) => pane
-                .tree()
-                .map(crate::session::view_tree::ViewNode::stacked_row_count)
-                .unwrap_or(1),
-            None => self.automation_ui.cached_automations.len(),
-        }
+        self.plugin_seat(PaneSlot::LeftBottom)
+            .map(|pane| {
+                pane.tree()
+                    .map(crate::session::view_tree::ViewNode::stacked_row_count)
+                    .unwrap_or(1)
+            })
+            .unwrap_or(0)
     }
 
-    /// Without the plugin feature the band's occupant is always the automations
-    /// pane.
+    /// Without the plugin host nothing can occupy the band, so it is never carved
+    /// and there is no count to give.
     #[cfg(not(feature = "plugins"))]
     fn lower_left_rows(&self) -> usize {
-        self.automation_ui.cached_automations.len()
+        0
     }
 
     /// Replace the plugin panes, reporting whether what the user sees changed.
@@ -8781,8 +8797,13 @@ impl App {
                 show_file_viewer: self.show_file_viewer || self.active_review().is_some(),
                 plugin_panes: self.visible_plugin_panes(),
                 show_global_search: self.global_search.active,
-                show_automations_pane: self.features.automations
-                    || self.seat_taken(PaneSlot::LeftBottom),
+                // The kernel's own occupant of this band went with its renderer
+                // (ADR-56), so the band is carved by a claim or not at all. Which
+                // means it is absent until the host publishes — the accepted cost of
+                // handing over the first *always-visible* pane, against a retained
+                // flag that would carve a blank band whenever the pane is missing for
+                // any other reason.
+                show_automations_pane: self.seat_taken(PaneSlot::LeftBottom),
                 automation_count: self.lower_left_rows(),
                 // Carve the transient status row whenever there's a message to
                 // show (a status/error toast, the live sync spinner, or a spawn
@@ -9356,6 +9377,30 @@ mod tests {
     /// `show_tasks_panel` answered before the pane was handed over.
     fn tasks_pane_shown(app: &App) -> bool {
         app.pane_keyboard_taken(crate::session::KeyContext::Tasks)
+    }
+
+    /// Seat the pane that provides the automations list, as the bundled `automations`
+    /// plugin's manifest does (ADR-56). Unlike the tasks pane it seeds **visible** and
+    /// binds no toggle action, because the band it replaced was always on screen.
+    ///
+    /// Every test of the left column's circular wrap needs this: the wrap's condition is
+    /// "a pane provides that list", so without a seated pane `j` at the last session
+    /// wraps within the list instead of dropping into the band — which is the correct
+    /// behaviour, and not the one those tests are about.
+    #[cfg(feature = "plugins")]
+    fn seat_automations_pane(app: &mut App) {
+        use crate::session::plugin_manifest::PaneSlot;
+        use crate::session::settings::FeatureFlag;
+        let mut pane = crate::plugin::PluginPane::loading(
+            "automations",
+            "automations",
+            "Automations",
+            PaneSlot::LeftBottom,
+            true,
+        );
+        pane.feature = Some(FeatureFlag::Automations);
+        pane.key_context = Some(crate::session::KeyContext::Automations);
+        app.set_plugin_panes(vec![pane]);
     }
 
     fn app_with_sessions(count: usize) -> App {
@@ -10292,6 +10337,7 @@ mod tests {
         assert_eq!(app.focus, InputFocus::SessionList);
     }
 
+    #[cfg(feature = "plugins")]
     #[test]
     fn session_and_automation_navigation_forms_a_loop() {
         use crate::session::{AutomationAction, AutomationSchedule};
@@ -10312,6 +10358,9 @@ mod tests {
         };
         let mut app = app_with_sessions(2);
         app.automation_ui.cached_automations = vec![make(1, "a"), make(2, "b")];
+        // The band is a plugin's pane (ADR-56) and the wrap's condition is that one
+        // provides the list, so the column is only circular while it is seated.
+        seat_automations_pane(&mut app);
 
         // Down past the last session drops into the automations pane.
         app.focus = InputFocus::SessionList;
@@ -11035,13 +11084,21 @@ mod tests {
     /// The automations flag flows through `screen_layout` (the shared layout
     /// funnel): disabling it removes the pane and gives the session list the
     /// whole left column.
+    #[cfg(feature = "plugins")]
     #[test]
     fn screen_layout_drops_automations_pane_when_disabled() {
         let mut app = app_with_sessions(1);
         app.update(AppMessage::Resize(100, 30));
+        // The band is carved by a *claim* now, not by the feature flag (ADR-56): with no
+        // pane seated there is nothing to carve, which is what keeps a build with no
+        // plugin host from reserving a column nothing paints.
+        assert!(app.screen_layout().automations_panel.is_none());
+        seat_automations_pane(&mut app);
         let with = app.screen_layout();
         assert!(with.automations_panel.is_some());
 
+        // Off, the pane hides itself — it declares `feature = "automations"` — so the
+        // seat is unclaimed and the band goes with it.
         app.features.automations = false;
         let without = app.screen_layout();
         assert!(without.automations_panel.is_none());
@@ -11054,6 +11111,10 @@ mod tests {
 
     /// With automations disabled there is no pane beneath the session list, so
     /// `j`/`k` wrap within the list instead of flowing into the pane.
+    ///
+    /// Since ADR-56 the pane is a plugin's, and this test does not seat one — so it holds
+    /// for both reasons at once (the flag is off *and* nothing claims the band), which is
+    /// the state a build with no plugin host is permanently in.
     #[test]
     fn session_list_wraps_when_automations_disabled() {
         let mut app = app_with_sessions(2);
@@ -12927,9 +12988,11 @@ mod tests {
         app.refresh_automations();
     }
 
+    #[cfg(feature = "plugins")]
     #[test]
     fn j_at_last_session_enters_automations_pane() {
         let mut app = app_with_sessions(3);
+        seat_automations_pane(&mut app);
         app.focus = InputFocus::SessionList;
         app.active_index = 2; // last in render order (no admins)
         app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
@@ -12947,9 +13010,11 @@ mod tests {
         assert_eq!(app.active_index, 1);
     }
 
+    #[cfg(feature = "plugins")]
     #[test]
     fn k_at_first_session_loops_to_last_automation() {
         let mut app = app_with_sessions(3);
+        seat_automations_pane(&mut app);
         add_test_automation(&mut app, "a");
         add_test_automation(&mut app, "b");
         app.focus = InputFocus::SessionList;
@@ -13321,9 +13386,11 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "plugins")]
     #[test]
     fn focusing_automations_loads_selected_run_history() {
         let mut app = app_with_sessions(1);
+        seat_automations_pane(&mut app);
         add_test_automation(&mut app, "a");
         let id = app.automation_ui.cached_automations[0].id;
         app.db

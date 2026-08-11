@@ -531,8 +531,21 @@ impl App {
                 {
                     self.automation_ui.automation_panel_index = pos;
                 }
-                self.focus = InputFocus::Automations;
-                self.refresh_automation_view();
+                // Landing on the pane is how an automation result is *opened*, and the
+                // pane is a plugin's now (ADR-56) — so a build with none has nowhere to
+                // land, and the jump reports that rather than focusing a pane that is
+                // not there. Unlike the task jump there is nothing to reveal: this pane
+                // has no toggle, because the band it replaced was always on screen.
+                if self.pane_keyboard_taken(crate::session::KeyContext::Automations) {
+                    self.focus = InputFocus::Automations;
+                    self.refresh_automation_view();
+                } else {
+                    self.focus = fallback_focus;
+                    self.set_info(format!(
+                        "Automations pane: {}",
+                        Self::no_pane_hint("automations")
+                    ));
+                }
             }
             SearchTarget::File { root: _, path } => {
                 self.show_file_viewer = true;
