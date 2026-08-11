@@ -874,3 +874,86 @@ node, an alignment, a bottom-anchored region), **clipping** (§8), and **when a
 plugin is asked to render**. The first two are additive vocabulary with two or
 three consumers each. The third is the only one that is a design question, and it
 is the one this port promotes from a spike's footnote to a measured, named gap.
+
+## 14. The handover that did not happen, and the gate that would have allowed it
+
+§13 closed with the phase's five ports done and named what was left open:
+chrome, clipping, and when a plugin is asked to render. The next step is not a
+sixth port but the **handover** — stop drawing a native pane, delete its
+renderer, let the plugin be the pane — and the info panel was chosen to go first
+for the same reason it was chosen for §1: it is a pure display surface, so
+nothing about selection, keys or mouse can confound the answer.
+
+The answer is that no pane can be handed over yet, and it is not a fact about the
+info panel.
+
+### The blocker is the build, and every link is already enforced
+
+| Fact | Enforced by |
+|---|---|
+| a bundled pane is a Luau program | `src/plugin/bundled/info-panel/init.luau` |
+| running it needs `mlua` | `Cargo.toml`, `plugins = ["dep:mlua"]` |
+| `mlua` is optional and not default | `Cargo.toml`, `default = []` |
+| the default build must not gain it | the `plugins` CI job asserts `cargo tree --edges normal` shows no `mlua`; it is a required check |
+| the *release* must not enable it | `release/workflow-invariants` specifies it; `scripts/dev/lint-workflows.sh` invariant 2 enforces it over `cd.yml` |
+
+So the pane a user installs cannot be drawn by a plugin. Deleting
+`src/ui/info_panel.rs` would make `F2` open an empty column on every release
+while `cargo nextest run --all --features plugins` stayed green: the failure is
+absent from the build that ships and invisible in the build that is tested
+hardest. It blocks all seven panes identically, which is why ADR-37 states the
+condition once and applies it to every row.
+
+### The gate permitted exactly this, which is the finding worth carrying
+
+`tests/teardown_gate.rs` derived a pane's readiness from two conditions — the
+bundled plugin exists, and `src/app/view.rs` no longer names the native renderer
+module. The deletion above satisfies both. The row would have been recorded
+*handed over*, `recorded_verdicts_match_the_tree` would have **required** that,
+and `every_listed_path_survives_until_its_unit_is_ready` would then have stopped
+protecting `src/ui/info_panel.rs` — signing off the deletion of a pane no
+released binary can draw. That is the silent class the gate's own module note
+says it exists to catch, and it is the third time a probe here has had to be
+tightened rather than a verdict flipped (§10's write-shaped binding, §11's node
+named `Fill`). Three corrections in three ports is the argument for the gates,
+and also the argument for never reading one's green as agreement.
+
+The probe now has a third conjunct, read from `Cargo.toml`'s default feature list
+rather than from `cfg!(feature = "plugins")` — the `cfg!` answers "was this test
+binary built with the feature", which under `--features plugins` is the answer
+that permits the deletion.
+
+### Three pane-level requirements the release blocker hides
+
+None is closed here: each is useful only once a plugin pane can reach a user, and
+this phase has twice refused to design from one blocked consumer (§7's
+`thurbox.format.*`, §10's non-pane extension point).
+
+| Handover requirement | Where the host stands | Cheapest closure |
+|---|---|---|
+| **the same seat** | `PaneSlot`'s only member is `Right`; the info panel is `RegionId::Info`, its own region with a `Percent(15)` share and a ≥120-column rule. A plugin pane cannot sit there, so its frame is a different rect with a different title | a slot that names an existing region, decided with the layout rather than with a pane |
+| **the same toggle and the same flag** | `Action::ToggleInfoPanel` toggles `App::show_info_panel` and `[features] info_panel` gates it; a plugin pane's visibility is `TogglePluginPane` plus a stored per-pane choice. No manifest field asks a pane to answer a kernel action or ride a kernel feature flag | a manifest declaration binding a pane to an existing action and flag — which is also how the `[features]` flags eventually retire |
+| **the same latency** | the render worker polls on a fixed 1 s cycle (`PLUGIN_RENDER_SLICE` × `PLUGIN_RENDER_SLICES`). This is §7 and §13's render-trigger gap, and the info panel is its worst case: live CPU and memory gauges plus per-automation countdowns | event-driven render, §13's named gap, with its own rate policy |
+
+The third is the one to weigh before the others. §13 argued the 1 s staleness was
+tolerable *because* a plugin pane is a hidden reproduction, so the surface the
+user watches is still the kernel's. A handover inverts that argument entirely:
+the stale pane becomes the only pane.
+
+### The proposed proof cannot fail
+
+The handover was to be proved by the acceptance snapshots not moving — if the
+plugin renders identically, replacing the renderer changes no frame. For this
+pane that test is vacuous. There are seven snapshots (`src/app/snapshots/`), all
+captured on a welcome screen or a modal with **no active session**, while
+`App::render_info_panel` returns early without one and the pane is seated only at
+≥120 columns. None contains an info-panel label (`Name:`, `Branch:`, `Agent:`,
+`Context:`, `Hooks:`), so they would have stayed byte-identical had the pane been
+deleted and replaced with nothing.
+
+The oracle that *can* fail already exists and is what the port relies on:
+`tests/bundled_info_panel.rs` asserts tree equality against
+`ui::info_panel::info_tree`, and `ui::info_panel`'s own tests paint that tree
+against the retained pre-port renderer. The lesson is §6's, one level up: the
+audit method there was *read the pane's calls, not the node catalogue*; here it
+is *check that the proof could have failed, not that it passed*.

@@ -1777,3 +1777,82 @@ turn** (a keyboard decision that belongs with ADR-28's picker; before this chang
 the distinction could not even be expressed, because nothing named a pane). No
 bundled plugin declares `input`, so no bundled pane is clickable yet and every insta
 snapshot is byte-identical.
+
+## ADR-37: A pane is handed over only in the build a user installs
+
+**Context.** Phase 4 has reproduced five native panes as bundled plugins, each
+asserting tree equality against the pane it copies. The next step is the handover:
+stop drawing the native pane, delete its renderer, let the plugin be the pane. The
+info panel was picked to go first because it is a pure display surface — no
+selection, no keys, no mouse — so nothing about interaction can confound the
+question "does dropping a native renderer leave every frame identical?".
+
+It cannot be done, and the reason is not about the info panel. A bundled pane is a
+Luau program; running one needs `mlua`; `mlua` is optional (`Cargo.toml` reads
+`default = []`); the `plugins` CI job asserts the default dependency tree contains
+no `mlua`; and `release/workflow-invariants` **specifies** that the release
+workflow never builds with the feature, enforced by
+`scripts/dev/lint-workflows.sh`. So no installed binary can draw a bundled pane.
+Deleting `src/ui/info_panel.rs` would leave `F2` opening an empty column on every
+release while `cargo nextest run --all --features plugins` stayed green — the
+failure absent from the build that ships and invisible in the build that is tested
+hardest.
+
+Worse, the gate built to prevent this permitted it. `tests/teardown_gate.rs`
+derived a pane's readiness from two conditions — the plugin exists, and
+`src/app/view.rs` no longer names the native renderer — and the deletion above
+satisfies both. The row would have been recorded ready and
+`every_listed_path_survives_until_its_unit_is_ready` would have stopped protecting
+the renderer. That is the silent case the gate's own module note says it exists to
+catch.
+
+**Decision.**
+
+- **Handover has a third condition: the runtime that draws the replacement
+  reaches the build a user installs.** A pane whose replacement only runs behind a
+  compile-time feature releases do not enable is not a pane a user has, so
+  deleting its native renderer removes what users see — the outcome the inventory
+  exists to prevent.
+- **The condition is read from `Cargo.toml`'s default feature list**, not from
+  `cfg!(feature = "plugins")`. The `cfg!` answers "was this test binary built with
+  the feature", which under `--features plugins` is `true` — exactly the answer
+  that would permit the deletion. Reading the manifest keeps one verdict in both
+  configurations, which is the premise the whole gate rests on.
+- **It applies to every pane row, not per pane.** It is a fact about the build, so
+  one release decision blocks all seven rows together. Stating it once makes that
+  dependency visible instead of letting it read as seven independent pane
+  problems; `docs/PHASE6-TEARDOWN-READINESS.md` §4's worklist is corrected to
+  match, since it previously ordered the seven handovers *before* the Cargo
+  default flip they each require.
+- **No pane is handed over and no renderer is deleted.** The info panel's plugin
+  stays `default_visible = false` and the native pane stays what `src/app/view.rs`
+  draws.
+
+**Rejected.** *Flip `plugins` into the default feature set* — the honest
+resolution, and a release-engineering change with its own measurement: it raises
+the effective MSRV from 1.86 to 1.88 (`mlua`'s floor, which cargo cannot express
+per feature), puts vendored Luau C sources in the path of four release targets
+including a cross-built `musl` and a cross-compiled `aarch64-apple-darwin`, and
+contradicts a specified release invariant plus a required CI assertion. *Ship the
+pane's replacement ungated* — vacuous: an ungated Luau program needs an ungated
+VM, and rewriting the plugin in Rust to dodge the gate reproduces
+`src/ui/info_panel.rs` under a new name while destroying the only thing the port
+measures. *Select between the two renderers on the feature* — nothing is handed
+over, and it leaves two renderings of one pane that differ by build, comparable as
+trees but never as the frames a user sees. *Delete the renderer and accept the gap
+until the flip* — that ships a release whose `F2` opens an empty framed column
+whose settings flag toggles nothing.
+
+**Consequences.** The seven pane rows stay blocked, now for a checked reason
+rather than a remembered one, and the block names a release decision instead of
+pane work. Three pane-level handover requirements the release blocker would have
+hidden are recorded in `docs/PHASE4-PANE-READINESS.md` §14 rather than closed
+speculatively: a plugin pane cannot be seated in the info panel's region
+(`PaneSlot` has only `Right`), cannot answer `Action::ToggleInfoPanel` or ride
+`[features] info_panel`, and renders on a fixed 1 s poll — which for the pane with
+live CPU gauges and countdowns would make the *user's* pane the stale one. And one
+correction to the proof a handover is expected to offer: the acceptance snapshots
+cannot witness this pane, because all seven were captured with no active session
+and the pane renders nothing without one. The oracle that can fail is
+`tests/bundled_info_panel.rs`'s tree equality, which is what the port already
+relies on.

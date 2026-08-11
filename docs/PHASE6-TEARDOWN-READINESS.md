@@ -67,8 +67,8 @@ it, not a refactor done in pieces.
 
 ## 3. Phase 4 has started, but no pane has been handed over
 
-`src/plugin/bundled/` contains `hello`, `info-panel`, `tasks`, `file-viewer` and
-`code-review`.
+`src/plugin/bundled/` contains `hello`, `info-panel`, `tasks`, `file-viewer`,
+`code-review` and `session-list`.
 
 | Pane | Native renderer | Bundled plugin | Drawn by |
 |---|---|---|---|
@@ -78,12 +78,12 @@ it, not a refactor done in pieces.
 | File viewer | `src/ui/file_viewer.rs` | `file-viewer` | the native pane |
 | Global search | `src/ui/global_search.rs` | none possible yet (PHASE4 §10) | the native pane |
 | Code review | `src/ui/code_review.rs` | `code-review` (the diff stream only, PHASE4 §11) | the native pane |
-| Session list | `src/ui/project_list.rs` | absent | the native pane |
+| Session list | `src/ui/project_list.rs` | `session-list` (its rows, PHASE4 §13) | the native pane |
 
 `docs/PHASE4-PANE-READINESS.md` is the audit of what the plugin API could not
 express for the *first* of those panes; all five of its gaps are now closed
-(ADR-26, ADR-27, ADR-28), and §8, §9 and §11 record what the second, third and
-fourth ports needed on top of them (ADR-29, ADR-30, ADR-31).
+(ADR-26, ADR-27, ADR-28), and §8, §9, §11 and §13 record what the second, third,
+fourth and fifth ports needed on top of them (ADR-29, ADR-30, ADR-31, ADR-33).
 
 One row in the table above will not fill in by porting harder. §10 of the same
 document records **global search as structurally unportable** — it is a mode, not
@@ -100,26 +100,41 @@ compose box — with the reason each is unported. That row therefore needs both 
 handover *and* the remaining surface before `src/ui/code_review.rs` can go, which
 is a longer list than any other pane's.
 
-**A pane's row is ready only on handover, not on existence.** Four panes now show
+**A pane's row is ready only on handover, not on existence.** Five panes now show
 why the distinction is load-bearing rather than pedantic: each plugin exists and
-reproduces its pane (the first three exactly, the fourth in the part it declares),
-while the native renderer is still what the interface draws. Deleting
-`src/ui/info_panel.rs` today would remove the pane every
-user is looking at. So `tests/teardown_gate.rs`'s pane probe is a conjunction —
-the bundled plugin exists **and** `src/app/view.rs` no longer names the pane's
-native renderer module — and `a_reproduced_pane_is_not_a_replaced_one` pins that
-reasoning so the probe cannot be "simplified" back to a directory check.
+reproduces its pane (three exactly, code review in the part it declares, the
+session list in its rows), while the native renderer is still what the interface
+draws. Deleting `src/ui/info_panel.rs` today would remove the pane every user is
+looking at. So `tests/teardown_gate.rs`'s pane probe is a conjunction, and
+`a_reproduced_pane_is_not_a_replaced_one` pins that reasoning so it cannot be
+"simplified" back to a directory check.
+
+**And a third condition, because the first two together permitted the mistake**
+(ADR-37): the runtime that draws the replacement must reach the build a user
+installs. A bundled pane is Luau, `mlua` is an optional dependency
+(`default = []`), the `plugins` CI job asserts the default dependency tree does not
+carry it, and `release/workflow-invariants` forbids `cd.yml` from enabling it — so
+handing a pane over today removes it from every install while the `--features
+plugins` test run stays green. Without the third conjunct, deleting a pane's
+renderer *and* its call in `src/app/view.rs` satisfied the probe, the row would
+have been recorded ready, and this gate would have stopped protecting the
+renderer. `a_pane_drawn_only_by_a_gated_build_is_not_handed_over` pins it. Because
+the condition is a fact about the build, it blocks all seven rows together: one
+release decision, not seven pane problems.
 
 Handing a pane over is therefore its own step, distinct from writing its plugin:
-it means `App::view` drawing the plugin's pane in the native one's place, which
-needs the plugin pane to be reachable from the keyboard (PHASE4 §5) and to render
-on events rather than on a 1 s poll (PHASE4 §7, and the session-list spike's third
-condition). Neither is done.
+it means `App::view` drawing the plugin's pane in the native one's place, in a
+build that ships the host. On top of the release decision that needs the plugin
+pane to be reachable from the keyboard (PHASE4 §5, done), to be seatable in the
+native pane's region and answer its action and feature flag (PHASE4 §14), and to
+render on events rather than on a 1 s poll (PHASE4 §7 and §13, and the
+session-list spike's third condition). Only the first is done.
 
 Stage B has not happened either — `Cargo.toml` reads `default = []`, so no user
 has ever run the plugin host, and Stage B's exit criterion ("at least one plugin
-that thurbox did not write") cannot have been met. Phase 6 is two milestones
-downstream of where the tree is.
+that thurbox did not write") cannot have been met. That is not merely upstream of
+Phase 6 but upstream of **every pane handover**, which is what the third condition
+above makes checkable. Phase 6 is two milestones downstream of where the tree is.
 
 ## 4. Worklist, in dependency order
 
@@ -141,10 +156,15 @@ downstream of where the tree is.
 6. **Phase 4, all seven panes** — each landing alongside its native predecessor
    and asserting the same rendering. The info panel has landed this way
    (ADR-27, tree equality rather than a frame snapshot). Writing a pane's plugin
-   does **not** unblock its unit; the seven pane units need the *handover* on top,
-   which is per-pane keyboard visibility plus event-driven render, then
-   `App::view` drawing the plugin in the native pane's place.
-7. **Stage B**, then the flips: Cargo default, runtime default, `2.0.0`.
+   does **not** unblock its unit.
+7. **Stage B and the Cargo default flip.** Listed here rather than after the
+   handovers, which is where it sat until ADR-37: no pane can be handed over
+   before it, because a Luau pane in a build with no Luau VM is a pane the user
+   does not have. Then the remaining flips: runtime default, `2.0.0`.
+8. **The seven handovers** — `App::view` drawing each plugin in its native pane's
+   place, which on top of step 7 needs the pane seatable in the native one's
+   region, answering its action and `[features]` flag, and rendering on events
+   rather than on a 1 s poll (PHASE4 §14). Only then may a native renderer go.
 
 Nothing on this list is unblocked by deleting something first, which is the
 whole finding: the teardown has no safe first step yet.
