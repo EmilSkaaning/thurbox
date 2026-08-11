@@ -2260,3 +2260,71 @@ chord of `AutomationsToggle` and `TasksCycleStatus` could not round-trip through
 `keybindings.json`. That is fixed here, named in both directions. The native pane is
 unchanged on screen and still what `src/app/view.rs` draws, so
 `tests/teardown_gate.rs` keeps its row blocked.
+
+## ADR-42: A port's oracle is recorded before the handover, or it dies with it
+
+**Context.** The info panel is the pane chosen to be handed over first — pure
+display, no keys, no mouse, and since ADR-40 the runtime that draws it is in the
+build a user installs. `docs/PHASE4-PANE-READINESS.md` §14 had already found that
+the *proposed* proof of such a handover could not fail (the seven acceptance
+snapshots are all captured with no active session, and this pane needs one, so
+none holds a cell of it) and pointed instead at the oracle that could:
+`tests/bundled_info_panel.rs`, which asserts the plugin's view tree **equals** the
+one `ui::info_panel::info_tree` builds.
+
+That pointer was right about today and wrong about the day it is needed. The
+assertion is **differential** — it names `info_tree`, which lives in the module
+the handover deletes. So it can fail before the handover and not after it: with
+the right-hand side gone, the repair that compiles is to drop the comparison, and
+what remains is a test that the plugin renders without erroring — satisfied
+equally by a pane drawing one wrong row and by one drawing twenty. Every one of
+the six bundled pane oracles has this shape.
+
+The failure mode is the same silent class ADR-37's gate exists for, one level up:
+not a build that cannot draw the pane, but a **proof that stops constraining it**
+at the moment it is relied upon, with nothing red anywhere.
+
+**Decision.** A pane whose handover is planned must have its oracle **recorded**
+before the handover, in a change that does not also perform it.
+
+- The expectation is generated from the **native** builder, never from the plugin.
+  A recording taken from the plugin — or taken after the native builder is gone —
+  freezes whatever the plugin does as correct, defect included, and can never fail
+  for the reason it exists.
+- While both sides exist, **both edges are asserted**: the recording equals the
+  native tree, and the plugin equals the native tree. The first is what gives the
+  recording its provenance and is establishable only now; their conjunction is the
+  fact the handover inherits.
+- The recording is a **line-per-node rendering**, not `{:#?}`. Faithfulness was
+  never the scarce property here — legibility was. A structural dump of this pane
+  is thousands of lines of defaulted style fields, and an expectation nobody can
+  read is one every update rubber-stamps, which converts the oracle into a record
+  of whatever the code last did.
+- Compactness is bought by omitting, so the renderer **destructures every
+  view-tree variant and every style field by name**, with no rest pattern and no
+  wildcard arm. Adding a field to the IR fails to compile in the oracle (E0027)
+  until it is accounted for. The compiler keeps the format honest rather than a
+  reviewer's memory.
+
+**Rejected: keep the native builder alive as a test-only oracle.** Move `info_tree`
+behind `cfg(test)`, delete only the renderer, and compare against it forever.
+`migration/phase-4` already forbids this in terms — "A port MUST NOT satisfy this
+by keeping both renderers", because that leaves two renderings of one pane — and a
+builder nothing paints drifts in the direction that cannot be caught: a change
+making it wrong makes the *oracle* wrong while the test keeps passing. It also
+keeps 2,000 lines of pane alive to serve one test, which is the deletion the
+handover exists to perform.
+
+**Rejected: hand-write the expected tree.** A 25-row pane with six gauges, written
+twice, drifting against nothing — and never *derived* from the native pane, so it
+has no proven baseline at all.
+
+**Consequences.** The info panel's handover gains a fourth requirement and
+immediately loses it: §14's table now reads seat, toggle-and-flag, latency, and a
+durable proof, with the last closed. Nothing else moved — `src/` is untouched, the
+interface is byte-identical, and `tests/teardown_gate.rs` keeps the row blocked,
+which is deliberate: the recording had to land in a change that does not also
+delete what it records, or its provenance would be unprovable. The other five
+bundled oracles keep their differential shape; each will need the same recording
+captured while *its* native builder exists, which is work belonging to its own
+handover, and `migration/phase-4` now states the rule so a port cannot miss it.

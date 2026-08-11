@@ -220,13 +220,26 @@ that gates Stage C and `2.0.0`, not the handovers.
    events rather than on a 1 s poll (PHASE4 §14). Only then may a native renderer
    go.
 
+   **Each handover also needs its pane's oracle recorded first, in a change that
+   does not perform the handover** (ADR-42). Every bundled pane's proof is
+   *differential* — it asserts the plugin's tree equals the native builder's, and
+   the native builder is what the handover deletes — so it can fail before the
+   handover and not after it, leaving a test that the plugin renders without
+   erroring. The recording must come from the native builder while it still exists,
+   or it freezes a plugin defect as the expectation. Done for the **info panel**
+   (`tests/snapshots/bundled_info_panel__*.snap`); still owed by the other five,
+   each inside its own handover's preparation.
+
    One of the seven carries an extra step of its own. `src/ui/file_viewer.rs` is
    the only pane module that is its pane's **model**: `FileViewerState` lives
    there, `App` owns one, the published `files` section is derived from it, and
    the module also owns `visible_window` — the rule every *plugin* list is
    scrolled by and four other native panes window with. That pane's handover
    therefore begins by lifting its model out of `ui`, which PHASE4 §16 records and
-   deliberately does not do in advance of a destination.
+   deliberately does not do in advance of a destination. A milder version of the
+   same shape sits in the info panel's module, which also declares `SystemMetrics`
+   — an *input* the metrics collector fills and `App` owns, so a relocation rather
+   than a design, but a reason that deletion is not confined to `ui`.
 
 Nothing on this list is unblocked by deleting something first, which is the
 whole finding: the teardown has no safe first step yet.

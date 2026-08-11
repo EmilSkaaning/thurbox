@@ -931,22 +931,49 @@ rather than from `cfg!(feature = "plugins")` — the `cfg!` answers "was this te
 binary built with the feature", which under `--features plugins` is the answer
 that permits the deletion.
 
-### Three pane-level requirements the release blocker hid
+### Five pane-level requirements the release blocker hid
 
-None is closed here: each is useful only once a plugin pane can reach a user, and
-this phase has twice refused to design from one blocked consumer (§7's
-`thurbox.format.*`, §10's non-pane extension point).
+Three of the five are useful only once a plugin pane can reach a user, and this
+phase has twice refused to design from one blocked consumer (§7's
+`thurbox.format.*`, §10's non-pane extension point). The fourth is the opposite
+shape and is closed below, because it is the only one that **cannot** be done
+after the handover, or even in the same change as it. The fifth is not a host gap
+at all but a behavioural difference between the two panes, and it is stated after
+the table because nothing in the host would have surfaced it.
 
 | Handover requirement | Where the host stands | Cheapest closure |
 |---|---|---|
 | **the same seat** | `PaneSlot`'s only member is `Right`; the info panel is `RegionId::Info`, its own region with a `Percent(15)` share and a ≥120-column rule. A plugin pane cannot sit there, so its frame is a different rect with a different title | a slot that names an existing region, decided with the layout rather than with a pane |
 | **the same toggle and the same flag** | `Action::ToggleInfoPanel` toggles `App::show_info_panel` and `[features] info_panel` gates it; a plugin pane's visibility is `TogglePluginPane` plus a stored per-pane choice. No manifest field asks a pane to answer a kernel action or ride a kernel feature flag | a manifest declaration binding a pane to an existing action and flag — which is also how the `[features]` flags eventually retire |
 | **the same latency** | the render worker polls on a fixed 1 s cycle (`PLUGIN_RENDER_SLICE` × `PLUGIN_RENDER_SLICES`). This is §7 and §13's render-trigger gap, and the info panel is its worst case: live CPU and memory gauges plus per-automation countdowns | event-driven render, §13's named gap, with its own rate policy |
+| **a proof that survives the deletion** | **closed** (ADR-42). The port's oracle was *differential* — it named `ui::info_panel::info_tree`, one of the two things the handover deletes — so it could fail before the handover and not after it | record the native pane's tree while the native builder still exists, and assert the plugin against the recording |
 
-The third is the one to weigh before the others. §13 argued the 1 s staleness was
-tolerable *because* a plugin pane is a hidden reproduction, so the surface the
-user watches is still the kernel's. A handover inverts that argument entirely:
-the stale pane becomes the only pane.
+The third is the one to weigh before the others of the open three. §13 argued the
+1 s staleness was tolerable *because* a plugin pane is a hidden reproduction, so
+the surface the user watches is still the kernel's. A handover inverts that
+argument entirely: the stale pane becomes the only pane.
+
+**A fifth item, found by driving the two panes side by side rather than by any
+test: they disagree about the empty state.** With no active session
+`App::render_info_panel` returns *before* drawing its block, so the seat is a blank
+15% column with no border and no title — while a plugin pane always draws its frame,
+and this one then draws its System section (`with_no_session_the_plugin_still_shows_
+what_it_knows` is the test that says so). Every comparison case in
+`tests/bundled_info_panel.rs` publishes a session, so no oracle covers the
+boundary, and neither does a snapshot: the seven acceptance snapshots have no
+session, which is exactly why none of them contains this pane. So a handover
+silently changes what a sessionless launch looks like — a bordered Info pane with
+live CPU and RAM where there used to be a gap. That is a decision to take
+deliberately (draw nothing without a session, or accept the new empty state and
+record it), not a difference to discover afterwards.
+
+One more thing the handover carries, smaller than the file viewer's version of it
+(§16) but the same shape: `src/ui/info_panel.rs` also declares `SystemMetrics`,
+which `App::metrics_state` owns an instance of and the metrics collector fills. It
+is an *input* to the pane rather than the pane's model, so lifting it out is a
+relocation rather than a design — but it is why the deletion is not confined to
+`ui`, and it is worth knowing before starting rather than discovering at the
+compiler.
 
 ### The proposed proof cannot fail
 
@@ -965,6 +992,27 @@ The oracle that *can* fail already exists and is what the port relies on:
 against the retained pre-port renderer. The lesson is §6's, one level up: the
 audit method there was *read the pane's calls, not the node catalogue*; here it
 is *check that the proof could have failed, not that it passed*.
+
+**And that lesson had one more turn in it (ADR-42).** The paragraph above is true
+of today and false of the day the oracle is needed. `info_tree` lives in
+`src/ui/info_panel.rs` — one of the two things the handover deletes — so the
+comparison can fail *before* the handover and not *after* it. With its right-hand
+side gone the repair that compiles is to drop the assertion, leaving a test that
+the plugin renders without erroring: the same standard the vacuous snapshot proof
+offered, reached from the opposite direction. Applying §6's method to the oracle
+rather than to the pane is what found it: *check what the proof will be able to
+fail for once the change lands*, not what it can fail for now.
+
+So the oracle is now **recorded** as well as differential. Each case asserts the
+checked-in expectation equals the **native** tree — the edge that can only be
+established while the native builder is here, and the one that makes the baseline
+the pane's rather than the plugin's — alongside the unchanged plugin-equals-native
+assertion. When `info_tree` goes, the first assertion goes with it and the second
+is rewritten against the recording. The recording is a line-per-node rendering
+whose formatter destructures every view-tree variant and style field by name, so
+a field added to the IR cannot quietly leave the oracle; ADR-42 records why
+legibility rather than faithfulness was the property to optimise, and why the
+recording had to land in a change that deletes nothing.
 
 ## 15. The first handover attempted on a pane with keys: the tasks pane
 
