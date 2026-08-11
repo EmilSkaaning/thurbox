@@ -273,6 +273,39 @@ impl Action {
         }
     }
 
+    /// The actions whose job is to show or hide a **pane**, and which a plugin
+    /// pane may therefore declare as its own toggle (ADR-47).
+    ///
+    /// Curated rather than "every action", because the declaration exists for a
+    /// *handover*: a pane taking over the key its native counterpart already
+    /// answers. A pane bound to [`Action::QuitApp`] would toggle when the user
+    /// quits — nonsense the host would then have to honour.
+    ///
+    /// Three deliberate exclusions:
+    ///
+    /// - [`Action::TogglePluginPane`] already toggles every declared pane
+    ///   (ADR-28), so a pane binding it would flip twice and end where it
+    ///   started;
+    /// - [`Action::GlobalSearch`] opens a full-width band that is a mode rather
+    ///   than a pane, and no slot seats a plugin there (ADR-46);
+    /// - [`Action::OpenAutomations`], [`Action::ToggleHelp`],
+    ///   [`Action::OpenSettings`] and [`Action::TogglePerfHud`] open a modal or
+    ///   an overlay, not a pane in a seat.
+    ///
+    /// The automations pane consequently has no action to bind — it is
+    /// always-present and feature-gated — which is why the declaration is
+    /// optional rather than required.
+    pub fn pane_toggles() -> &'static [Action] {
+        &[
+            Action::ToggleInfoPanel,
+            Action::ToggleFileViewer,
+            Action::FocusTasks,
+            Action::ToggleSessionList,
+            Action::ToggleReview,
+            Action::ToggleShell,
+        ]
+    }
+
     /// The focus scope in which this action is active. Exhaustive match —
     /// adding a new `Action` variant without classifying it here is a compile
     /// error, which is the entire point of this method. Drives both the
@@ -1583,6 +1616,35 @@ fn same_chord(a: KeyChord, b: KeyChord) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every pane toggle is a real, **global** action a plugin pane may take over,
+    /// and the generic plugin-pane toggle is not among them.
+    ///
+    /// The generic one is excluded because it already reaches every declared pane
+    /// (ADR-28): a pane binding it would flip twice and end where it started, so
+    /// the manifest refuses it (ADR-47).
+    #[test]
+    fn pane_toggles_are_global_actions_and_exclude_the_generic_one() {
+        for action in Action::pane_toggles() {
+            assert!(
+                Action::all().contains(action),
+                "{action:?} is not an action at all"
+            );
+            assert_eq!(
+                action.context(),
+                KeyContext::Global,
+                "{action:?} would only fire in one pane, so a pane could not rely on it"
+            );
+        }
+        assert!(!Action::pane_toggles().contains(&Action::TogglePluginPane));
+        assert!(
+            !Action::pane_toggles().contains(&Action::GlobalSearch),
+            "the search strip is a mode rather than a pane"
+        );
+        let mut unique = Action::pane_toggles().to_vec();
+        unique.dedup();
+        assert_eq!(unique.len(), Action::pane_toggles().len());
+    }
 
     #[test]
     fn chord_parse_round_trip() {

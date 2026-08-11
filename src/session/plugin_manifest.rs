@@ -17,6 +17,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use super::keybindings::Action;
+use super::settings::FeatureFlag;
 use super::workspace_tree::RegionId;
 
 /// Plugin API version this build implements.
@@ -326,6 +328,25 @@ pub struct PaneDecl {
     /// the user's choice, so a plugin cannot force its pane back on screen.
     #[serde(default = "default_true")]
     pub default_visible: bool,
+    /// The kernel action that shows and hides this pane, if the manifest bound
+    /// one (ADR-47).
+    ///
+    /// Spelled the way `keybindings.json` spells an action, so an action has one
+    /// name wherever a user meets it. Validated against
+    /// [`Action::pane_toggles`] — a name that is no action, an action whose job
+    /// is not showing a pane, and the generic plugin-pane toggle are each
+    /// manifest errors.
+    ///
+    /// Absent, the pane is reachable through the generic toggle alone, which
+    /// stays the answer for a pane that is not replacing one of thurbox's own.
+    #[serde(default)]
+    pub toggle_action: Option<Action>,
+    /// The `[features]` switch that gates this pane, if the manifest named one.
+    ///
+    /// Spelled the way settings.toml spells the switch. Absent, no feature gates
+    /// the pane — which is right for a pane that is nobody's reproduction.
+    #[serde(default)]
+    pub feature: Option<FeatureFlag>,
 }
 
 /// serde default for [`PaneDecl::default_visible`] — a pane that says nothing
@@ -802,6 +823,21 @@ pub enum ManifestErrorKind {
     /// A spawn contribution is declared without the capability that permits
     /// it.
     SpawnWithoutCapability,
+    /// A pane binds a kernel action that is not one of the pane toggles.
+    PaneToggleAction {
+        /// The pane declaring it.
+        pane: String,
+        /// The action it named.
+        action: Action,
+    },
+    /// Two panes of one manifest bind the same kernel action, so one key would
+    /// flip both.
+    DuplicateToggleAction {
+        /// The action declared twice.
+        action: Action,
+        /// The second pane to declare it.
+        pane: String,
+    },
     /// A keybinding names a pane the manifest does not declare, so it would be
     /// scoped to nothing.
     KeybindingUnknownPane {
@@ -910,6 +946,25 @@ impl fmt::Display for ManifestError {
             ManifestErrorKind::SpawnWithoutCapability => write!(
                 f,
                 "a `[spawn]` contribution is declared without the `spawn` capability, so it would never be applied"
+            ),
+            // `{:?}` on a fieldless `Action` prints its variant name, which is
+            // exactly the name a manifest wrote (serde derives both from the
+            // variant), so the error quotes the offending value verbatim without
+            // a second naming table to keep in step.
+            ManifestErrorKind::PaneToggleAction { pane, action } => write!(
+                f,
+                "pane `{pane}` binds `{action:?}`, which is not one of the actions that show or \
+                 hide a pane ({})",
+                Action::pane_toggles()
+                    .iter()
+                    .map(|a| format!("{a:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            ManifestErrorKind::DuplicateToggleAction { action, pane } => write!(
+                f,
+                "pane `{pane}` binds `{action:?}`, which another pane of this manifest already \
+                 binds — one key cannot mean two of a plugin's own panes"
             ),
             ManifestErrorKind::KeybindingUnknownPane { binding, pane } => write!(
                 f,
@@ -1036,6 +1091,34 @@ impl PluginManifest {
         check_ids("cli verb", self.cli.iter().map(|c| c.name.as_str()))?;
 
         check_ids("pane", self.panes.iter().map(|p| p.id.as_str()))?;
+
+        // A pane's toggle is one of the kernel's *pane* actions and no other, and
+        // no two of this manifest's panes may claim the same one. Both are caught
+        // here rather than at a keypress that quietly flipped the wrong pane —
+        // or flipped one twice, which binding the generic plugin-pane toggle
+        // would do (it already reaches every declared pane).
+        // A `Vec` rather than a set because the accepted set has six members:
+        // `Action` is `Eq` but not `Ord`, and a linear scan over six is cheaper
+        // than a key derived for it.
+        let mut bound: Vec<Action> = Vec::new();
+        for pane in &self.panes {
+            let Some(action) = pane.toggle_action else {
+                continue;
+            };
+            if !Action::pane_toggles().contains(&action) {
+                return Err(ManifestErrorKind::PaneToggleAction {
+                    pane: pane.id.clone(),
+                    action,
+                });
+            }
+            if bound.contains(&action) {
+                return Err(ManifestErrorKind::DuplicateToggleAction {
+                    action,
+                    pane: pane.id.clone(),
+                });
+            }
+            bound.push(action);
+        }
         check_ids("command", self.commands.iter().map(|c| c.id.as_str()))?;
         check_ids("keybinding", self.keybindings.iter().map(|k| k.id.as_str()))?;
 
@@ -1563,6 +1646,139 @@ mod tests {
             "error should name the offending slot, got {:?}",
             e.kind
         );
+    }
+
+    /// A pane binding a kernel action, and the three ways that binding is refused.
+    #[test]
+    fn a_pane_may_bind_a_pane_toggle_action() {
+        let manifest = |action: &str| {
+            format!(
+                "name = \"demo\"\napi_version = 1\ncapabilities = [\"render\"]\n\
+                 [[panes]]\nid = \"board\"\ntoggle_action = \"{action}\"\n"
+            )
+        };
+        for action in Action::pane_toggles() {
+            let text = manifest(&format!("{action:?}"));
+            let m = parse(&text).unwrap_or_else(|e| panic!("`{action:?}` must parse: {e}"));
+            assert_eq!(m.panes[0].toggle_action, Some(*action));
+        }
+
+        // Not an action at all: serde closes the set and names the value.
+        let e = parse(&manifest("ToggleTheMoon")).expect_err("closed set");
+        assert!(
+            matches!(e.kind, ManifestErrorKind::Syntax(ref m) if m.contains("ToggleTheMoon")),
+            "error should name the unknown action, got {:?}",
+            e.kind
+        );
+
+        // A real action whose job is not showing a pane.
+        let e = parse(&manifest("QuitApp")).expect_err("not a pane toggle");
+        assert_eq!(
+            e.kind,
+            ManifestErrorKind::PaneToggleAction {
+                pane: "board".to_string(),
+                action: Action::QuitApp,
+            }
+        );
+        assert!(
+            e.to_string().contains("ToggleInfoPanel"),
+            "the error should list what is accepted: {e}"
+        );
+
+        // The generic plugin-pane toggle: binding it would flip the pane twice.
+        let e = parse(&manifest("TogglePluginPane")).expect_err("would double-toggle");
+        assert!(matches!(
+            e.kind,
+            ManifestErrorKind::PaneToggleAction {
+                action: Action::TogglePluginPane,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn two_panes_may_not_bind_one_action() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            capabilities = ["render"]
+            [[panes]]
+            id = "one"
+            toggle_action = "ToggleInfoPanel"
+            [[panes]]
+            id = "two"
+            toggle_action = "ToggleInfoPanel"
+        "#;
+        let e = parse(text).expect_err("one key cannot mean two panes");
+        assert_eq!(
+            e.kind,
+            ManifestErrorKind::DuplicateToggleAction {
+                action: Action::ToggleInfoPanel,
+                pane: "two".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn two_panes_may_bind_different_actions() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            capabilities = ["render"]
+            [[panes]]
+            id = "one"
+            toggle_action = "ToggleInfoPanel"
+            [[panes]]
+            id = "two"
+            toggle_action = "ToggleFileViewer"
+        "#;
+        let m = parse(text).expect("two panes, two keys");
+        assert_eq!(m.panes[0].toggle_action, Some(Action::ToggleInfoPanel));
+        assert_eq!(m.panes[1].toggle_action, Some(Action::ToggleFileViewer));
+    }
+
+    #[test]
+    fn a_pane_may_name_the_feature_that_gates_it() {
+        for flag in FeatureFlag::all() {
+            let text = format!(
+                "name = \"demo\"\napi_version = 1\ncapabilities = [\"render\"]\n\
+                 [[panes]]\nid = \"board\"\nfeature = \"{flag}\"\n"
+            );
+            let m = parse(&text).unwrap_or_else(|e| panic!("`{flag}` must parse: {e}"));
+            assert_eq!(m.panes[0].feature, Some(*flag));
+        }
+    }
+
+    #[test]
+    fn an_unknown_feature_is_rejected() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            capabilities = ["render"]
+            [[panes]]
+            id = "board"
+            feature = "telepathy"
+        "#;
+        let e = parse(text).expect_err("closed set");
+        assert!(
+            matches!(e.kind, ManifestErrorKind::Syntax(ref m) if m.contains("telepathy")),
+            "error should name the unknown switch, got {:?}",
+            e.kind
+        );
+    }
+
+    #[test]
+    fn a_pane_binds_and_gates_nothing_by_default() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            capabilities = ["render"]
+            [[panes]]
+            id = "board"
+        "#;
+        let m = parse(text).expect("both fields are optional");
+        assert_eq!(m.panes[0].toggle_action, None);
+        assert_eq!(m.panes[0].feature, None);
     }
 
     #[test]

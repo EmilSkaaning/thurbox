@@ -105,6 +105,7 @@ impl MotionState {
         panes: &[PluginPane],
         focused: Option<&PaneKey>,
         reduce_motion: bool,
+        features: &crate::session::settings::FeatureFlags,
     ) -> bool {
         let now = clock::now();
 
@@ -116,11 +117,12 @@ impl MotionState {
             .map(count_motions)
             .sum();
 
-        // Only visible panes are evaluated: a hidden pane's motion is neither
-        // drawn nor paid for, which is what makes an off-screen animation free.
+        // Only panes on screen are evaluated: a hidden pane's — or a pane whose
+        // declared `[features]` switch is off — motion is neither drawn nor paid
+        // for, which is what makes an off-screen animation free.
         let mut sites: Vec<(PaneKey, Vec<Site>)> = Vec::new();
         if !reduce_motion {
-            for pane in panes.iter().filter(|p| p.visible) {
+            for pane in panes.iter().filter(|p| p.is_shown(features)) {
                 let pane_key = PaneKey {
                     plugin: pane.plugin.clone(),
                     pane: pane.id.clone(),
@@ -306,6 +308,29 @@ fn count_motions(node: &ViewNode) -> u64 {
 }
 
 #[cfg(test)]
+impl MotionState {
+    /// [`Self::sync`] with every `[features]` switch on.
+    ///
+    /// The cases below are about frames, leases and rates; the feature gate has
+    /// its own tests in `plugin::pane` and in the acceptance harness, and
+    /// spelling `FeatureFlags::default()` at twenty call sites would bury what
+    /// each case is actually asserting.
+    fn sync_ungated(
+        &mut self,
+        panes: &[PluginPane],
+        focused: Option<&PaneKey>,
+        reduce_motion: bool,
+    ) -> bool {
+        self.sync(
+            panes,
+            focused,
+            reduce_motion,
+            &crate::session::settings::FeatureFlags::default(),
+        )
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::session::plugin_manifest::PaneSlot;
@@ -334,14 +359,14 @@ mod tests {
     fn an_identical_re_push_does_not_restart_the_animation() {
         let mut m = MotionState::default();
         let panes = vec![pane_with(motion_node("spinner", 8, true, 4), true)];
-        m.sync(&panes, None, false);
+        m.sync_ungated(&panes, None, false);
         assert_eq!(m.table_for("demo", "board").unwrap().frame("spinner"), 0);
 
         clock::advance(Duration::from_millis(250));
         // The same tree, pushed again — exactly what a plugin re-rendering on
         // unrelated state does.
         let repushed = vec![pane_with(motion_node("spinner", 8, true, 4), true)];
-        m.sync(&repushed, None, false);
+        m.sync_ungated(&repushed, None, false);
         assert_eq!(
             m.table_for("demo", "board").unwrap().frame("spinner"),
             2,
@@ -352,13 +377,13 @@ mod tests {
     #[test]
     fn changing_the_declaration_restarts_the_animation() {
         let mut m = MotionState::default();
-        m.sync(
+        m.sync_ungated(
             &[pane_with(motion_node("s", 8, true, 4), true)],
             None,
             false,
         );
         clock::advance(Duration::from_millis(250));
-        m.sync(
+        m.sync_ungated(
             &[pane_with(motion_node("s", 8, true, 4), true)],
             None,
             false,
@@ -366,7 +391,7 @@ mod tests {
         assert_eq!(m.table_for("demo", "board").unwrap().frame("s"), 2);
 
         // A different rate is a different animation.
-        m.sync(
+        m.sync_ungated(
             &[pane_with(motion_node("s", 4, true, 4), true)],
             None,
             false,
@@ -377,13 +402,13 @@ mod tests {
     #[test]
     fn changing_the_node_identity_restarts_the_animation() {
         let mut m = MotionState::default();
-        m.sync(
+        m.sync_ungated(
             &[pane_with(motion_node("a", 8, true, 4), true)],
             None,
             false,
         );
         clock::advance(Duration::from_millis(250));
-        m.sync(
+        m.sync_ungated(
             &[pane_with(motion_node("b", 8, true, 4), true)],
             None,
             false,
@@ -397,7 +422,7 @@ mod tests {
     #[test]
     fn hiding_a_pane_drops_its_lease_and_its_state() {
         let mut m = MotionState::default();
-        m.sync(
+        m.sync_ungated(
             &[pane_with(motion_node("s", 8, true, 4), true)],
             None,
             false,
@@ -405,7 +430,7 @@ mod tests {
         assert!(m.has_lease());
         assert_eq!(m.tracked(), 1);
 
-        m.sync(
+        m.sync_ungated(
             &[pane_with(motion_node("s", 8, true, 4), false)],
             None,
             false,
@@ -417,14 +442,14 @@ mod tests {
     #[test]
     fn a_tree_without_motion_drops_the_lease() {
         let mut m = MotionState::default();
-        m.sync(
+        m.sync_ungated(
             &[pane_with(motion_node("s", 8, true, 4), true)],
             None,
             false,
         );
         assert!(m.has_lease());
 
-        m.sync(&[pane_with(ViewNode::text("still"), true)], None, false);
+        m.sync_ungated(&[pane_with(ViewNode::text("still"), true)], None, false);
         assert!(!m.has_lease());
         assert_eq!(m.tracked(), 0);
     }
@@ -433,12 +458,12 @@ mod tests {
     fn a_finished_non_repeating_cycle_drops_the_lease_but_keeps_its_frame() {
         let mut m = MotionState::default();
         let panes = vec![pane_with(motion_node("once", 8, false, 3), true)];
-        m.sync(&panes, None, false);
+        m.sync_ungated(&panes, None, false);
         let granted = m.counters().granted;
         assert_eq!(granted, 1);
 
         clock::advance(Duration::from_secs(5));
-        m.sync(&panes, None, false);
+        m.sync_ungated(&panes, None, false);
         assert_eq!(
             m.table_for("demo", "board").unwrap().frame("once"),
             2,
@@ -446,7 +471,7 @@ mod tests {
         );
         // No new lease is granted for a finished animation, however many more
         // syncs run.
-        m.sync(&panes, None, false);
+        m.sync_ungated(&panes, None, false);
         assert_eq!(m.counters().granted, granted);
     }
 
@@ -454,7 +479,7 @@ mod tests {
     fn repeated_pushes_do_not_grow_the_state() {
         let mut m = MotionState::default();
         for _ in 0..50 {
-            m.sync(
+            m.sync_ungated(
                 &[pane_with(motion_node("s", 8, true, 4), true)],
                 None,
                 false,
@@ -467,9 +492,9 @@ mod tests {
     fn reduced_motion_renders_frame_zero_and_grants_nothing() {
         let mut m = MotionState::default();
         let panes = vec![pane_with(motion_node("s", 8, true, 4), true)];
-        m.sync(&panes, None, true);
+        m.sync_ungated(&panes, None, true);
         clock::advance(Duration::from_secs(1));
-        let changed = m.sync(&panes, None, true);
+        let changed = m.sync_ungated(&panes, None, true);
 
         assert!(!changed, "a suppressed motion never repaints");
         assert!(!m.has_lease());
@@ -486,14 +511,20 @@ mod tests {
     fn a_frame_table_changes_only_when_the_frame_does() {
         let mut m = MotionState::default();
         let panes = vec![pane_with(motion_node("s", 8, true, 4), true)];
-        assert!(m.sync(&panes, None, false), "the first table is a change");
+        assert!(
+            m.sync_ungated(&panes, None, false),
+            "the first table is a change"
+        );
 
         // 8 fps is one frame per 125 ms; a 10 ms tick must not repaint.
         clock::advance(Duration::from_millis(10));
-        assert!(!m.sync(&panes, None, false), "same frame, no repaint");
+        assert!(
+            !m.sync_ungated(&panes, None, false),
+            "same frame, no repaint"
+        );
 
         clock::advance(Duration::from_millis(120));
-        assert!(m.sync(&panes, None, false), "the frame moved");
+        assert!(m.sync_ungated(&panes, None, false), "the frame moved");
     }
 
     #[test]
@@ -504,7 +535,7 @@ mod tests {
             motion_node("b", 8, true, 2),
             motion_node("c", 8, true, 2),
         ]);
-        m.sync(&[pane_with(tree, true)], None, false);
+        m.sync_ungated(&[pane_with(tree, true)], None, false);
         assert_eq!(m.tracked(), 3, "three nodes");
         assert_eq!(m.counters().granted, 1, "one lease");
     }
@@ -515,7 +546,7 @@ mod tests {
         let panes = vec![pane_with(motion_node("s", 8, true, 4), false)];
         for _ in 0..20 {
             clock::advance(Duration::from_millis(200));
-            assert!(!m.sync(&panes, None, false));
+            assert!(!m.sync_ungated(&panes, None, false));
         }
         assert_eq!(m.counters().frames, 0);
         assert!(m.counters().denied > 0, "and says why");

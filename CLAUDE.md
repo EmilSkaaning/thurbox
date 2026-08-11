@@ -1141,6 +1141,20 @@ plugin is never told its rect. The central seat carries **no kernel chrome** —
 on screen. No slot reaches the header, the footer, the global-search strip, the
 status band, or the file-viewer column.
 
+A pane may also declare **the kernel action that toggles it** and **the
+`[features]` switch that gates it** (ADR-47): `toggle_action = "ToggleInfoPanel"`
+(spelled as `keybindings.json` spells an action, validated against
+`Action::pane_toggles()` — the six whose job is showing or hiding a pane; the
+generic `TogglePluginPane`, `GlobalSearch` and the modal openers are refused, and
+two panes of one manifest may not bind the same action) and `feature = "info_panel"`
+(validated against `session::settings::FeatureFlag`, the `[features]` keys). Firing a
+bound action flips that pane **and** does what it always did to the kernel's own pane
+for the seat, so pressing it twice returns everything to where it started. A pane
+whose switch is off is not shown, not seated, not focusable, not rendered (it is
+published hidden, so its VM is not entered) and not offered by `F10` — while its
+stored visibility survives, so the switch coming back on restores what the user had.
+No bundled plugin declares either field yet.
+
 Pane **visibility is kernel
 state**: the manifest seeds it (`default_visible`), `F10`
 (rebindable `TogglePluginPane`) decides it, and the choice is persisted per

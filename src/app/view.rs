@@ -586,10 +586,11 @@ impl App {
             painted.push((pane.plugin.clone(), pane.id.clone(), rect, rows));
         }
 
+        let features = self.features;
         let column = self
             .plugin_panes
             .iter()
-            .filter(|p| p.visible && p.slot == PaneSlot::Right);
+            .filter(|p| p.is_shown(&features) && p.slot == PaneSlot::Right);
         for (pane, &rect) in column.zip(&areas.plugin_panes) {
             let rows = Self::paint_plugin_pane(frame, pane, rect, &self.motion);
             painted.push((pane.plugin.clone(), pane.id.clone(), rect, rows));

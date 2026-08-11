@@ -1098,6 +1098,52 @@ impl App {
     }
 
     pub(super) fn dispatch_action(&mut self, action: crate::session::Action) -> bool {
+        // A plugin pane that declared this action answers it **as well as** the
+        // kernel's own pane for that seat (ADR-47): both occupants flip, so the
+        // key returns to where it started and hiding the plugin pane hands the
+        // seat back. Suppressing the kernel's half would read like the handover,
+        // but while both panes exist it would leave the native one unreachable by
+        // any key. Run before the dispatch chain so a pane answers its action even
+        // when the kernel pane's own `[features]` switch is off — each occupant is
+        // gated by the switch it named.
+        let answered = self.toggle_panes_bound_to(action);
+        self.dispatch_kernel_action(action) || answered
+    }
+
+    /// Flip every plugin pane that declared `action` as its toggle, reporting
+    /// whether any did (so the key is consumed even if no kernel arm handles it).
+    ///
+    /// Writes through [`App::set_plugin_pane_visible`], the same path the picker
+    /// and the generated `<plugin>.<pane>.hide` command use, so a stored choice is
+    /// indistinguishable afterwards whichever route made it. A pane whose declared
+    /// `[features]` switch is off is skipped: it is not a pane the user can show.
+    #[cfg(feature = "plugins")]
+    fn toggle_panes_bound_to(&mut self, action: crate::session::Action) -> bool {
+        let features = self.features;
+        // Collected first because the write borrows `self` mutably. Several panes
+        // may declare one action — across plugins the host cannot arbitrate, so
+        // each flips.
+        let targets: Vec<(String, String, bool)> = self
+            .plugin_panes
+            .iter()
+            .filter(|p| p.toggle_action == Some(action) && p.is_enabled(&features))
+            .map(|p| (p.plugin.clone(), p.id.clone(), p.visible))
+            .collect();
+        let answered = !targets.is_empty();
+        for (plugin, pane, visible) in targets {
+            self.set_plugin_pane_visible(&plugin, &pane, !visible);
+        }
+        answered
+    }
+
+    /// Without the plugin feature no pane can be bound to an action.
+    #[cfg(not(feature = "plugins"))]
+    fn toggle_panes_bound_to(&mut self, _action: crate::session::Action) -> bool {
+        false
+    }
+
+    /// The kernel's own dispatch for `action`, in priority order.
+    fn dispatch_kernel_action(&mut self, action: crate::session::Action) -> bool {
         if let Some(consumed) = self.dispatch_app_action(action) {
             return consumed;
         }

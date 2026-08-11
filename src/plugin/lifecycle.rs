@@ -433,6 +433,11 @@ impl PluginHost {
                         p.default_visible,
                     );
                     pane.accepts_input = accepts_input;
+                    // Both are manifest data the kernel acts on, not powers the
+                    // plugin exercises: the action the pane answers, and the
+                    // `[features]` switch that gates it (ADR-47).
+                    pane.toggle_action = p.toggle_action;
+                    pane.feature = p.feature;
                     pane
                 })
             })

@@ -2673,3 +2673,81 @@ would be a seat a plugin could name and not be drawn in. The centre's missing ch
 and the untouched focus story are recorded as gaps, not absorbed: a `center` pane
 today loses the tab strip, and a seated pane is still focused as
 `InputFocus::PluginPane`.
+
+## ADR-47: A pane declares the action that toggles it and the flag that gates it
+
+**Context.** `docs/PHASE4-PANE-READINESS.md` §14's second row. A native pane answers
+a kernel action and rides a kernel feature switch: `Action::ToggleInfoPanel` flips
+`App::show_info_panel`, and `[features] info_panel = false` hides the pane and blocks
+the chord. A plugin pane had neither — its visibility was `TogglePluginPane` (`F10`,
+one action for every pane, ADR-28) plus a stored per-pane choice, and no `[features]`
+flag reached it at all. ADR-46 gave a pane its seat; a seat whose key and switch are
+gone is a pane in the right place that the interface no longer controls.
+
+The declaration is also the mechanism by which the `[features]` flags eventually
+retire: a flag whose only consumer is a pane can move into that pane's manifest.
+
+**Decision.** Two optional `[[panes]]` fields, each validated against a closed set.
+
+1. **`toggle_action`** names the kernel action that shows and hides the pane,
+   spelled the way `keybindings.json` spells an action (`"ToggleInfoPanel"`) — one
+   name for one action wherever a user meets it, rather than a second kebab-case
+   vocabulary to keep in step.
+2. **The set is curated, not "any action".** `Action::pane_toggles()` is the six
+   whose *job* is showing or hiding a pane. A name that is no action is a serde
+   error; a real action that is not one of the six is a manifest error listing
+   them. Three exclusions carry reasons: `TogglePluginPane` (already reaches every
+   pane, so binding it would flip a pane twice), `GlobalSearch` (a mode in a band no
+   slot seats), and the modal/overlay openers (`OpenAutomations`, `ToggleHelp`,
+   `OpenSettings`, `TogglePerfHud`). Two panes of one manifest may not bind the same
+   action; across plugins both flip, because the host cannot arbitrate between
+   manifests written independently.
+3. **`feature`** names the `[features]` switch that gates the pane, spelled as
+   settings.toml spells it, closed by a new `session::settings::FeatureFlag` with
+   `FeatureFlags::enabled` as the single lookup. Every flag is accepted — unlike the
+   action set there is no nonsense case — and an exhaustiveness test writes every
+   `FeatureFlag::all()` key as `false` and requires every `FeatureFlags` field to be
+   false, so a field with no member is a failing test rather than a switch no
+   manifest could name.
+4. **Both occupants toggle.** `App::dispatch_action` flips every pane bound to the
+   action and then runs the kernel's own dispatch. Pressing the key twice returns
+   every occupant to where it started, and the kernel never loses track of its own
+   pane's state — ADR-46's reversibility rule, extended to the key.
+5. **A gated-off pane is not a pane**: not shown, no seat, no column, not
+   focusable, not rendered (published hidden, so its VM is not entered), and not
+   offered by `F10` or its picker. Its **stored visibility survives**, because the
+   switch answers "is this available" and the stored choice answers "does the user
+   want it" — collapsing them would erase a choice when a flag went off and back on.
+   The switch is read live, from `App::features`, so the settings panel and the
+   mtime poll both apply immediately.
+
+**Rejected alternatives.**
+
+- *The plugin steals the action* (the kernel's half suppressed while a pane declares
+  it). It is what the end state looks like, and while both panes exist it would
+  leave the native pane unreachable by any key — a third-party plugin declaring
+  `ToggleInfoPanel` would remove the user's info panel with no way back.
+- *A free-form action string resolved at dispatch.* A typo would be a key that
+  silently does nothing, the failure every other manifest field is validated to
+  prevent.
+- *A kebab-case action vocabulary* matching `slot` and `capabilities`. Two names per
+  action, and the one place a user compares them is where the mismatch would show.
+- *Accept any `Action`.* A pane bound to `QuitApp` would toggle when the user quits;
+  the field exists for a handover, not for arbitrary key adoption.
+- *Hook each of the six actions' handlers.* Six edits that must each remember to do
+  the same thing, versus one funnel every action already passes through.
+- *Resolve the feature gate when the pane set is published.* `[features]` is
+  live-reloadable, so a baked-in value would be stale until the next plugin reload.
+- *Collapse the gate into `visible`.* It would silently erase the user's choice the
+  moment a flag went off.
+- *Declare either field on a bundled plugin.* A bundled reproduction that answered
+  `F2` would toggle **both** panes for every user who pressed it — a behaviour
+  change in a change whose point is that nothing changes yet. The fields ship
+  exercised by tests, ready for the handover that needs them.
+
+**Consequences.** §14's five-row table is down to one open row, the render latency.
+A handed-over pane can now answer the key its native counterpart answers and be
+hidden by the switch its native counterpart rides, which is what makes deleting that
+renderer a change a user does not notice. `Action::pane_toggles()` is also the list a
+later change edits when a new kernel pane gains a toggle — forgetting it means the
+pane cannot be handed over, not that something breaks silently.

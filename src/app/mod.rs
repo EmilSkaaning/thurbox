@@ -7950,6 +7950,7 @@ impl App {
             &self.plugin_panes,
             focused.as_ref(),
             self.motion_settings.reduce_motion,
+            &self.features,
         );
         let after = self.motion.counters();
         let perf = &mut self.metrics.perf;
@@ -8020,10 +8021,11 @@ impl App {
     /// value in dozens of places for a distinction only the host cares about.
     #[cfg(feature = "plugins")]
     pub(crate) fn focus_plugin_pane(&mut self, plugin: &str, pane: &str) {
+        let features = self.features;
         let focusable = self
             .plugin_panes
             .iter()
-            .any(|p| p.plugin == plugin && p.id == pane && p.is_focusable());
+            .any(|p| p.plugin == plugin && p.id == pane && p.is_focusable_with(&features));
         if !focusable {
             // A pane whose plugin never declared `input` is not a focus target,
             // exactly as focus navigation already skips it.
@@ -8102,17 +8104,35 @@ impl App {
     /// question with one answer.
     #[cfg(feature = "plugins")]
     pub(crate) fn toggle_plugin_pane(&mut self) {
-        match self.plugin_panes.len() {
-            // Nothing declared a pane; silently a no-op rather than an error,
-            // since the key is bound whether or not a plugin is installed.
+        // A pane whose declared `[features]` switch is off is not a pane the user
+        // can put on screen, so it is neither the one this toggles nor a row in
+        // the picker (ADR-47).
+        let available = self.available_plugin_panes();
+        match available.len() {
+            // Nothing declared a pane the user could show; silently a no-op rather
+            // than an error, since the key is bound whether or not a plugin is
+            // installed.
             0 => {}
             1 => {
-                let pane = &self.plugin_panes[0];
-                let (plugin, id, visible) = (pane.plugin.clone(), pane.id.clone(), pane.visible);
+                let (plugin, id, visible) = available[0].clone();
                 self.set_plugin_pane_visible(&plugin, &id, !visible);
             }
             _ => self.open_plugin_panes_picker(),
         }
+    }
+
+    /// Every pane a user could show right now, as `(plugin, pane, visible)`.
+    ///
+    /// Cloned rather than borrowed because both callers go on to mutate — one
+    /// writes a visibility, the other builds the picker's rows.
+    #[cfg(feature = "plugins")]
+    fn available_plugin_panes(&self) -> Vec<(String, String, bool)> {
+        let features = self.features;
+        self.plugin_panes
+            .iter()
+            .filter(|p| p.is_enabled(&features))
+            .map(|p| (p.plugin.clone(), p.id.clone(), p.visible))
+            .collect()
     }
 
     /// Show or hide one pane, addressed as everything else addresses a pane.
@@ -8154,9 +8174,13 @@ impl App {
     /// Open the picker listing every declared pane and whether it is on screen.
     #[cfg(feature = "plugins")]
     pub(crate) fn open_plugin_panes_picker(&mut self) {
+        let features = self.features;
         let rows = self
             .plugin_panes
             .iter()
+            // A gated-off pane is not listed: a row the user could tick that would
+            // then not appear would be a lie about what the switch means.
+            .filter(|pane| pane.is_enabled(&features))
             .map(|pane| modals::PluginPaneRow {
                 plugin: pane.plugin.clone(),
                 id: pane.id.clone(),
@@ -8211,9 +8235,13 @@ impl App {
         if !pv::panes_present() {
             return;
         }
+        // "Hidden" is the whole not-on-screen set, so a pane whose declared
+        // `[features]` switch is off is published hidden too and its VM is never
+        // entered for a tree nobody can see (ADR-47).
+        let features = self.features;
         let mut count = 0;
         let mut same = true;
-        for pane in self.plugin_panes.iter().filter(|p| !p.visible) {
+        for pane in self.plugin_panes.iter().filter(|p| !p.is_shown(&features)) {
             match self.published_hidden_panes.get(count) {
                 Some(h) if h.plugin == pane.plugin && h.pane == pane.id => {}
                 _ => same = false,
@@ -8223,12 +8251,13 @@ impl App {
         if same && count == self.published_hidden_panes.len() {
             return;
         }
-        self.published_hidden_panes = self
+        let hidden: Vec<pv::HiddenPane> = self
             .plugin_panes
             .iter()
-            .filter(|p| !p.visible)
+            .filter(|p| !p.is_shown(&features))
             .map(|p| pv::HiddenPane::new(&p.plugin, &p.id))
             .collect();
+        self.published_hidden_panes = hidden;
         pv::publish_hidden(self.published_hidden_panes.clone());
         self.metrics.bump(|p| &mut p.pane_visibility_publishes);
     }
@@ -8244,16 +8273,19 @@ impl App {
     /// would otherwise send a key to a pane that is not on screen.
     #[cfg(feature = "plugins")]
     pub(crate) fn focusable_plugin_pane(&self) -> Option<&crate::plugin::PluginPane> {
+        let features = self.features;
         if let Some((plugin, pane)) = &self.focused_plugin_pane {
             if let Some(p) = self
                 .plugin_panes
                 .iter()
-                .find(|p| &p.plugin == plugin && &p.id == pane && p.is_focusable())
+                .find(|p| &p.plugin == plugin && &p.id == pane && p.is_focusable_with(&features))
             {
                 return Some(p);
             }
         }
-        self.plugin_panes.iter().find(|p| p.is_focusable())
+        self.plugin_panes
+            .iter()
+            .find(|p| p.is_focusable_with(&features))
     }
 
     /// How many plugin panes the right column should seat.
@@ -8269,9 +8301,10 @@ impl App {
     /// of this column's occupants (ADR-46).
     #[cfg(feature = "plugins")]
     pub(crate) fn visible_plugin_panes(&self) -> usize {
+        let features = self.features;
         self.plugin_panes
             .iter()
-            .filter(|p| p.visible && p.slot == PaneSlot::Right)
+            .filter(|p| p.is_shown(&features) && p.slot == PaneSlot::Right)
             .count()
     }
 
@@ -8294,9 +8327,10 @@ impl App {
     /// cannot fit: a second claimant is a silent no-show rather than an overdraw.
     #[cfg(feature = "plugins")]
     pub(crate) fn plugin_seat(&self, slot: PaneSlot) -> Option<&crate::plugin::PluginPane> {
+        let features = self.features;
         self.plugin_panes
             .iter()
-            .find(|p| p.visible && p.slot == slot)
+            .find(|p| p.is_shown(&features) && p.slot == slot)
     }
 
     /// Whether a plugin pane has taken `slot`, so the kernel's own pane for that

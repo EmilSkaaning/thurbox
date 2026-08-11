@@ -9,7 +9,9 @@
 //! Only a pane that has *never* rendered shows a loading state, and only one
 //! whose very first render failed shows a bare error.
 
+use crate::session::keybindings::Action;
 use crate::session::plugin_manifest::PaneSlot;
+use crate::session::settings::{FeatureFlag, FeatureFlags};
 use crate::session::view_tree::ViewNode;
 
 /// A plugin pane and everything needed to draw it.
@@ -33,6 +35,17 @@ pub struct PluginPane {
     /// Carried on the pane so the UI can decide focusability without holding
     /// the host — the host publishes it alongside the pane set.
     pub accepts_input: bool,
+    /// The kernel action the manifest bound to this pane, if any (ADR-47).
+    ///
+    /// Firing it flips [`Self::visible`], alongside whatever the kernel's own
+    /// pane for that seat already does.
+    pub toggle_action: Option<Action>,
+    /// The `[features]` switch the manifest said gates this pane, if any.
+    ///
+    /// Distinct from [`Self::visible`] on purpose: the switch answers whether the
+    /// pane is *available* and the stored choice answers whether the user wants
+    /// it, so a switch going off and back on cannot erase a choice.
+    pub feature: Option<FeatureFlag>,
     /// What it is currently showing.
     pub presentation: PanePresentation,
 }
@@ -47,14 +60,35 @@ impl PluginPane {
             slot,
             visible,
             accepts_input: false,
+            toggle_action: None,
+            feature: None,
             presentation: PanePresentation::Loading,
         }
     }
 
+    /// Whether the feature switch this pane declared is on — `true` when it
+    /// declared none.
+    pub fn is_enabled(&self, features: &FeatureFlags) -> bool {
+        self.feature.is_none_or(|f| features.enabled(f))
+    }
+
+    /// Whether this pane is on screen: the user wants it **and** its declared
+    /// feature switch is on.
+    ///
+    /// The single predicate every read of visibility goes through, so a gated-off
+    /// pane cannot be drawn at one call site and skipped at another.
+    pub fn is_shown(&self, features: &FeatureFlags) -> bool {
+        self.visible && self.is_enabled(features)
+    }
+
     /// Whether this pane can take focus: it must be on screen, and its plugin
     /// must have asked for input.
-    pub fn is_focusable(&self) -> bool {
-        self.visible && self.accepts_input
+    ///
+    /// Takes the flags rather than sitting beside a flag-free variant: two
+    /// predicates for one question is how a gate gets forgotten at one of its
+    /// call sites.
+    pub fn is_focusable_with(&self, features: &FeatureFlags) -> bool {
+        self.is_shown(features) && self.accepts_input
     }
 
     /// Apply a render result.
@@ -128,6 +162,48 @@ mod tests {
 
     fn tree(text: &str) -> ViewNode {
         ViewNode::list(vec![ViewNode::text(text)])
+    }
+
+    /// A pane with no declared switch is always available, so the gate costs
+    /// nothing for the panes that do not use it.
+    #[test]
+    fn a_pane_with_no_feature_is_always_enabled() {
+        let p = pane();
+        let off = FeatureFlags {
+            info_panel: false,
+            ..FeatureFlags::default()
+        };
+        assert!(p.is_enabled(&off));
+        assert!(p.is_shown(&off));
+    }
+
+    #[test]
+    fn a_declared_switch_gates_the_pane() {
+        let mut p = pane();
+        p.feature = Some(FeatureFlag::InfoPanel);
+        p.accepts_input = true;
+        assert!(p.is_shown(&FeatureFlags::default()));
+        assert!(p.is_focusable_with(&FeatureFlags::default()));
+
+        let off = FeatureFlags {
+            info_panel: false,
+            ..FeatureFlags::default()
+        };
+        assert!(!p.is_enabled(&off));
+        assert!(!p.is_shown(&off), "a gated-off pane is not on screen");
+        assert!(!p.is_focusable_with(&off), "nor focusable");
+
+        // And the user's own choice is untouched, so the switch coming back on
+        // restores what they had rather than a default.
+        assert!(p.visible);
+    }
+
+    #[test]
+    fn a_hidden_pane_is_not_shown_whatever_its_switch() {
+        let mut p = PluginPane::loading("demo", "board", "Board", PaneSlot::Right, false);
+        p.accepts_input = true;
+        assert!(!p.is_shown(&FeatureFlags::default()));
+        assert!(!p.is_focusable_with(&FeatureFlags::default()));
     }
 
     #[test]

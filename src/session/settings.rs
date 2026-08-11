@@ -8,6 +8,7 @@
 //! [`global`] because the consumers span modules that must not know about each
 //! other (terminal wiring, layout, storage retention).
 
+use std::fmt;
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -120,6 +121,116 @@ pub struct FeatureFlags {
     /// disk. The new version applies on the next launch.
     #[serde(default = "default_true")]
     pub auto_update: bool,
+}
+
+/// One `[features]` switch, addressable as a value.
+///
+/// Exists so something other than Rust code can name a feature switch: a plugin
+/// pane declares the flag that gates it (ADR-47), and the vocabulary has to be
+/// closed so an unknown name is a manifest error rather than a pane that is
+/// either never shown or never gated. The wire names are settings.toml's own
+/// keys, so a manifest and the settings file spell a switch alike.
+///
+/// Every field of [`FeatureFlags`] has a member here, guarded by
+/// `every_feature_flag_names_a_field` rather than by review: a field with no
+/// member would be a switch no manifest could name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureFlag {
+    /// `[features] tasks`.
+    Tasks,
+    /// `[features] automations`.
+    Automations,
+    /// `[features] file_viewer`.
+    FileViewer,
+    /// `[features] global_search`.
+    GlobalSearch,
+    /// `[features] info_panel`.
+    InfoPanel,
+    /// `[features] shell_pane`.
+    ShellPane,
+    /// `[features] code_review`.
+    CodeReview,
+    /// `[features] perf_hud`.
+    PerfHud,
+    /// `[features] mouse`.
+    Mouse,
+    /// `[features] notifications`.
+    Notifications,
+    /// `[features] soft_delete`.
+    SoftDelete,
+    /// `[features] version_check`.
+    VersionCheck,
+    /// `[features] auto_update`.
+    AutoUpdate,
+}
+
+impl FeatureFlag {
+    /// The settings.toml key, which is also the wire name a manifest uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FeatureFlag::Tasks => "tasks",
+            FeatureFlag::Automations => "automations",
+            FeatureFlag::FileViewer => "file_viewer",
+            FeatureFlag::GlobalSearch => "global_search",
+            FeatureFlag::InfoPanel => "info_panel",
+            FeatureFlag::ShellPane => "shell_pane",
+            FeatureFlag::CodeReview => "code_review",
+            FeatureFlag::PerfHud => "perf_hud",
+            FeatureFlag::Mouse => "mouse",
+            FeatureFlag::Notifications => "notifications",
+            FeatureFlag::SoftDelete => "soft_delete",
+            FeatureFlag::VersionCheck => "version_check",
+            FeatureFlag::AutoUpdate => "auto_update",
+        }
+    }
+
+    /// Every switch the host defines.
+    pub fn all() -> &'static [FeatureFlag] {
+        &[
+            FeatureFlag::Tasks,
+            FeatureFlag::Automations,
+            FeatureFlag::FileViewer,
+            FeatureFlag::GlobalSearch,
+            FeatureFlag::InfoPanel,
+            FeatureFlag::ShellPane,
+            FeatureFlag::CodeReview,
+            FeatureFlag::PerfHud,
+            FeatureFlag::Mouse,
+            FeatureFlag::Notifications,
+            FeatureFlag::SoftDelete,
+            FeatureFlag::VersionCheck,
+            FeatureFlag::AutoUpdate,
+        ]
+    }
+}
+
+impl fmt::Display for FeatureFlag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FeatureFlags {
+    /// Whether `flag` is on. The single lookup from a named switch to its value,
+    /// so a caller that holds a [`FeatureFlag`] never re-derives the mapping.
+    pub fn enabled(&self, flag: FeatureFlag) -> bool {
+        match flag {
+            FeatureFlag::Tasks => self.tasks,
+            FeatureFlag::Automations => self.automations,
+            FeatureFlag::FileViewer => self.file_viewer,
+            FeatureFlag::GlobalSearch => self.global_search,
+            FeatureFlag::InfoPanel => self.info_panel,
+            FeatureFlag::ShellPane => self.shell_pane,
+            FeatureFlag::CodeReview => self.code_review,
+            FeatureFlag::PerfHud => self.perf_hud,
+            FeatureFlag::Mouse => self.mouse,
+            FeatureFlag::Notifications => self.notifications,
+            FeatureFlag::SoftDelete => self.soft_delete,
+            FeatureFlag::VersionCheck => self.version_check,
+            FeatureFlag::AutoUpdate => self.auto_update,
+        }
+    }
 }
 
 /// Which OS-notification delivery backend to use (`[notifications] backend`).
@@ -397,6 +508,70 @@ mod tests {
     fn type_mismatch_is_rejected() {
         let err = toml::from_str::<Settings>("scrollback_lines = \"many\"").unwrap_err();
         assert!(err.to_string().contains("scrollback_lines"));
+    }
+
+    /// The enum and the struct must not drift: a field with no [`FeatureFlag`]
+    /// member is a switch no manifest could name, and a member naming no field
+    /// would not parse. Both directions fall out of one round trip — write every
+    /// member's key as `false` and every field must be false.
+    #[test]
+    fn every_feature_flag_names_a_field() {
+        let body: String = FeatureFlag::all()
+            .iter()
+            .map(|f| format!("{f} = false\n"))
+            .collect();
+        let s: Settings = toml::from_str(&format!("[features]\n{body}")).unwrap();
+        for flag in FeatureFlag::all() {
+            assert!(
+                !s.features.enabled(*flag),
+                "`{flag}` did not reach its field"
+            );
+        }
+        // The other direction: no field was left out of the enum, so nothing
+        // stayed at its `true` default.
+        assert_eq!(
+            s.features,
+            FeatureFlags {
+                tasks: false,
+                automations: false,
+                file_viewer: false,
+                global_search: false,
+                info_panel: false,
+                shell_pane: false,
+                code_review: false,
+                perf_hud: false,
+                mouse: false,
+                notifications: false,
+                soft_delete: false,
+                version_check: false,
+                auto_update: false,
+            },
+            "a `[features]` field has no FeatureFlag member, so its key was never written"
+        );
+    }
+
+    #[test]
+    fn one_flag_off_leaves_the_others_on() {
+        for flag in FeatureFlag::all() {
+            let s: Settings = toml::from_str(&format!("[features]\n{flag} = false")).unwrap();
+            for other in FeatureFlag::all() {
+                assert_eq!(
+                    s.features.enabled(*other),
+                    other != flag,
+                    "`{flag} = false` also changed `{other}`"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_feature_flag_name_does_not_deserialize() {
+        assert!(serde_json::from_str::<FeatureFlag>("\"telepathy\"").is_err());
+        // And the wire names are settings.toml's own keys.
+        assert_eq!(
+            serde_json::from_str::<FeatureFlag>("\"info_panel\"").unwrap(),
+            FeatureFlag::InfoPanel
+        );
     }
 
     #[test]

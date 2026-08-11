@@ -947,14 +947,14 @@ after the handover, or even in the same change as it. The fifth is not a host ga
 at all but a behavioural difference between the two panes, and it is stated after
 the table because nothing in the host would have surfaced it.
 
-**Two of the rows are now closed**, and not by the handover they were written for:
-the seat (ADR-46, §21) and the oracle (ADR-42). What is left of the table is the
-toggle-and-flag binding and the render latency.
+**Three of the rows are now closed**, and not by the handover they were written
+for: the seat (ADR-46, §21), the toggle-and-flag binding (ADR-47, §22) and the
+oracle (ADR-42). What is left of the table is the **render latency**.
 
 | Handover requirement | Where the host stands | Cheapest closure |
 |---|---|---|
 | **the same seat** | **closed** (ADR-46). `PaneSlot` has five members and four of them name a region the workspace tree already places; `center-left` is `RegionId::Info`, so a pane that claims it gets that seat's rect, share and ≥120-column rule, and `App::render_info_panel` stands down for it | a slot that names an existing region, decided with the layout rather than with a pane |
-| **the same toggle and the same flag** | `Action::ToggleInfoPanel` toggles `App::show_info_panel` and `[features] info_panel` gates it; a plugin pane's visibility is `TogglePluginPane` plus a stored per-pane choice. No manifest field asks a pane to answer a kernel action or ride a kernel feature flag | a manifest declaration binding a pane to an existing action and flag — which is also how the `[features]` flags eventually retire |
+| **the same toggle and the same flag** | **closed** (ADR-47). A `[[panes]]` entry names the action that toggles it (`toggle_action = "ToggleInfoPanel"`, validated against the six actions whose job is showing a pane) and the switch that gates it (`feature = "info_panel"`, validated against the `[features]` keys). Both occupants of a seat flip on the key, and a gated-off pane is not shown, seated, focused, rendered or offered by `F10` | a manifest declaration binding a pane to an existing action and flag — which is also how the `[features]` flags eventually retire |
 | **the same latency** | the render worker polls on a fixed 1 s cycle (`PLUGIN_RENDER_SLICE` × `PLUGIN_RENDER_SLICES`). This is §7 and §13's render-trigger gap, and the info panel is its worst case: live CPU and memory gauges plus per-automation countdowns | event-driven render, §13's named gap, with its own rate policy |
 | **a proof that survives the deletion** | **closed** (ADR-42). The port's oracle was *differential* — it named `ui::info_panel::info_tree`, one of the two things the handover deletes — so it could fail before the handover and not after it | record the native pane's tree while the native builder still exists, and assert the plugin against the recording |
 
@@ -1950,3 +1950,96 @@ showing one now compares the two panes in **one rect** instead of two, which is 
 `tests/bundled_automations_panel.rs`'s placement divergence asked for. That
 divergence is retired and its test now pins the opposite: the shipped manifest names
 the seat its native counterpart occupies.
+
+## 22. The toggle and the flag, declared (ADR-47)
+
+§14's second row, closed the same way the first was: as a declaration a manifest
+makes, before any pane moves. A `[[panes]]` entry may now say
+
+```toml
+[[panes]]
+id = "info"
+slot = "center-left"
+toggle_action = "ToggleInfoPanel"   # the key this pane answers
+feature = "info_panel"              # the switch that gates it
+```
+
+and both fields are validated against **closed sets**, because the alternative is
+the failure every other manifest field is checked to prevent: a typo that becomes a
+key doing nothing, or a pane gated on a switch that does not exist.
+
+### The action set is curated, and the curation is the decision
+
+`Action::pane_toggles()` is six: `ToggleInfoPanel`, `ToggleFileViewer`,
+`FocusTasks`, `ToggleSessionList`, `ToggleReview`, `ToggleShell`. An unknown *name*
+is a serde error naming it; a real action outside the six is a manifest error
+listing them.
+
+Accepting any action would have been less code and worse. The field exists for a
+**handover** — a pane taking over the key its native counterpart already answers —
+so an action whose job is not showing a pane has no meaning here, and a pane bound
+to `QuitApp` would toggle when the user quits. Three exclusions are worth naming:
+
+- **`TogglePluginPane`** already reaches every declared pane (ADR-28), so a pane
+  binding it would flip twice and land where it started. Refused at validation
+  rather than special-cased at dispatch.
+- **`GlobalSearch`** opens a band that is a mode rather than a pane (§10), and no
+  slot seats a plugin there (ADR-46).
+- **`OpenAutomations`, `ToggleHelp`, `OpenSettings`, `TogglePerfHud`** open a modal
+  or an overlay, not a pane in a seat.
+
+A consequence worth stating because it looks like an omission: the **automations
+pane has no action to bind**. It is always present and feature-gated, with `Ctrl+P`
+opening a *modal* rather than the pane. So its handover needs the field to stay
+optional, which it is.
+
+### Both occupants toggle, and that is the reversibility rule again
+
+Firing a bound action flips the plugin pane **and** does what it always did to the
+kernel's own pane. Twice returns everything to where it started.
+
+The tempting alternative — the plugin steals the action — is what the *end state*
+looks like, and it is wrong while both panes exist: it would leave the native pane
+unreachable by any key, so a third-party plugin declaring `ToggleInfoPanel` would
+remove a user's info panel with no way back. This is ADR-46's rule extended from the
+seat to the key: the kernel never loses track of its own pane. When the native
+renderer is deleted its half of the toggle goes with it and only the plugin's
+remains — the trajectory is clean without either end being a special case.
+
+The hook is one funnel (`App::dispatch_action`), before the per-action feature gate,
+so **each occupant is gated by the switch it named** rather than by the other's.
+
+### The flag is a value now, and the enum cannot drift from the struct
+
+`session::settings::FeatureFlag` names each `[features]` key, with
+`FeatureFlags::enabled` as the single lookup. Every flag is accepted — unlike the
+action set there is no nonsense case, and a reproduction gates on the flag its
+native counterpart rides.
+
+The drift risk is the obvious one: a `FeatureFlags` field with no enum member would
+be a switch no manifest could name, and nothing would say so.
+`every_feature_flag_names_a_field` writes every `FeatureFlag::all()` key as `false`
+and requires every field to be false, which fails in both directions.
+
+### What "gated off" means, precisely
+
+Not shown, no seat, no right-hand column, not focusable, not rendered (it is
+published in the hidden set, so its VM is not entered), and not offered by `F10` or
+its picker. But **the user's stored visibility survives**: the switch answers "is
+this pane available" and the stored choice answers "does the user want it". Turning
+the switch back on restores what they had, which is why the two are separate fields
+rather than one. The switch is read live from `App::features`, so the settings panel
+and the settings-file poll both apply without a plugin reload.
+
+### What this row did not close
+
+- **No bundled plugin declares either field.** A bundled reproduction answering `F2`
+  would toggle *both* panes for anyone who pressed it — a visible behaviour change
+  in a change whose point is that nothing changes yet. The fields are exercised by
+  the manifest tests, the pane predicates and four acceptance cases instead.
+- **The render latency** is now the only open row of §14's five. §18 filed it as
+  `Gap::Wiring` and inverted §13's argument: a 1 s poll is tolerable for a hidden
+  reproduction and not for the pane a user navigates with. It is the next thing.
+- **Focus** is still untouched, as §21 said. A handed-over pane can now be shown,
+  hidden and gated exactly like the native one — and the moment it holds focus its
+  scoped keyboard still does not resolve.

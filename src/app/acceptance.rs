@@ -5692,3 +5692,147 @@ fn no_claim_leaves_every_rect_unchanged() {
     ]);
     assert_eq!(h.app.screen_layout(), before);
 }
+
+/// A pane that declared a kernel action answers it — the key a user already has
+/// for that pane's seat, which is what §14's toggle row is about.
+///
+/// Both occupants flip: the assertion checks the kernel's own flag moves too, so
+/// the reversibility rule ADR-46 established is not quietly dropped.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_pane_bound_to_an_action_answers_it() {
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::Action;
+
+    let mut h = Harness::new(160, 40, 1);
+    h.app.show_info_panel = false;
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "info", "Info", PaneSlot::CenterLeft, false);
+    pane.toggle_action = Some(Action::ToggleInfoPanel);
+    h.app.set_plugin_panes(vec![pane]);
+
+    h.func(2);
+    assert_eq!(
+        h.app.plugin_pane_visible("demo", "info"),
+        Some(true),
+        "the declared action shows the pane"
+    );
+    assert!(
+        h.app.show_info_panel,
+        "the kernel's own pane keeps answering its action, so hiding the plugin \
+         pane hands the seat back"
+    );
+
+    h.func(2);
+    assert_eq!(h.app.plugin_pane_visible("demo", "info"), Some(false));
+    assert!(
+        !h.app.show_info_panel,
+        "twice returns every occupant to the start"
+    );
+}
+
+/// A pane bound to nothing is untouched by every action — the field is opt-in.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_pane_bound_to_nothing_ignores_the_action() {
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let mut h = Harness::new(160, 40, 1);
+    h.app
+        .set_plugin_panes(vec![crate::plugin::PluginPane::loading(
+            "demo",
+            "board",
+            "Board",
+            PaneSlot::Right,
+            false,
+        )]);
+    h.func(2);
+    h.func(3);
+    assert_eq!(h.app.plugin_pane_visible("demo", "board"), Some(false));
+}
+
+/// The declared switch gates the pane everywhere visibility is read: on screen, in
+/// its seat, in the right column's count, in what the render worker is told to
+/// skip, and in the generic toggle's own reach.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_gated_off_pane_is_not_a_pane() {
+    use crate::session::pane_visibility as pv;
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::settings::FeatureFlag;
+    use crate::session::view_tree::ViewNode;
+
+    // The published-visibility slot is process-wide, so the cases that read it
+    // take the same lock the sibling tests do.
+    let _guard = pv::test_lock();
+    pv::clear_for_test();
+    pv::set_panes_present(true);
+
+    let mut h = Harness::new(160, 40, 1);
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "info", "Info", PaneSlot::CenterLeft, true);
+    pane.feature = Some(FeatureFlag::InfoPanel);
+    pane.accepts_input = true;
+    pane.apply(Ok(ViewNode::list(vec![ViewNode::text("GATED PANE")])));
+    h.app.set_plugin_panes(vec![pane]);
+
+    // Switch on: the pane holds its seat.
+    let shown = h.render();
+    assert!(shown.contains("GATED PANE"), "{shown}");
+    assert!(h.app.screen_layout().info_panel.is_some());
+
+    // Switch off: not drawn, no seat, not focusable, published hidden, and not
+    // what the generic toggle reaches.
+    h.app.features.info_panel = false;
+    let hidden = h.render();
+    assert!(!hidden.contains("GATED PANE"), "{hidden}");
+    assert!(
+        h.app.screen_layout().info_panel.is_none(),
+        "a gated-off pane claims no seat"
+    );
+    assert!(h.app.focusable_plugin_pane().is_none(), "nor focus");
+    h.tick();
+    assert!(
+        pv::is_hidden("demo", "info"),
+        "the worker must not enter a VM for a pane nobody can see"
+    );
+    h.app.toggle_plugin_pane();
+    assert_eq!(
+        h.app.plugin_pane_visible("demo", "info"),
+        Some(true),
+        "the generic toggle skips it rather than hiding the user's choice"
+    );
+
+    // And the choice survives: turning the switch back on restores what the user
+    // had rather than a default.
+    h.app.features.info_panel = true;
+    let restored = h.render();
+    assert!(restored.contains("GATED PANE"), "{restored}");
+
+    pv::clear_for_test();
+}
+
+/// The gate and the binding compose: a pane whose switch is off does not answer
+/// its action either, so a user cannot bring back a pane they have switched off.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_gated_off_pane_does_not_answer_its_action() {
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::settings::FeatureFlag;
+    use crate::session::Action;
+
+    let mut h = Harness::new(160, 40, 1);
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "info", "Info", PaneSlot::CenterLeft, false);
+    pane.toggle_action = Some(Action::ToggleInfoPanel);
+    pane.feature = Some(FeatureFlag::InfoPanel);
+    h.app.set_plugin_panes(vec![pane]);
+    h.app.features.info_panel = false;
+
+    h.func(2);
+    assert_eq!(
+        h.app.plugin_pane_visible("demo", "info"),
+        Some(false),
+        "its own switch is off, so its action does nothing"
+    );
+}
