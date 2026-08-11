@@ -35,9 +35,10 @@
 ## 4. The gate at every visibility read, and the action hook
 
 - [x] `src/app/mod.rs`: `plugin_seat`, `visible_plugin_panes`,
-      `focusable_plugin_pane`, `toggle_plugin_pane`, `open_plugin_panes_picker`,
-      `sync_plugin_panes_picker` and `publish_plugin_pane_visibility` read
-      `is_shown`/`is_enabled` rather than `visible`.
+      `focusable_plugin_pane`, `toggle_plugin_pane`, `open_plugin_panes_picker` and
+      `publish_plugin_pane_visibility` read `is_shown`/`is_enabled` rather than
+      `visible`. (`sync_plugin_panes_picker` needs no filter: it refreshes rows by
+      name, and a gated-off pane has no row to refresh.)
 - [x] `src/app/view.rs`, `src/app/motion_state.rs`: same, so a gated-off pane is
       neither painted nor granted a motion lease.
 - [x] `src/app/key_handlers.rs`: `dispatch_action` toggles every pane bound to the
