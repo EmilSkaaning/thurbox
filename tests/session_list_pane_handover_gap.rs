@@ -205,30 +205,31 @@ const BLOCKERS: &[Blocker] = &[
     },
     Blocker {
         id: "render-is-not-event-driven",
-        needs: "the highlight moving in the frame the key was handled — the spike's fourth bar, \
-                5 ms of added latency on a selection change",
-        stands: "the plugin worker re-renders every pane, then waits out a fixed interval \
-                 (`PLUGIN_RENDER_SLICE` × `PLUGIN_RENDER_SLICES` = 1 s) serving keys; nothing \
-                 tells it that kernel state moved. For a hidden reproduction that is a \
-                 reproduction trailing by up to a second, which §13 recorded as tolerable. For \
-                 the pane a user navigates with it is the pane itself trailing, so the handover \
-                 inverts that argument",
+        needs: "the highlight following the cursor within one of the interface's own forced \
+                frames, rather than on a cadence of its own",
+        stands: "**closed** (ADR-49), and the row's wording had to change with it — recorded here \
+                 rather than quietly. The trigger is now the change: the publisher tells the \
+                 worker which *sources* moved and the worker renders the panes that read them, so \
+                 `Ctrl+J` re-renders this pane because the session source moved. What is left is \
+                 a rate ceiling of 100 ms, which coalesces rather than delays — a change at rest \
+                 renders with no wait, and the worst case is a change arriving just after a pass. \
+                 The **original** wording asked for the highlight to move *in the frame the key \
+                 was handled*, and that is unreachable by construction, not by wiring: \
+                 `plugin-host/panes` forbids the kernel calling a plugin during a frame, so a \
+                 plugin tree is always produced off the drawing thread. The achievable bar is the \
+                 one above, and 100 ms is inside the kernel's own 250 ms forced-redraw floor. The \
+                 spike's 5 ms figure is therefore not met and not claimed",
         gap: Gap::Wiring,
-        blocked: true,
+        blocked: false,
         probe: |root| {
             let main = source(root, "src/main.rs");
+            // Present again if the worker goes back to rendering on a cadence, or
+            // if the nudge that replaced it stops arriving.
             let fixed_wait = main.contains("for _ in 0..PLUGIN_RENDER_SLICES");
-            // A nudge would have to arrive on a channel the worker selects on, so
-            // it would be named here. None of these words appears in the file.
-            let no_nudge = ![
-                "render_now",
-                "state_changed",
-                "snapshot_changed",
-                "wake_render",
-            ]
-            .iter()
-            .any(|n| main.contains(n));
-            fixed_wait && no_nudge
+            let no_trigger = !main.contains("RenderTrigger");
+            let no_nudge =
+                !source(root, "src/app/mod.rs").contains("PluginWorkerRequest::StateMoved");
+            fixed_wait || no_trigger || no_nudge
         },
     },
     Blocker {
@@ -529,9 +530,17 @@ fn the_verdict_is_derived_from_the_blockers() {
         "every requirement is recorded met — the session list is portable, so hand it over \
          deliberately (and retire this gate) rather than leaving it passing vacuously"
     );
-    // The ordering the table implies, asserted rather than described: the cheapest
-    // kind is outstanding, and so is the kind no amount of vocabulary reaches.
-    assert!(!outstanding(BLOCKERS, Gap::Wiring).is_empty());
+    // The ordering the table implies, asserted rather than described. The cheapest
+    // kind is **no longer** outstanding: this pane's only wiring row was the render
+    // trigger, closed by ADR-49. So what is left of the verdict is vocabulary and
+    // the kind no amount of vocabulary reaches — which is the honest summary of why
+    // this pane still cannot go.
+    assert!(
+        outstanding(BLOCKERS, Gap::Wiring).is_empty(),
+        "the render trigger was this pane's last wiring gap; a new one means the \
+         table grew a row that should be named here: {:?}",
+        outstanding(BLOCKERS, Gap::Wiring)
+    );
     assert!(!outstanding(BLOCKERS, Gap::Vocabulary).is_empty());
     let structural = outstanding(BLOCKERS, Gap::Structural);
     assert!(

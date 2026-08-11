@@ -767,6 +767,76 @@ pub struct PaneContext {
     pub session_list: SessionListSnapshot,
 }
 
+impl PaneContext {
+    /// The sources in which this snapshot differs from `previous`.
+    ///
+    /// Two jobs, and they must not disagree. It is the publisher's **change
+    /// gate** — an empty set means nothing to publish — and it is what the render
+    /// worker is told, so a pane is re-rendered only for a source it can read
+    /// (ADR-49). Deriving both from one function is why a field belonging to no
+    /// source would be a defect rather than an omission: it would never publish
+    /// *and* never nudge.
+    ///
+    /// So both sides are destructured **by name**, with no `..` rest pattern:
+    /// adding a field to the snapshot fails to compile here until it is assigned
+    /// to a source. Same device as the recorded pane oracles (ADR-42), at the
+    /// other end of the same data.
+    ///
+    /// Never returns [`PaneSource::PluginState`](super::plugin_manifest::PaneSource::PluginState):
+    /// that source is not in this
+    /// snapshot at all, and the host reaches it on a cadence instead.
+    pub fn changed_sources(&self, previous: &Self) -> super::plugin_manifest::SourceSet {
+        let Self {
+            session,
+            system,
+            upcoming_automations,
+            automations,
+            tasks,
+            files,
+            review,
+            session_list,
+        } = self;
+        let Self {
+            session: old_session,
+            system: old_system,
+            upcoming_automations: old_upcoming,
+            automations: old_automations,
+            tasks: old_tasks,
+            files: old_files,
+            review: old_review,
+            session_list: old_session_list,
+        } = previous;
+
+        use super::plugin_manifest::{PaneSource, SourceSet};
+
+        let mut moved = SourceSet::empty();
+        // The active session and the rendered list are one grant
+        // (`Capability::Sessions`), so they are one source: a pane that may read
+        // either may read both, and splitting them would promise a precision the
+        // capability list does not offer.
+        if session != old_session || session_list != old_session_list {
+            moved.insert(PaneSource::Sessions);
+        }
+        if system != old_system {
+            moved.insert(PaneSource::Metrics);
+        }
+        // Likewise the upcoming filter and the whole list: one grant, one source.
+        if upcoming_automations != old_upcoming || automations != old_automations {
+            moved.insert(PaneSource::Automations);
+        }
+        if tasks != old_tasks {
+            moved.insert(PaneSource::Tasks);
+        }
+        if files != old_files {
+            moved.insert(PaneSource::Files);
+        }
+        if review != old_review {
+            moved.insert(PaneSource::Review);
+        }
+        moved
+    }
+}
+
 /// The process-wide snapshot slot.
 ///
 /// A `RwLock` rather than a channel because the reader is a plugin worker that
@@ -830,6 +900,7 @@ pub(crate) fn clear_for_test() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::plugin_manifest::{PaneSource, SourceSet};
     use crate::session::SessionStatus;
 
     fn context_with_name(name: &str) -> PaneContext {
@@ -917,6 +988,124 @@ mod tests {
     fn equal_snapshots_compare_equal() {
         assert_eq!(context_with_name("a"), context_with_name("a"));
         assert_ne!(context_with_name("a"), context_with_name("b"));
+    }
+
+    /// One mutation per field of the snapshot, with the source it belongs to.
+    ///
+    /// Written as a table so the two tests below read the same list: what each
+    /// field moves, and that nothing moves nothing. A field added to
+    /// `PaneContext` fails to compile inside `changed_sources` before it reaches
+    /// here, which is the point of destructuring there.
+    fn one_field_mutations() -> Vec<(&'static str, PaneSource, PaneContext)> {
+        let base = context_with_name("a");
+        let mut renamed = base.clone();
+        renamed.session.as_mut().expect("a session").name = "b".to_string();
+
+        let mut listed = base.clone();
+        listed.session_list = SessionListSnapshot::bounded([SessionRowSnapshot {
+            name: "s".to_string(),
+            status: StatusSnapshot::of(SessionStatus::Idle),
+            group: None,
+            depth: 0,
+            cross_group_child: false,
+            remote: false,
+            worktree: false,
+            selected: true,
+            dimmed: false,
+            match_positions: Vec::new(),
+            activity: None,
+            notification: None,
+        }]);
+
+        let mut sampled = base.clone();
+        sampled.system = Some(SystemSnapshot {
+            cpu_percent: 12.5,
+            ..SystemSnapshot::default()
+        });
+
+        let mut upcoming = base.clone();
+        upcoming.upcoming_automations = vec![UpcomingAutomationSnapshot {
+            id: 1,
+            label: "tick".to_string(),
+            due_in_secs: 30,
+        }];
+
+        let mut every = base.clone();
+        every.automations.cursor = Some(1);
+
+        let mut tasked = base.clone();
+        tasked.tasks.cursor = Some(2);
+
+        let mut filed = base.clone();
+        filed.files.selected = Some(1);
+
+        let mut reviewed = base.clone();
+        reviewed.review.number_width = 4;
+
+        vec![
+            ("the active session's name", PaneSource::Sessions, renamed),
+            ("the session list's rows", PaneSource::Sessions, listed),
+            ("a fresh metrics sample", PaneSource::Metrics, sampled),
+            ("an upcoming automation", PaneSource::Automations, upcoming),
+            (
+                "the automations pane's cursor",
+                PaneSource::Automations,
+                every,
+            ),
+            ("the task cursor", PaneSource::Tasks, tasked),
+            ("the file cursor", PaneSource::Files, filed),
+            ("the review's gutter width", PaneSource::Review, reviewed),
+        ]
+    }
+
+    /// Each field moves exactly the source that reaches it, and no other — which
+    /// is what stops a pane being re-rendered for state it cannot read.
+    #[test]
+    fn each_field_moves_exactly_its_own_source() {
+        let base = context_with_name("a");
+        for (what, source, moved) in one_field_mutations() {
+            let sources = moved.changed_sources(&base);
+            assert_eq!(
+                sources,
+                SourceSet::of(source),
+                "{what} must move `{}` and nothing else",
+                source.as_str()
+            );
+            // Symmetric: reverting the change moves the same source.
+            assert_eq!(
+                base.changed_sources(&moved),
+                SourceSet::of(source),
+                "{what}"
+            );
+            assert!(
+                !sources.contains(PaneSource::PluginState),
+                "the snapshot does not carry the plugin's own state, so it can \
+                 never report it moved"
+            );
+        }
+    }
+
+    /// The publisher gates on this set being non-empty, so it has to agree with
+    /// equality in both directions: an empty set on a changed snapshot would stop
+    /// publishing it, and a non-empty one on an identical snapshot would republish
+    /// every tick.
+    #[test]
+    fn changed_sources_is_empty_exactly_when_the_snapshots_are_equal() {
+        let base = context_with_name("a");
+        assert!(base.changed_sources(&base).is_empty());
+        assert!(base.changed_sources(&base.clone()).is_empty());
+        assert!(PaneContext::default()
+            .changed_sources(&PaneContext::default())
+            .is_empty());
+
+        for (what, _, moved) in one_field_mutations() {
+            assert_ne!(moved, base, "{what} should be a different snapshot");
+            assert_eq!(
+                moved.changed_sources(&base).is_empty(),
+                moved == base,
+                "{what}: the change gate and equality disagree"
+            );
+        }
     }
 
     #[test]

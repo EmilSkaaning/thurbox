@@ -2143,3 +2143,133 @@ handover requirements, four are closed — the seat (§21), the toggle and the f
 (§22), the oracle (here, generalised), and the build (Stage B) — and the fifth,
 **render latency**, is the last. Focus remains the open input gap that §21 and §22
 both name.
+
+## 24. The render trigger: the last of §14's five (ADR-49)
+
+§14 listed five things a handover needs. The seat closed in §21, the toggle and the
+flag in §22, the oracle in §23, and the build in Stage B. This is the fifth: **a
+pane renders when a source it reads moves**, not once a second.
+
+### The objection, measured
+
+The gap was filed with two closures and both were rejected. The first —
+*nudge the worker whenever the published snapshot changes* — was rejected because
+"the snapshot carries host CPU and memory, so it changes on nearly every tick: a
+1 Hz poll becomes a ~100 Hz one."
+
+That figure was an estimate, and it is wrong by two orders of magnitude. The
+snapshot is already change-gated (`pane_context_publishes` counts only the writes
+that differed), and the values inside it move at their *collection* cadence:
+`METRICS_REFRESH_TICKS` is 100 ticks, and every countdown is in whole seconds. Two
+measurements from a driven sandbox, `THURBOX_PERF_LOG=1`:
+
+| Window | ticks | publications | renders |
+|---|---|---|---|
+| idle, one pane visible reading `tasks` | 2000 (~20 s) | 20 | **0** |
+| idle, `info-panel` + `tasks` visible | 2000 (~20 s) | 20 | 28 |
+
+So the publish rate is ~1 Hz, not ~100 Hz. The objection was not empty, though: an
+agent emitting activity text changes the session source on consecutive ticks, so an
+*unbounded* nudge is a real risk. It needs a rate policy, which is the second half
+of the design rather than a reason to keep a timer.
+
+The second rejected closure — *nudge only when the session section changes* — was
+recorded as "probably right eventually". It is what landed, generalised: a source
+per state-reading capability, and a pane renders when a source **it** reads moves.
+The first row above is that generalisation earning its keep: 20 publications reached
+a visible pane and produced no render at all, because every one of them was metrics
+and the pane reads tasks.
+
+### The shape, and why three of the four pieces are pure
+
+| Piece | Module | Kind |
+|---|---|---|
+| `PaneSource` / `SourceSet`, `Capability::source()` | `session::plugin_manifest` | pure data |
+| `PaneContext::changed_sources` | `session::pane_context` | pure function |
+| `RenderTrigger` — what to render, when to look again | `plugin::render_trigger` | pure state machine, clock passed in |
+| the loop | `src/main.rs` | glue |
+
+The split is forced by where the loop lives. `spawn_plugin_render_loop` is in a
+**binary**, so a policy written inline there is a policy no test can reach — which
+is exactly how a fixed cadence survived three ports without a failing test. What is
+left in `main.rs` is a channel receive, a filesystem stat, and a `Vec` sent down a
+pipe; thirteen unit tests cover the decisions.
+
+`PaneSource` sits beside `Capability` rather than beside the snapshot, and the
+seventh member is why: `plugin-state` is a source a pane reads that is **not** in
+the snapshot at all. A source is a property of the grant.
+
+### The change gate and the nudge are one derivation
+
+`publish_pane_context` used to compare whole snapshots. It now publishes exactly
+when `changed_sources` is non-empty — the same answer it hands the worker. Two
+comparisons would be waste; two *definitions* would be a defect, because a field
+belonging to no source would publish by inequality and nudge nobody, and its pane
+would go stale with nothing failing.
+
+So `changed_sources` destructures **both** snapshots by name with no `..`: a field
+added to `PaneContext` fails to compile until it is assigned to a source. That is
+§23's device (ADR-42) at the other end of the same data. A table-driven test then
+pins the equivalence — one mutation per field, `changed_sources(a, b).is_empty() ==
+(a == b)` — so the two cannot drift.
+
+### The ceiling, and the residual latency stated rather than rounded off
+
+`MIN_INTERVAL` is 100 ms: at most ten render passes a second. It **coalesces**
+rather than delays, so a change arriving at rest renders with no wait, and the worst
+case is a change arriving just after a pass, which waits out the remainder.
+
+Three reasons for that number: it is the session-list spike's own bar 1 ceiling
+(≤10 Hz sustained), so the trigger cannot break the bar it was written against; it
+is tighter than the kernel's 250 ms `FORCE_REDRAW_INTERVAL`, so a plugin pane can
+never be more than one forced frame behind the interface around it; and it is the
+ceiling the gap's own filing named.
+
+**The spike's bar 4 (5 ms of added latency) is not met, and is not claimed.** Two
+things about it are worth being precise on. Under a ~1 Hz publish rate a change
+almost always finds the interval already elapsed, so the *typical* added latency is
+zero and the worst case is 99 ms. And the original wording of the two gate rows —
+"the highlight moving in the frame the key was handled" — is unreachable by
+construction rather than by wiring: `plugin-host/panes` forbids the kernel calling a
+plugin during a frame, so a plugin's tree is always produced off the drawing thread.
+Both rows' `needs` were therefore re-worded to the achievable bar, with the reason
+recorded in the row rather than left as a quiet edit.
+
+### The one surviving timer, named
+
+A pane whose plugin holds `state-read` can draw from `plugin_kv`, which its own
+service half writes from a headless `automation tick` — in another process, with
+nothing on the UI thread knowing. There is no event to trigger on, so that pane
+keeps a periodic re-render, riding the source-file poll's existing 1 s cadence
+(both exist for changes the kernel cannot be told about, and one cadence is one
+thing to reason about). It is raised only when a running plugin actually declares
+the capability, so **no bundled plugin pays it**: the first row of the table above
+is zero renders, not one per second.
+
+Dropping it instead was considered and refused: such a pane would freeze until
+something unrelated moved, which is worse than the cadence it replaces and silent.
+
+### What was driven by hand
+
+With two bundled panes shown in a sandbox and no agent involved:
+
+- the info panel's CPU gauge ticked (28% → 30% → 29% → 29% across four 1.3 s
+  samples), so a moving source reaches its pane;
+- pressing `Space` on a task in the native pane changed the glyph in **both** the
+  native pane and the plugin's copy within 120 ms of the key — where the fixed
+  cadence gave up to a second;
+- an external `thurbox-cli task edit --status done`, from another process, reached
+  the plugin's copy on the next task refresh and cost exactly **one** render out of
+  the 20 publications in that window; and
+- 20 s of idle with a visible pane cost zero renders and zero repaints.
+
+### What this leaves
+
+Of §14's five handover requirements, **all five are closed**. What still blocks the
+six reproduced panes is not on that list: it is **focus** — a seated pane is still
+`InputFocus::PluginPane`, so `KeyContext::SessionList` / `Automations` / `Tasks` do
+not resolve, and `render_central_pane`'s editor branch still keys on native focuses
+(§21, §22) — plus each pane's own recorded rows (§18, §20). Two of those rows closed
+here (`render-is-not-event-driven` on the session list and on the automations pane),
+and the session list now has **no outstanding wiring gap at all**: what is left of
+its verdict is vocabulary and structure.

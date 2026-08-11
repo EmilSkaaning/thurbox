@@ -82,6 +82,7 @@ wall-clock-free `u64` counters bumped at the render/tick hot paths:
 | `data_version_checks` | the status refresh actually ran its `PRAGMA data_version` read (throttled ~10×/s, ADR-P10) |
 | `pane_context_builds` / `pane_context_publishes` | the plugin-readable kernel snapshot was gathered / differed from the last one and was written (ADR-27) |
 | `pane_visibility_publishes` | the set of panes the render worker should skip differed from the last one and was written (ADR-28) — `plugins` builds only |
+| `plugin_renders_applied` / `plugin_renders_changed` | finished plugin-pane trees the UI thread applied / the subset that actually changed a pane and repainted (ADR-49) — `plugins` builds only |
 | `motion_leases` / `motion_frames` | animation leases granted to a plugin pane / repaints declared motion caused (one per tick where a resolved frame moved) — `plugins` builds only |
 | `motion_denied` / `motion_frozen` | declared motions the kernel declined (reduced motion, or a hidden pane) / leases frozen by the aggregate rate budget — `plugins` builds only |
 
@@ -99,6 +100,28 @@ a hundred times a second: the countdown is published in whole *seconds*, the
 granularity it is displayed at, so it differs at most once per second rather than
 on every tick. Publishing never marks the UI dirty — a plugin pane repaints when
 its own tree changes.
+
+`plugin_renders_applied` / `plugin_renders_changed` are the pair for ADR-49, and
+they gate the two halves of the event-driven render trigger. **Applied** is the
+worker's render rate as the UI sees it, and it must stay **flat while nothing a
+visible pane reads moves** — where the fixed 1 s cadence it replaced advanced it
+once per pane per second. Measured in a driven sandbox: 20 s of idle with one
+visible pane reading `tasks` produced 2000 ticks, 20 snapshot publications (all of
+them metrics) and **0 renders**. **Changed** is the subset that moved a pane's
+presentation, and the *gap* between the two is the demand-driven loop surviving
+contact with a plugin: `PluginPane::apply` compares before reporting, so a plugin
+re-rendering to the same tree costs no paint. `identical_plugin_trees_cost_no_repaint`
+feeds twenty identical trees and requires `applied == 21` with `changed == 1` and
+`should_redraw()` false throughout — a counter assertion rather than a frame rate,
+because a rate is timing and says nothing about *why* a paint happened.
+
+The trigger itself is a pure state machine (`plugin::render_trigger`) with the
+clock passed in, unit-tested for the properties a counter cannot see: nothing
+pending is never due, a pane is selected only for a source it reads, changes inside
+the 100 ms ceiling coalesce into one pass, and a pass that rendered nothing leaves
+the rate clock alone. It is pure because the loop that drives it lives in
+`src/main.rs`, which is a binary — a policy written inline there is a policy no
+test can reach.
 
 `pane_visibility_publishes` is the same discipline for the other direction of the
 plugin boundary (ADR-28): the kernel tells the render worker which panes it is

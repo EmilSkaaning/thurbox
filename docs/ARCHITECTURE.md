@@ -2837,3 +2837,114 @@ latency remains. A future bundled plugin for a seventh pane fails
 `every_reproduced_pane_records_its_native_tree` until it records its tree, which is
 the intended behaviour: the gate now asks for the evidence at the moment the evidence
 is cheap to produce.
+
+## ADR-49: A plugin pane renders when a source it reads moves
+
+**Context.** The plugin render worker rendered every visible pane and then waited
+out a **fixed 1 s interval** in ten 100 ms slices, serving key requests. Nothing
+told it that kernel state had moved. Two consequences, in opposite directions:
+
+- a plugin pane's copy of any published state — the session-list cursor, a
+  countdown, a status glyph a key had just written — trailed the kernel's by up to a
+  second; and
+- an idle TUI entered a Luau VM once per visible pane per second to rebuild a tree
+  that had not changed (0.87 ms/s at 20 sessions, 14.5 ms/s at 200, against v1's
+  zero for the same pane).
+
+The session-list spike fixed a bar of 5 ms of added latency on a selection change
+and made its verdict *conditional* on the render being event-driven; PHASE4 §7 and
+§13 recorded the gap and argued the staleness was tolerable **because a plugin pane
+is a hidden reproduction**, so the surface a user watches is still the kernel's. With
+the seat (ADR-46) and the toggle (ADR-47) closed, a handover inverts that argument
+entirely: the stale pane becomes the only pane. It was the last of PHASE4 §14's five
+handover requirements.
+
+Two closures were rejected when the gap was filed, and the first rejection rested on
+an estimate that measurement contradicts. "The snapshot carries host CPU and memory,
+so it changes on nearly every tick: a 1 Hz poll becomes a ~100 Hz one." The snapshot
+is already change-gated and its values move at their *collection* cadence
+(`METRICS_REFRESH_TICKS` is 100 ticks; countdowns are whole seconds), so the measured
+publish rate is ~1 Hz. The objection is not empty, though: an agent emitting activity
+text moves the session source on consecutive ticks, so an unbounded nudge needs a
+rate policy.
+
+**Decision.** A pane is rendered when a **source it reads** moves, bounded by a rate
+ceiling.
+
+- **Sources are named.** `session::plugin_manifest::PaneSource` has seven members —
+  `sessions`, `metrics`, `automations`, `tasks`, `files`, `review`, `plugin-state` —
+  with `Capability::source()` mapping each state-reading capability to exactly one,
+  exhaustively and with no wildcard arm, and a `SourceSet` bitset. It sits beside
+  `Capability` rather than beside the snapshot because a source is a property of the
+  *grant*, and because `plugin-state` is a source that is not in the snapshot at all.
+- **A publication says what moved.** `PaneContext::changed_sources` is both the
+  publisher's change gate and what the worker is told. One derivation, not two: a
+  field belonging to no source would publish by inequality and nudge nobody, and its
+  pane would go stale with nothing failing. Both snapshots are destructured by name
+  with no `..`, so a field added to `PaneContext` fails to compile until it is
+  assigned to a source (ADR-42's device, at the other end of the same data), and a
+  table-driven test pins `changed_sources(a, b).is_empty() == (a == b)`.
+- **The nudge shares the input channel.** `PluginWorkerRequest` is `Input`,
+  `StateMoved(SourceSet)` or `RenderAll` (sent when a pane's visibility moved: a pane
+  the worker was skipping has *no* tree, so it is missing rather than stale). One
+  channel because `std::sync::mpsc` has no select, and every message means "act on
+  this before you next sleep".
+- **The policy is pure.** `plugin::render_trigger::RenderTrigger` decides what to
+  render and when to look again, with `now` and the pane list passed in. The loop
+  that drives it is in `src/main.rs` — a **binary** — so anything decided inline
+  there is a decision no test can reach, which is how a fixed cadence survived three
+  ports without a failing test.
+- **The ceiling is 100 ms and coalesces rather than delays.** A change arriving at
+  rest renders immediately; changes arriving inside the interval merge into one pass
+  at its end. 100 ms because it is the spike's own bar 1 ceiling (≤10 Hz sustained),
+  because it is tighter than the kernel's 250 ms `FORCE_REDRAW_INTERVAL` so a plugin
+  pane can never be more than one forced frame behind, and because it is the number
+  the gap's filing named.
+- **One timer survives, and it is named.** A pane whose plugin holds `state-read`
+  draws from `plugin_kv`, which its own service half writes from another process —
+  no event announces it. That pane keeps a periodic re-render on the source-file
+  poll's existing 1 s cadence, raised only when a running plugin declares the
+  capability, so the bundled set pays nothing.
+- **The property is asserted on counters.** `plugin_renders_applied` /
+  `plugin_renders_changed` make "a re-render producing the same tree costs no
+  repaint" a failing test rather than a claim.
+
+**What is not claimed.** The spike's 5 ms bar is **not** met: a change arriving just
+after a pass waits out the remainder, up to 99 ms. Under a ~1 Hz publish rate that is
+rare and the typical added latency is zero, and the two gate rows' original wording —
+"in the frame the key was handled" — is unreachable by construction rather than by
+wiring, since `plugin-host/panes` forbids the kernel calling a plugin during a frame.
+Both rows were re-worded to the achievable bar with the reason recorded in the row.
+
+**Rejected alternatives.**
+
+- *Keep the interval and shorten it.* A 100 ms cadence is ten times the idle VM cost
+  for a pane that changes nothing — the cost the spike's bar 3 already fails.
+- *A dirty flag the worker polls between slices.* The wake costs up to a slice **on
+  top of** the ceiling, and a flag cannot carry which source moved, so every pane
+  renders for every change.
+- *Nudge on any publication, without sources.* A timer wearing a different hat: a
+  session-list pane would re-render every time host CPU resampled, at the same ~1 Hz.
+  Measured, that is 20 renders per 20 s where the source-aware trigger does 0.
+- *A second channel for nudges.* No select in `std`, so two receive arms and two
+  disconnect paths for messages with identical timing requirements.
+- *A condition variable shared with the publisher.* The UI thread would take a lock
+  the worker holds while inside a plugin VM.
+- *Send the snapshot rather than the source set.* The worker already reads the
+  published slot when it renders; a clone per change duplicates the state and leaves
+  the worker to diff it again.
+- *Resolve which panes to render on the UI thread.* It would need the grants, which
+  live in the host on the worker's side, and it puts a policy decision on the render
+  loop's thread for no gain.
+- *An API letting a plugin ask for a frame.* Hands a plugin the demand-driven loop;
+  ADR-V18 refused the same thing for motion frames.
+- *Drop the periodic render entirely.* A pane reading its plugin's own state would
+  freeze until something unrelated moved — silent, and worse than the cadence.
+
+**Consequences.** All five of PHASE4 §14's handover requirements are now closed; what
+blocks the six reproduced panes is focus and each pane's own recorded rows. Two of
+those rows closed with this change (`render-is-not-event-driven` on the session list
+and on the automations pane), and the session list has no outstanding *wiring* gap
+left at all. A capability added to the vocabulary must now decide what it reads, and
+a field added to the published snapshot must decide which source it belongs to —
+both as compile errors.

@@ -195,6 +195,180 @@ impl Capability {
                 | Capability::Review
         )
     }
+
+    /// Which source a pane holding this capability draws from, if any.
+    ///
+    /// This is what makes a pane's re-render event-driven (ADR-49): the host
+    /// renders a pane when a source *it* reads moves, so a session-list pane does
+    /// not re-render because host CPU resampled.
+    ///
+    /// Exhaustive with no wildcard arm, so a capability added later cannot reach
+    /// a pane without deciding what it reads — the same reason
+    /// [`Capability::reads_kernel_state`] is a `matches!` over named members
+    /// rather than a default.
+    pub fn source(self) -> Option<PaneSource> {
+        match self {
+            Capability::Sessions => Some(PaneSource::Sessions),
+            Capability::Metrics => Some(PaneSource::Metrics),
+            Capability::Automations => Some(PaneSource::Automations),
+            Capability::Tasks => Some(PaneSource::Tasks),
+            Capability::Files => Some(PaneSource::Files),
+            Capability::Review => Some(PaneSource::Review),
+            Capability::StateRead => Some(PaneSource::PluginState),
+            // Neither a reader nor a source: `render`/`input` are how a pane is
+            // asked and answered, `log`/`spawn` reach nothing a tree can show,
+            // and a write capability addresses a record by id — a plugin that may
+            // change a task learns nothing from a snapshot, so granting one must
+            // not put a pane back on a render schedule.
+            Capability::Log
+            | Capability::StateWrite
+            | Capability::Render
+            | Capability::Input
+            | Capability::Spawn
+            | Capability::TasksWrite
+            | Capability::AutomationsWrite => None,
+        }
+    }
+}
+
+/// One thing a plugin pane's view tree can depend on.
+///
+/// Six of them are sections of the published kernel-state snapshot
+/// ([`crate::session::pane_context::PaneContext`]); the seventh is the plugin's
+/// own durable state, which is **not** in that snapshot and is the reason the
+/// enum lives here rather than beside it. A source is a property of the *grant* —
+/// what this pane is allowed to read — so it belongs with the capability
+/// vocabulary that decides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PaneSource {
+    /// The sessions thurbox is running, and the rendered session list.
+    Sessions,
+    /// This machine's resource usage and thurbox's disk footprint.
+    Metrics,
+    /// The scheduled automations, both the upcoming filter and the whole list.
+    Automations,
+    /// The task list.
+    Tasks,
+    /// The file tree the file viewer has open.
+    Files,
+    /// The diff the code-review view has open.
+    Review,
+    /// The plugin's own persisted key/value state.
+    ///
+    /// The one source with no observable change event: a plugin's headless half
+    /// can write it from `automation tick`, in another process, with nothing on
+    /// the UI thread knowing. So a pane that may read it is the only pane still
+    /// re-rendered on a cadence, and
+    /// [`PaneContext::changed_sources`](crate::session::pane_context::PaneContext::changed_sources)
+    /// never returns it.
+    PluginState,
+}
+
+impl PaneSource {
+    /// The name used in diagnostics; not a manifest word — a plugin never names a
+    /// source, it names the capability that reaches one.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PaneSource::Sessions => "sessions",
+            PaneSource::Metrics => "metrics",
+            PaneSource::Automations => "automations",
+            PaneSource::Tasks => "tasks",
+            PaneSource::Files => "files",
+            PaneSource::Review => "review",
+            PaneSource::PluginState => "plugin-state",
+        }
+    }
+
+    /// Every source, in declaration order.
+    pub fn all() -> &'static [PaneSource] {
+        &[
+            PaneSource::Sessions,
+            PaneSource::Metrics,
+            PaneSource::Automations,
+            PaneSource::Tasks,
+            PaneSource::Files,
+            PaneSource::Review,
+            PaneSource::PluginState,
+        ]
+    }
+
+    /// The bit this source occupies in a [`SourceSet`].
+    const fn bit(self) -> u8 {
+        1 << (self as u8)
+    }
+}
+
+/// A set of [`PaneSource`]s.
+///
+/// A bitset rather than a `HashSet` because it is built and compared on the tick:
+/// the publisher derives one per publication and the render worker intersects it
+/// with one per pane, so both operations have to be a machine word.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SourceSet(u8);
+
+impl SourceSet {
+    /// The empty set — "nothing moved".
+    pub const fn empty() -> Self {
+        SourceSet(0)
+    }
+
+    /// The set holding exactly `source`.
+    pub const fn of(source: PaneSource) -> Self {
+        SourceSet(source.bit())
+    }
+
+    /// Every source, including [`PaneSource::PluginState`].
+    pub fn all() -> Self {
+        PaneSource::all()
+            .iter()
+            .fold(SourceSet::empty(), |set, s| set.with(*s))
+    }
+
+    /// This set plus `source`.
+    pub const fn with(self, source: PaneSource) -> Self {
+        SourceSet(self.0 | source.bit())
+    }
+
+    /// Add `source` in place.
+    pub fn insert(&mut self, source: PaneSource) {
+        self.0 |= source.bit();
+    }
+
+    /// Add every source in `other`.
+    pub fn extend(&mut self, other: SourceSet) {
+        self.0 |= other.0;
+    }
+
+    pub fn contains(self, source: PaneSource) -> bool {
+        self.0 & source.bit() != 0
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Whether the two sets share any source — the render trigger's question.
+    pub fn intersects(self, other: SourceSet) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    /// The sources in this set, for a diagnostic.
+    pub fn iter(self) -> impl Iterator<Item = PaneSource> {
+        PaneSource::all()
+            .iter()
+            .copied()
+            .filter(move |s| self.contains(*s))
+    }
+}
+
+impl fmt::Display for SourceSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_empty() {
+            return f.write_str("none");
+        }
+        let names: Vec<&str> = self.iter().map(PaneSource::as_str).collect();
+        f.write_str(&names.join(","))
+    }
 }
 
 impl fmt::Display for Capability {
@@ -1193,6 +1367,106 @@ fn check_ids<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every capability's source agrees with what it grants.
+    ///
+    /// Written as one rule over `Capability::all()` rather than a list of
+    /// expectations, so a capability added to the vocabulary is checked by the
+    /// same sentence: a kernel-state reader names one of the six published
+    /// sources, `state-read` names the unobservable one, and nothing else names
+    /// any.
+    #[test]
+    fn every_capabilitys_source_agrees_with_what_it_grants() {
+        for cap in Capability::all().iter().copied() {
+            match cap.source() {
+                Some(PaneSource::PluginState) => assert_eq!(
+                    cap,
+                    Capability::StateRead,
+                    "only the plugin's own state reader may name the source the \
+                     kernel cannot observe"
+                ),
+                Some(other) => assert!(
+                    cap.reads_kernel_state(),
+                    "{cap} names the published source {} without granting a \
+                     kernel-state reader",
+                    other.as_str()
+                ),
+                None => assert!(
+                    !cap.reads_kernel_state() && cap != Capability::StateRead,
+                    "{cap} grants a reader but names no source, so a pane holding \
+                     it would never be re-rendered for what it reads"
+                ),
+            }
+        }
+        // The other direction, which the match above cannot state: every
+        // kernel-state reader has a source.
+        for cap in Capability::all().iter().copied() {
+            assert_eq!(
+                cap.reads_kernel_state(),
+                cap.source().is_some_and(|s| s != PaneSource::PluginState),
+                "{cap}"
+            );
+        }
+    }
+
+    /// Two capabilities must not share a source, or a pane granted one would be
+    /// re-rendered for state it cannot read.
+    #[test]
+    fn no_two_capabilities_name_the_same_source() {
+        let mut seen = SourceSet::empty();
+        for source in Capability::all().iter().filter_map(|c| c.source()) {
+            assert!(!seen.contains(source), "{} is named twice", source.as_str());
+            seen.insert(source);
+        }
+        assert_eq!(
+            seen,
+            SourceSet::all(),
+            "every source must be reachable by some capability, or it is a source \
+             no pane can ever read"
+        );
+    }
+
+    #[test]
+    fn a_source_set_is_a_set() {
+        let mut set = SourceSet::empty();
+        assert!(set.is_empty());
+        assert!(!set.contains(PaneSource::Tasks));
+
+        set.insert(PaneSource::Tasks);
+        set.insert(PaneSource::Tasks);
+        assert!(!set.is_empty());
+        assert!(set.contains(PaneSource::Tasks));
+        assert!(!set.contains(PaneSource::Files));
+        assert_eq!(set, SourceSet::of(PaneSource::Tasks));
+
+        assert!(set.intersects(SourceSet::all()));
+        assert!(!set.intersects(SourceSet::of(PaneSource::Files)));
+        assert!(!SourceSet::empty().intersects(SourceSet::all()));
+
+        set.extend(SourceSet::of(PaneSource::Files));
+        assert_eq!(
+            set.iter().collect::<Vec<_>>(),
+            vec![PaneSource::Tasks, PaneSource::Files],
+            "iteration follows declaration order, so a diagnostic is stable"
+        );
+        assert_eq!(set.to_string(), "tasks,files");
+        assert_eq!(SourceSet::empty().to_string(), "none");
+    }
+
+    /// Seven sources in one `u8`, so the bitset cannot silently overflow if an
+    /// eighth is added.
+    #[test]
+    fn every_source_fits_the_bitset() {
+        assert!(
+            PaneSource::all().len() <= 8,
+            "SourceSet is a u8; widen it before adding a ninth source"
+        );
+        assert_eq!(
+            SourceSet::all().iter().count(),
+            PaneSource::all().len(),
+            "a source whose bit collides would vanish from the full set"
+        );
+    }
 
     fn path() -> PathBuf {
         PathBuf::from("/plugins/demo/plugin.toml")

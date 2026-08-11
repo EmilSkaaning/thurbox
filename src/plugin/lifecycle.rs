@@ -18,7 +18,7 @@ use crate::plugin::capabilities::GrantedCapabilities;
 use crate::plugin::discovery::{self, DiscoveredPlugin, DiscoveryOutcome, PluginSource};
 use crate::plugin::pane::PluginPane;
 use crate::plugin::runtime::{ExecutionBounds, PluginThread, RuntimeError};
-use crate::session::plugin_manifest::Capability;
+use crate::session::plugin_manifest::{Capability, SourceSet};
 use crate::session::view_tree::ViewNode;
 use std::time::Duration;
 
@@ -475,17 +475,78 @@ impl PluginHost {
     /// spends a Luau call per cycle on something nobody can see, and Phase 4
     /// ships seven panes. A pane nothing has been published about is rendered
     /// (see [`crate::session::pane_visibility`]).
+    ///
+    /// The worker reaches for [`Self::pane_reads`] plus
+    /// [`Self::render_pane_collected`] instead, because a pass renders only the
+    /// panes whose sources moved (ADR-49). This stays as the "render everything"
+    /// primitive the tests and any future caller of that shape need.
     pub fn render_all_panes_collected(&self) -> Vec<(String, String, Result<ViewNode, String>)> {
+        self.shown_panes()
+            .map(|pane| self.render_pane_collected(&pane.plugin, &pane.id))
+            .collect()
+    }
+
+    /// Render one pane, in the shape the worker sends to the UI.
+    pub fn render_pane_collected(
+        &self,
+        plugin: &str,
+        pane_id: &str,
+    ) -> (String, String, Result<ViewNode, String>) {
+        let result = self.render_pane(plugin, pane_id).map_err(|e| e.to_string());
+        (plugin.to_string(), pane_id.to_string(), result)
+    }
+
+    /// Every pane the kernel is showing, with the sources its plugin may read.
+    ///
+    /// This is what makes a re-render event-driven (ADR-49): the worker renders a
+    /// pane when a source *it* reads moves, so a tasks pane is not re-entered
+    /// because host CPU resampled.
+    ///
+    /// The sources come from each slot's **granted** set rather than from its
+    /// manifest's request, for [`Self::pane_bindings`]' reason: re-rendering a pane
+    /// for a source its plugin would then be refused is a VM call that can produce
+    /// nothing new.
+    pub fn pane_reads(&self) -> Vec<super::render_trigger::PaneReads> {
+        use super::render_trigger::{PaneReads, PaneRef};
+
+        let sources_of = |plugin: &str| {
+            self.slots
+                .iter()
+                .find(|s| s.plugin.name() == plugin)
+                .map(|s| {
+                    s.granted
+                        .iter()
+                        .filter_map(Capability::source)
+                        .fold(SourceSet::empty(), |set, source| set.with(source))
+                })
+                .unwrap_or_default()
+        };
+        self.shown_panes()
+            .map(|pane| PaneReads {
+                sources: sources_of(&pane.plugin),
+                pane: PaneRef::new(pane.plugin, pane.id),
+            })
+            .collect()
+    }
+
+    /// Whether any running plugin may read its own durable state.
+    ///
+    /// The one source with no change event — a plugin's headless half writes it
+    /// from another process — so a pane that reads it is re-rendered on a cadence.
+    /// Asked before raising that cadence, so a set of plugins that read only
+    /// published state costs an idle host zero renders.
+    pub fn any_plugin_reads_own_state(&self) -> bool {
+        self.slots
+            .iter()
+            .filter(|s| s.state.is_running() && !s.plugin.manifest.panes.is_empty())
+            .any(|s| s.granted.has(Capability::StateRead))
+    }
+
+    /// The panes the kernel is showing, in the host's stable order.
+    fn shown_panes(&self) -> impl Iterator<Item = PluginPane> + '_ {
         self.panes()
             .into_iter()
             .filter(|pane| !crate::session::pane_visibility::is_hidden(&pane.plugin, &pane.id))
-            .map(|pane| {
-                let result = self
-                    .render_pane(&pane.plugin, &pane.id)
-                    .map_err(|e| e.to_string());
-                (pane.plugin, pane.id, result)
-            })
-            .collect()
     }
 
     /// Offer a key to a plugin, returning whether it consumed it.
@@ -1138,6 +1199,109 @@ mod tests {
             format!("return {{ render = function(paneId) {render_body} end }}"),
         )
         .unwrap();
+    }
+
+    /// Write a pane plugin with a chosen capability list, so a test can ask what
+    /// sources its pane reads.
+    fn write_pane_plugin_with(root: &Path, name: &str, capabilities: &str) {
+        let dir = root.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("plugin.toml"),
+            format!(
+                "name = \"{name}\"\napi_version = 1\ncapabilities = [{capabilities}]\n\
+                 [[panes]]\nid = \"board\"\ntitle = \"Board\"\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join(ENTRY_FILE_NAME),
+            "return { render = function(paneId) return { kind = \"divider\" } end }",
+        )
+        .unwrap();
+    }
+
+    /// A pane's sources are the union of what its plugin was **granted**, which is
+    /// what the render trigger intersects against (ADR-49).
+    #[test]
+    fn a_panes_sources_come_from_its_grant() {
+        use crate::session::pane_visibility as pv;
+        use crate::session::plugin_manifest::PaneSource;
+
+        let _lock = pv::test_lock();
+        pv::clear_for_test();
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_pane_plugin_with(tmp.path(), "alpha", "\"render\", \"tasks\", \"metrics\"");
+        write_pane_plugin_with(tmp.path(), "beta", "\"render\"");
+
+        let mut host = host_over(tmp.path());
+        host.start_all();
+        let reads = host.pane_reads();
+        assert_eq!(reads.len(), 2);
+
+        let alpha = reads.iter().find(|r| r.pane.plugin == "alpha").unwrap();
+        assert!(alpha.sources.contains(PaneSource::Tasks));
+        assert!(alpha.sources.contains(PaneSource::Metrics));
+        assert!(
+            !alpha.sources.contains(PaneSource::Sessions),
+            "a source it did not ask for must not wake it"
+        );
+
+        let beta = reads.iter().find(|r| r.pane.plugin == "beta").unwrap();
+        assert!(
+            beta.sources.is_empty(),
+            "`render` alone reads no state, so nothing re-renders this pane"
+        );
+
+        // A hidden pane is absent, which is how the trigger inherits the
+        // "hidden costs nothing" rule without repeating the check.
+        pv::publish_hidden(vec![pv::HiddenPane::new("beta", "board")]);
+        assert_eq!(
+            host.pane_reads()
+                .iter()
+                .map(|r| r.pane.plugin.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha"]
+        );
+        assert_eq!(
+            host.render_calls(),
+            0,
+            "asking what a pane reads must enter no VM"
+        );
+
+        pv::clear_for_test();
+    }
+
+    /// The one surviving cadence is raised only when something actually reads the
+    /// state it exists for.
+    #[test]
+    fn the_own_state_cadence_is_raised_only_when_a_plugin_reads_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_pane_plugin_with(tmp.path(), "plain", "\"render\", \"tasks\"");
+        let mut host = host_over(tmp.path());
+        host.start_all();
+        assert!(!host.any_plugin_reads_own_state());
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_pane_plugin_with(tmp.path(), "stateful", "\"render\", \"state-read\"");
+        let mut host = host_over(tmp.path());
+        host.start_all();
+        assert!(host.any_plugin_reads_own_state());
+    }
+
+    /// A pane of a plugin that never reached `running` has nothing to render, so it
+    /// must not appear in the list the trigger selects from.
+    #[test]
+    fn a_failed_plugins_pane_reads_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_pane_plugin_with(tmp.path(), "broken", "\"render\", \"tasks\"");
+        fs::write(tmp.path().join("broken").join(ENTRY_FILE_NAME), "syntax ??").unwrap();
+
+        let mut host = host_over(tmp.path());
+        host.start_all();
+        assert!(host.pane_reads().is_empty());
+        assert!(!host.any_plugin_reads_own_state());
     }
 
     /// The kernel keeps a pane off screen, so the host must not spend a VM call

@@ -989,6 +989,29 @@ pub struct PluginInputRequest {
     pub reply: std::sync::mpsc::Sender<bool>,
 }
 
+/// Something the UI thread asks the plugin render worker to do.
+///
+/// One channel rather than several, because a second `std::sync::mpsc` receiver
+/// would need a select the standard library does not have — so the worker would
+/// grow a second receive arm and a second disconnect path for messages whose
+/// timing requirements are identical: all of them are "act on this before you
+/// next sleep".
+#[cfg(feature = "plugins")]
+#[derive(Debug)]
+pub enum PluginWorkerRequest {
+    /// Offer an event to a plugin and reply whether it consumed it.
+    Input(PluginInputRequest),
+    /// Kernel state moved in these sources; re-render the panes that read them
+    /// (ADR-49). Carries the sources rather than the snapshot: the worker reads
+    /// the published slot when it renders, so sending a clone would duplicate the
+    /// state and leave the worker to diff it again.
+    StateMoved(crate::session::plugin_manifest::SourceSet),
+    /// Re-render every pane the kernel is showing. Sent when a pane's visibility
+    /// moved: a pane the worker has been skipping has no tree at all, so it is
+    /// missing rather than stale, and no source moving would ever ask for it.
+    RenderAll,
+}
+
 #[cfg(feature = "plugins")]
 #[derive(Debug)]
 pub enum PluginUiEvent {
@@ -1060,9 +1083,10 @@ pub struct App {
     /// Plugin pane events, produced off-thread and drained on the tick.
     #[cfg(feature = "plugins")]
     pub(crate) plugin_events: Option<std::sync::mpsc::Receiver<PluginUiEvent>>,
-    /// Outbound key requests to the plugin render worker.
+    /// Outbound requests to the plugin render worker: input to offer, and the
+    /// sources whose state moved.
     #[cfg(feature = "plugins")]
-    pub(crate) plugin_keys: Option<std::sync::mpsc::Sender<PluginInputRequest>>,
+    pub(crate) plugin_worker: Option<std::sync::mpsc::Sender<PluginWorkerRequest>>,
     /// Which plugin pane holds focus, when one does.
     ///
     /// `InputFocus::PluginPane` cannot say *which*, so a click (which names a pane
@@ -1470,7 +1494,7 @@ impl App {
             #[cfg(feature = "plugins")]
             plugin_events: None,
             #[cfg(feature = "plugins")]
-            plugin_keys: None,
+            plugin_worker: None,
             #[cfg(feature = "plugins")]
             focused_plugin_pane: None,
             #[cfg(feature = "plugins")]
@@ -4925,6 +4949,8 @@ impl App {
         #[cfg(feature = "plugins")]
         let plugin_counters = serde_json::json!({
             "pane_visibility_publishes": p.pane_visibility_publishes,
+            "plugin_renders_applied": p.plugin_renders_applied,
+            "plugin_renders_changed": p.plugin_renders_changed,
             "motion_leases": p.motion_leases,
             "motion_frames": p.motion_frames,
             "motion_denied": p.motion_denied,
@@ -7386,19 +7412,47 @@ impl App {
     /// It deliberately does **not** mark the UI dirty. A plugin pane repaints
     /// when the tree it returns changes ([`Self::poll_plugin_renders`]); coupling
     /// a repaint to a state change here would repaint the screen for a pane that
-    /// is not even on it.
+    /// is not even on it. Telling the render worker which sources moved is not a
+    /// repaint either — it asks a worker thread for a tree, and only a *changed*
+    /// tree paints.
     pub(crate) fn publish_pane_context(&mut self) {
         if !crate::session::pane_context::readers_present() {
             return;
         }
         self.metrics.bump(|p| &mut p.pane_context_builds);
         let context = self.build_pane_context();
-        if self.published_pane_context.as_ref() == Some(&context) {
+        // The change gate is the set of **sources** that moved, not a whole-value
+        // comparison, because the same answer is what the render worker needs: a
+        // pane is re-rendered only for a source it can read (ADR-49). One
+        // derivation rather than two so the two cannot disagree — a field
+        // belonging to no source would publish and nudge nobody, and its pane
+        // would go stale with nothing failing.
+        let moved = match self.published_pane_context.as_ref() {
+            Some(previous) => context.changed_sources(previous),
+            // Nothing published yet: everything a pane could read is new to it.
+            None => crate::session::plugin_manifest::SourceSet::all(),
+        };
+        if moved.is_empty() {
             return;
         }
         crate::session::pane_context::publish(context.clone());
         self.published_pane_context = Some(context);
         self.metrics.bump(|p| &mut p.pane_context_publishes);
+        #[cfg(feature = "plugins")]
+        self.ask_plugin_worker(PluginWorkerRequest::StateMoved(moved));
+    }
+
+    /// Ask the plugin render worker for something, dropping the request when there
+    /// is no worker (a build with none, or a test that attached no channel).
+    ///
+    /// A send failure means the worker is gone, which is a state the UI has to
+    /// survive rather than report: its panes keep their last trees, exactly as they
+    /// do while a plugin is slow.
+    #[cfg(feature = "plugins")]
+    fn ask_plugin_worker(&self, request: PluginWorkerRequest) {
+        if let Some(tx) = self.plugin_worker.as_ref() {
+            let _ = tx.send(request);
+        }
     }
 
     /// Build the snapshot from the same inputs `render_info_panel` reads.
@@ -7900,6 +7954,7 @@ impl App {
         let events: Vec<PluginUiEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
         let mut changed = false;
+        let (mut applied, mut moved) = (0u64, 0u64);
         for event in events {
             match event {
                 PluginUiEvent::Panes { panes, bindings } => {
@@ -7916,11 +7971,22 @@ impl App {
                         .iter_mut()
                         .find(|p| p.plugin == plugin && p.id == pane)
                     {
-                        changed |= slot.apply(result);
+                        applied += 1;
+                        // `apply` compares before reporting, so a plugin that
+                        // re-renders to the same tree lands here and paints
+                        // nothing. The two counters are what make that checkable
+                        // rather than claimed.
+                        if slot.apply(result) {
+                            moved += 1;
+                            changed = true;
+                        }
                     }
                 }
             }
         }
+        let perf = &mut self.metrics.perf;
+        perf.plugin_renders_applied = perf.plugin_renders_applied.wrapping_add(applied);
+        perf.plugin_renders_changed = perf.plugin_renders_changed.wrapping_add(moved);
         if changed {
             self.needs_redraw = true;
         }
@@ -7977,10 +8043,10 @@ impl App {
     pub fn set_plugin_channels(
         &mut self,
         rx: std::sync::mpsc::Receiver<PluginUiEvent>,
-        keys: std::sync::mpsc::Sender<PluginInputRequest>,
+        requests: std::sync::mpsc::Sender<PluginWorkerRequest>,
     ) {
         self.plugin_events = Some(rx);
-        self.plugin_keys = Some(keys);
+        self.plugin_worker = Some(requests);
     }
 
     /// Offer a key to the focused plugin pane; returns whether it consumed it.
@@ -7994,17 +8060,17 @@ impl App {
             return false;
         };
         let (plugin, pane_id) = (pane.plugin.clone(), pane.id.clone());
-        let Some(tx) = self.plugin_keys.as_ref() else {
+        let Some(tx) = self.plugin_worker.as_ref() else {
             return false;
         };
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         if tx
-            .send(PluginInputRequest {
+            .send(PluginWorkerRequest::Input(PluginInputRequest {
                 plugin,
                 pane: pane_id,
                 input: PluginInput::Key { key, binding },
                 reply: reply_tx,
-            })
+            }))
             .is_err()
         {
             return false;
@@ -8050,17 +8116,17 @@ impl App {
             return false;
         };
         let (plugin, pane_id) = (pane.plugin.clone(), pane.id.clone());
-        let Some(tx) = self.plugin_keys.as_ref() else {
+        let Some(tx) = self.plugin_worker.as_ref() else {
             return false;
         };
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         if tx
-            .send(PluginInputRequest {
+            .send(PluginWorkerRequest::Input(PluginInputRequest {
                 plugin,
                 pane: pane_id,
                 input: PluginInput::Click { row },
                 reply: reply_tx,
-            })
+            }))
             .is_err()
         {
             return false;
@@ -8260,6 +8326,13 @@ impl App {
         self.published_hidden_panes = hidden;
         pv::publish_hidden(self.published_hidden_panes.clone());
         self.metrics.bump(|p| &mut p.pane_visibility_publishes);
+        // A pane that just came on screen has no tree at all — the worker has been
+        // skipping it — so it is *missing* rather than stale, and no source moving
+        // would ever ask for it. Hence "render everything" rather than a source
+        // set: the worker cannot tell which way a pane's visibility went, and
+        // asking for a tree it already has costs one unchanged tree that paints
+        // nothing.
+        self.ask_plugin_worker(PluginWorkerRequest::RenderAll);
     }
 
     /// Without the plugin feature there is no pane to toggle.

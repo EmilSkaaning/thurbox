@@ -4511,7 +4511,7 @@ fn a_focused_panes_binding_is_delivered_with_the_key() {
     drop(event_tx);
 
     h.key(KeyCode::Char('x'), KeyModifiers::NONE);
-    let request = key_rx.try_recv().expect("the key was offered");
+    let request = next_plugin_input(&key_rx).expect("the key was offered");
     assert_eq!(
         request.input,
         crate::app::PluginInput::Key {
@@ -4522,7 +4522,7 @@ fn a_focused_panes_binding_is_delivered_with_the_key() {
 
     // A key nothing of that pane's holds still arrives, with no binding.
     h.key(KeyCode::Char('z'), KeyModifiers::NONE);
-    let request = key_rx.try_recv().expect("the key was offered");
+    let request = next_plugin_input(&key_rx).expect("the key was offered");
     assert_eq!(
         request.input,
         crate::app::PluginInput::Key {
@@ -4566,7 +4566,7 @@ fn clicking_a_plugin_pane_row_focuses_it_and_reports_the_row() {
     });
 
     assert_eq!(h.app.focus, InputFocus::PluginPane);
-    let request = key_rx.try_recv().expect("the click was offered");
+    let request = next_plugin_input(&key_rx).expect("the click was offered");
     assert_eq!(request.pane, "board");
     assert_eq!(request.input, crate::app::PluginInput::Click { row: 2 });
 }
@@ -4687,10 +4687,10 @@ fn clicking_the_second_focusable_pane_sends_later_keys_to_it() {
         modifiers: KeyModifiers::NONE,
     });
     // Drain the click so the next request is the key's.
-    let _ = key_rx.try_recv();
+    let _ = next_plugin_input(&key_rx);
 
     h.key(KeyCode::Char('j'), KeyModifiers::NONE);
-    let request = key_rx.try_recv().expect("the key was offered");
+    let request = next_plugin_input(&key_rx).expect("the key was offered");
     assert_eq!(
         request.plugin, "second",
         "the key follows the pane the user pointed at"
@@ -4728,6 +4728,21 @@ fn a_vanished_pane_does_not_keep_focus() {
 }
 
 /// Every clickable row of a plugin pane, resolved from the recorded targets.
+/// The next *input* request on the worker channel, skipping the state nudges the
+/// publisher also sends down it (one channel, so a test asserting on a key has to
+/// say which kind of request it means).
+#[cfg(feature = "plugins")]
+fn next_plugin_input(
+    rx: &std::sync::mpsc::Receiver<crate::app::PluginWorkerRequest>,
+) -> Option<crate::app::PluginInputRequest> {
+    while let Ok(request) = rx.try_recv() {
+        if let crate::app::PluginWorkerRequest::Input(req) = request {
+            return Some(req);
+        }
+    }
+    None
+}
+
 #[cfg(feature = "plugins")]
 fn plugin_pane_row_target(h: &Harness, row: usize) -> Option<ratatui::layout::Rect> {
     h.app
@@ -4964,6 +4979,268 @@ fn publishing_the_pane_context_does_not_repaint() {
         "kernel state a plugin may read is not a reason to paint: the pane \
          repaints when its own tree changes"
     );
+}
+
+/// A state nudge, in a form a test can compare.
+///
+/// `PluginWorkerRequest` is not `PartialEq` — an input request carries the reply
+/// channel the UI thread waits on — so a test that wants value equality reduces it
+/// to the part it is asserting about.
+#[cfg(feature = "plugins")]
+#[derive(Debug, PartialEq, Eq)]
+enum Nudge {
+    StateMoved(crate::session::plugin_manifest::SourceSet),
+    RenderAll,
+}
+
+/// The next state nudge on the worker channel, skipping the input requests the
+/// same channel carries.
+#[cfg(feature = "plugins")]
+fn next_plugin_nudge(
+    rx: &std::sync::mpsc::Receiver<crate::app::PluginWorkerRequest>,
+) -> Option<Nudge> {
+    while let Ok(request) = rx.try_recv() {
+        match request {
+            crate::app::PluginWorkerRequest::Input(_) => continue,
+            crate::app::PluginWorkerRequest::StateMoved(sources) => {
+                return Some(Nudge::StateMoved(sources))
+            }
+            crate::app::PluginWorkerRequest::RenderAll => return Some(Nudge::RenderAll),
+        }
+    }
+    None
+}
+
+/// A publication tells the render worker **which sources moved**, so a pane is
+/// re-rendered only for state it can read (ADR-49).
+///
+/// The alternative — nudging on any publication — is a timer wearing a different
+/// hat: host metrics resample about once a second, so a session-list pane would
+/// re-render at that rate forever. The assertion is therefore about what is *not*
+/// in the set as much as what is.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_publication_nudges_the_worker_with_the_sources_that_moved() {
+    use crate::session::plugin_manifest::{PaneSource, SourceSet};
+
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(2);
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (request_tx, request_rx) = std::sync::mpsc::channel();
+    h.app.set_plugin_channels(event_rx, request_tx);
+    drop(event_tx);
+
+    // The first publication has no predecessor, so every source is new to a pane
+    // that has read nothing yet.
+    h.tick();
+    assert_eq!(
+        next_plugin_nudge(&request_rx),
+        Some(Nudge::StateMoved(SourceSet::all())),
+        "the first publication cannot say what moved, only that everything is new"
+    );
+
+    // A renamed session moves the session source, and nothing else.
+    h.app.sessions[h.app.active_index].info.name = "renamed".to_string();
+    h.tick();
+    let Some(Nudge::StateMoved(moved)) = next_plugin_nudge(&request_rx) else {
+        panic!("a changed session name must nudge the worker");
+    };
+    assert!(moved.contains(PaneSource::Sessions));
+    for quiet in [
+        PaneSource::Tasks,
+        PaneSource::Files,
+        PaneSource::Review,
+        PaneSource::Automations,
+        PaneSource::Metrics,
+        PaneSource::PluginState,
+    ] {
+        assert!(
+            !moved.contains(quiet),
+            "a pane reading `{}` must not be woken by a session rename",
+            quiet.as_str()
+        );
+    }
+}
+
+/// State that has not moved nudges nobody, which is what makes an idle interface
+/// cost a plugin nothing at all.
+#[cfg(feature = "plugins")]
+#[test]
+fn an_unchanged_pane_context_nudges_the_worker_about_nothing() {
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(2);
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (request_tx, request_rx) = std::sync::mpsc::channel();
+    h.app.set_plugin_channels(event_rx, request_tx);
+    drop(event_tx);
+
+    h.tick();
+    assert!(
+        next_plugin_nudge(&request_rx).is_some(),
+        "the first publication nudges"
+    );
+    for _ in 0..20 {
+        h.tick();
+    }
+    assert_eq!(
+        h.app.perf_counters().pane_context_publishes,
+        1,
+        "unchanged state is not republished"
+    );
+    assert_eq!(
+        next_plugin_nudge(&request_rx),
+        None,
+        "and an unchanged publication asks the worker for nothing"
+    );
+}
+
+/// Telling the worker that state moved is not a repaint. It asks a worker thread
+/// for a tree; only a *changed* tree paints.
+#[cfg(feature = "plugins")]
+#[test]
+fn nudging_the_worker_does_not_repaint() {
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(2);
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (request_tx, request_rx) = std::sync::mpsc::channel();
+    h.app.set_plugin_channels(event_rx, request_tx);
+    drop(event_tx);
+
+    // The publisher on its own, not a whole tick: a tick has a dozen other reasons
+    // to mark the interface dirty.
+    h.app.detect_output_redraw();
+    h.app.mark_redrawn();
+    h.app.sessions[h.app.active_index].info.name = "renamed".to_string();
+    h.app.publish_pane_context();
+    assert!(
+        next_plugin_nudge(&request_rx).is_some(),
+        "the worker was told"
+    );
+    assert!(
+        !h.app.should_redraw(),
+        "asking a worker for a tree is not a reason to paint"
+    );
+}
+
+/// A pane the worker has been skipping has no tree at all, so a visibility change
+/// asks for **every** pane rather than for a source: nothing moving would ever ask
+/// for a tree that was never produced.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_visibility_change_asks_the_worker_for_every_pane() {
+    use crate::session::pane_visibility as pv;
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let _guard = pv::test_lock();
+    pv::clear_for_test();
+
+    let mut h = Harness::new(160, 40, 1);
+    h.app.set_plugin_panes(vec![
+        crate::plugin::PluginPane::loading("a", "one", "A", PaneSlot::Right, true),
+        crate::plugin::PluginPane::loading("b", "two", "B", PaneSlot::Right, false),
+    ]);
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (request_tx, request_rx) = std::sync::mpsc::channel();
+    h.app.set_plugin_channels(event_rx, request_tx);
+    drop(event_tx);
+
+    pv::set_panes_present(true);
+    h.tick();
+    assert_eq!(
+        next_plugin_nudge(&request_rx),
+        Some(Nudge::RenderAll),
+        "the first publication of the hidden set is a change like any other"
+    );
+
+    // Steady state: an unchanged hidden set asks for nothing.
+    for _ in 0..10 {
+        h.tick();
+    }
+    assert_eq!(next_plugin_nudge(&request_rx), None);
+
+    h.app.set_plugin_pane_visible("b", "two", true);
+    h.tick();
+    assert_eq!(
+        next_plugin_nudge(&request_rx),
+        Some(Nudge::RenderAll),
+        "a pane that just came on screen needs its first tree"
+    );
+
+    pv::clear_for_test();
+}
+
+/// **The non-negotiable property**: a re-render that produces the same tree costs
+/// no repaint, however often the trigger asks for one.
+///
+/// Asserted on counters rather than on a frame rate, because a rate is timing —
+/// flaky, and silent about *why* a paint happened. `plugin_renders_applied` counts
+/// what arrived; `plugin_renders_changed` counts what moved. The gap between them
+/// is the demand-driven loop surviving contact with a plugin.
+#[cfg(feature = "plugins")]
+#[test]
+fn identical_plugin_trees_cost_no_repaint() {
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::view_tree::ViewNode;
+
+    let mut h = Harness::new(160, 40, 1);
+    h.app
+        .set_plugin_panes(vec![crate::plugin::PluginPane::loading(
+            "demo",
+            "board",
+            "Board",
+            PaneSlot::Right,
+            true,
+        )]);
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (request_tx, _request_rx) = std::sync::mpsc::channel();
+    h.app.set_plugin_channels(event_rx, request_tx);
+
+    let tree = || ViewNode::list(vec![ViewNode::text("one"), ViewNode::text("two")]);
+    let send = |tx: &std::sync::mpsc::Sender<crate::app::PluginUiEvent>, node: ViewNode| {
+        tx.send(crate::app::PluginUiEvent::Rendered {
+            plugin: "demo".to_string(),
+            pane: "board".to_string(),
+            result: Ok(node),
+        })
+        .expect("the app holds the receiver");
+    };
+
+    // The first tree is new, so it paints.
+    send(&event_tx, tree());
+    h.app.mark_redrawn();
+    h.tick();
+    let p = h.app.perf_counters();
+    assert_eq!(p.plugin_renders_applied, 1);
+    assert_eq!(p.plugin_renders_changed, 1);
+    assert!(h.app.should_redraw(), "a new tree is a reason to paint");
+
+    // Twenty identical ones are applied and change nothing.
+    for _ in 0..20 {
+        send(&event_tx, tree());
+        h.app.mark_redrawn();
+        h.tick();
+        assert!(
+            !h.app.should_redraw(),
+            "an unchanged tree must not repaint, whatever asked for it"
+        );
+    }
+    let p = h.app.perf_counters();
+    assert_eq!(p.plugin_renders_applied, 21, "every tree was applied");
+    assert_eq!(
+        p.plugin_renders_changed, 1,
+        "and exactly one of them moved the pane"
+    );
+
+    // A different tree paints again, so the comparison is not simply refusing
+    // everything after the first.
+    send(
+        &event_tx,
+        ViewNode::list(vec![ViewNode::text("one"), ViewNode::text("three")]),
+    );
+    h.app.mark_redrawn();
+    h.tick();
+    assert!(h.app.should_redraw());
+    assert_eq!(h.app.perf_counters().plugin_renders_changed, 2);
 }
 
 /// The snapshot must resolve what a sandboxed plugin cannot: the active

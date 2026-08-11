@@ -84,6 +84,22 @@ pub(crate) struct PerfCounters {
     /// which is what stops the publication becoming per-tick work.
     pub(crate) pane_visibility_publishes: u64,
     #[cfg(feature = "plugins")]
+    /// Finished plugin-pane trees the UI thread applied.
+    ///
+    /// The worker's render rate as the UI sees it, which is what makes the
+    /// event-driven trigger checkable: an idle interface must hold this flat
+    /// (ADR-49), where the fixed 1 s cadence advanced it once per pane per second.
+    pub(crate) plugin_renders_applied: u64,
+    #[cfg(feature = "plugins")]
+    /// Subset of `plugin_renders_applied` that actually changed a pane's
+    /// presentation, and therefore repainted.
+    ///
+    /// The gap between the two is the property the demand-driven loop depends on: a
+    /// plugin re-rendering to the same tree must cost no paint. A counter rather
+    /// than prose because the alternative is timing a frame rate, which is flaky
+    /// and says nothing about *why* a paint happened.
+    pub(crate) plugin_renders_changed: u64,
+    #[cfg(feature = "plugins")]
     /// Animation leases granted to a plugin pane (a retained lease is not
     /// re-counted). A pane with six animated nodes takes one lease, so this
     /// counts panes that started animating, not nodes.
@@ -153,6 +169,14 @@ impl PerfCounters {
             pane_visibility_publishes: self
                 .pane_visibility_publishes
                 .wrapping_sub(prev.pane_visibility_publishes),
+            #[cfg(feature = "plugins")]
+            plugin_renders_applied: self
+                .plugin_renders_applied
+                .wrapping_sub(prev.plugin_renders_applied),
+            #[cfg(feature = "plugins")]
+            plugin_renders_changed: self
+                .plugin_renders_changed
+                .wrapping_sub(prev.plugin_renders_changed),
             #[cfg(feature = "plugins")]
             motion_leases: self.motion_leases.wrapping_sub(prev.motion_leases),
             #[cfg(feature = "plugins")]

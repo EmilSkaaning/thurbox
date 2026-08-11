@@ -280,29 +280,31 @@ const BLOCKERS: &[Blocker] = &[
     },
     Blocker {
         id: "render-is-not-event-driven",
-        needs: "the pane reflecting a change in the frame it happened — a countdown that ticks, \
-                and a row whose enabled marker flips when a key wrote it",
-        stands: "the plugin worker re-renders every pane, then waits out a fixed interval \
-                 (`PLUGIN_RENDER_SLICE` × `PLUGIN_RENDER_SLICES` = 1 s) serving keys; nothing \
-                 tells it that kernel state moved. For a hidden reproduction that is a copy \
-                 trailing by up to a second, which §17 recorded as tolerable. For the pane itself \
-                 it is the pane trailing, so the handover inverts that argument",
+        needs: "the pane reflecting a change within one of the interface's own forced frames — a \
+                countdown that ticks, and a row whose enabled marker flips when a key wrote it",
+        stands: "**closed** (ADR-49), and the row's wording had to change with it — recorded here \
+                 rather than quietly. The trigger is now the change: the publisher tells the \
+                 worker which *sources* moved and it renders the panes that read them, so a \
+                 countdown ticks because the automations source moved and a written marker \
+                 re-renders on the same publication. A key answered by the plugin also re-renders \
+                 its pane, whether or not the plugin claimed it, since answering may have moved \
+                 state only the plugin can see. What is left is a rate ceiling of 100 ms, which \
+                 coalesces rather than delays. The **original** wording asked for the frame the \
+                 change happened in, and that is unreachable by construction: \
+                 `plugin-host/panes` forbids the kernel calling a plugin during a frame, so a \
+                 plugin tree is always produced off the drawing thread. 100 ms is inside the \
+                 kernel's own 250 ms forced-redraw floor",
         gap: Gap::Wiring,
-        blocked: true,
+        blocked: false,
         probe: |root| {
             let main = source(root, "src/main.rs");
+            // Present again if the worker goes back to rendering on a cadence, or
+            // if the nudge that replaced it stops arriving.
             let fixed_wait = main.contains("for _ in 0..PLUGIN_RENDER_SLICES");
-            // A nudge would have to arrive on a channel the worker selects on, so
-            // it would be named here. None of these words appears in the file.
-            let no_nudge = ![
-                "render_now",
-                "state_changed",
-                "snapshot_changed",
-                "wake_render",
-            ]
-            .iter()
-            .any(|n| main.contains(n));
-            fixed_wait && no_nudge
+            let no_trigger = !main.contains("RenderTrigger");
+            let no_nudge =
+                !source(root, "src/app/mod.rs").contains("PluginWorkerRequest::StateMoved");
+            fixed_wait || no_trigger || no_nudge
         },
     },
     Blocker {

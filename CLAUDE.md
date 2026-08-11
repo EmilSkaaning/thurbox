@@ -1197,6 +1197,22 @@ source is **watched**: editing a loaded plugin's `init.luau` reloads it in
 place with a fresh VM, keeping its pane and visibility;
 `thurbox-cli plugin reload [<name>]` does the same on demand.
 
+**When a pane renders is event-driven** (ADR-49). Each state-reading capability
+names one `PaneSource` (`sessions`/`metrics`/`automations`/`tasks`/`files`/`review`,
+plus `plugin-state`); the publisher tells the render worker which sources moved
+(`PaneContext::changed_sources`, which is also its change gate) and the worker
+renders only the panes whose plugins read them — so a tasks pane is not re-entered
+because host CPU resampled, and an idle interface enters no VM at all. Passes are
+bounded to one per 100 ms, coalescing rather than delaying, so a change at rest
+renders immediately (tighter than the kernel's own 250 ms forced-redraw floor). A
+pane is also rendered when its plugin was offered input, when it becomes visible
+after being skipped, and when its plugin reloads. The one exception is a pane
+holding `state-read`: its plugin's own durable state can be written by a headless
+half in another process, so that pane — and only that pane — keeps a 1 s cadence.
+The policy is a pure state machine (`plugin::render_trigger`), and a re-render
+producing the same tree still costs no repaint (`plugin_renders_applied` vs
+`plugin_renders_changed`).
+
 A plugin may also ship a **headless half**, `service.luau`, in its own VM with
 its own capability grant (`[service] capabilities = [...]`; the top-level
 `capabilities` apply to both halves). The halves fault independently. Services

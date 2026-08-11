@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "plugins")]
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -411,6 +413,12 @@ async fn main() -> Result<()> {
 /// receives only finished trees, so no plugin call can happen on the thread
 /// that draws.
 ///
+/// **When** it renders is not this function's decision (ADR-49). The policy is
+/// `thurbox::plugin::RenderTrigger`, which is pure and unit-tested; this file is a
+/// binary, so anything decided inline here would be a decision no test can reach.
+/// What is left below is a channel receive, a filesystem stat, and a `Vec` sent
+/// down a pipe.
+///
 /// Returns the flag that tells the worker to stop.
 #[cfg(feature = "plugins")]
 fn spawn_plugin_render_loop(
@@ -420,8 +428,8 @@ fn spawn_plugin_render_loop(
     let stop = Arc::new(AtomicBool::new(false));
     let stop_worker = Arc::clone(&stop);
     let (tx, rx) = std::sync::mpsc::channel();
-    let (key_tx, key_rx) = std::sync::mpsc::channel::<thurbox::app::PluginInputRequest>();
-    app.set_plugin_channels(rx, key_tx);
+    let (request_tx, request_rx) = std::sync::mpsc::channel::<thurbox::app::PluginWorkerRequest>();
+    app.set_plugin_channels(rx, request_tx);
 
     std::thread::Builder::new()
         .name("thurbox-plugin-render".to_string())
@@ -441,87 +449,105 @@ fn spawn_plugin_render_loop(
                 return;
             }
 
-            let mut stamps = host.source_stamps();
-            while !stop_worker.load(Ordering::Relaxed) {
-                // Hot reload: a plugin whose entry file moved is rebuilt from
-                // its current source. Polled on this cycle rather than through
-                // a filesystem-notification dependency — the bottleneck is the
-                // human typing, and polling degrades predictably on network
-                // filesystems where notifications are least reliable.
-                let current = host.source_stamps();
-                if current != stamps {
-                    for (name, stamp) in &current {
-                        let changed = stamps
-                            .iter()
-                            .find(|(n, _)| n == name)
-                            .is_none_or(|(_, old)| old != stamp);
-                        if changed {
-                            tracing::info!(plugin = %name, "source changed, reloading");
-                            let _ = host.reload(name);
-                        }
-                    }
-                    stamps = host.source_stamps();
-                    // Panes may have appeared or vanished with the reload.
-                    if tx
-                        .send(thurbox::app::PluginUiEvent::Panes {
-                            panes: host.panes(),
-                            bindings: host.pane_bindings(),
-                        })
-                        .is_err()
-                    {
-                        host.stop_all();
-                        return;
-                    }
-                }
+            let mut trigger = thurbox::plugin::RenderTrigger::new();
+            // The first pass must produce a tree for every pane: none has one
+            // yet, so waiting for a source to move would leave every pane on its
+            // loading placeholder until something happened to change.
+            trigger.everything_moved();
 
-                for (plugin, pane, result) in host.render_all_panes_collected() {
-                    if tx
-                        .send(thurbox::app::PluginUiEvent::Rendered {
-                            plugin,
-                            pane,
-                            result,
-                        })
-                        .is_err()
-                    {
-                        host.stop_all();
-                        return;
-                    }
-                }
-                // Wait out the render interval by *serving keys*, rather than
-                // sleeping through it: a focused pane's keypress must be
-                // answered immediately, and the UI thread is waiting on it. A
-                // stop is noticed within one slice for the same reason.
-                for _ in 0..PLUGIN_RENDER_SLICES {
-                    if stop_worker.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    match key_rx.recv_timeout(PLUGIN_RENDER_SLICE) {
-                        Ok(req) => {
-                            let consumed = match &req.input {
-                                thurbox::app::PluginInput::Key { key, binding } => host.send_key(
-                                    &req.plugin,
-                                    &req.pane,
-                                    key,
-                                    binding.as_deref(),
-                                    thurbox::app::PLUGIN_KEY_TIMEOUT,
-                                ),
-                                thurbox::app::PluginInput::Click { row } => host.send_click(
-                                    &req.plugin,
-                                    &req.pane,
-                                    *row,
-                                    thurbox::app::PLUGIN_KEY_TIMEOUT,
-                                ),
+            let mut stamps = host.source_stamps();
+            let mut last_source_poll = Instant::now();
+
+            while !stop_worker.load(Ordering::Relaxed) {
+                if last_source_poll.elapsed() >= PLUGIN_SOURCE_POLL {
+                    last_source_poll = Instant::now();
+                    // Hot reload: a plugin whose entry file moved is rebuilt from
+                    // its current source. Polled rather than watched through a
+                    // filesystem-notification dependency — the bottleneck is the
+                    // human typing, and polling degrades predictably on network
+                    // filesystems where notifications are least reliable.
+                    let current = host.source_stamps();
+                    if current != stamps {
+                        for (name, stamp) in &current {
+                            let changed = stamps
+                                .iter()
+                                .find(|(n, _)| n == name)
+                                .is_none_or(|(_, old)| old != stamp);
+                            if changed {
+                                tracing::info!(plugin = %name, "source changed, reloading");
+                                let _ = host.reload(name);
                             }
-                            .unwrap_or(false);
-                            let _ = req.reply.send(consumed);
                         }
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                        // The UI is gone.
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        stamps = host.source_stamps();
+                        // Panes may have appeared or vanished with the reload, and
+                        // a reloaded plugin's VM is fresh — so every pane needs a
+                        // tree again, not only the ones whose sources moved.
+                        trigger.everything_moved();
+                        if tx
+                            .send(thurbox::app::PluginUiEvent::Panes {
+                                panes: host.panes(),
+                                bindings: host.pane_bindings(),
+                            })
+                            .is_err()
+                        {
                             host.stop_all();
                             return;
                         }
                     }
+                    // The one source with no change event: a plugin's own durable
+                    // state, which its headless half writes from another process.
+                    // Raised only when something actually reads it, so a set of
+                    // plugins reading published state alone renders nothing here.
+                    if host.any_plugin_reads_own_state() {
+                        trigger.plugin_state_may_have_moved();
+                    }
+                }
+
+                let wait = match trigger.due(Instant::now()) {
+                    thurbox::plugin::Due::Now => {
+                        let wanted = trigger.wanted(&host.pane_reads());
+                        let rendered_any = !wanted.is_empty();
+                        for target in &wanted {
+                            let (plugin, pane, result) =
+                                host.render_pane_collected(&target.plugin, &target.pane);
+                            if tx
+                                .send(thurbox::app::PluginUiEvent::Rendered {
+                                    plugin,
+                                    pane,
+                                    result,
+                                })
+                                .is_err()
+                            {
+                                host.stop_all();
+                                return;
+                            }
+                        }
+                        trigger.settle(Instant::now(), rendered_any);
+                        continue;
+                    }
+                    // Something moved inside the rate ceiling's interval; this is
+                    // what is left of it.
+                    thurbox::plugin::Due::Throttled(left) => left,
+                    // Nothing to render. The wait is capped below anyway, so the
+                    // worker still wakes for the source poll and the stop flag.
+                    thurbox::plugin::Due::Idle => PLUGIN_SOURCE_POLL,
+                };
+
+                // Wait by *serving requests* rather than sleeping: a focused pane's
+                // keypress must be answered immediately (the UI thread is blocked
+                // on it), and a state change must not wait out a sleep it could
+                // have interrupted. The cap is what keeps a stop noticed as
+                // promptly as the ten-slice loop this replaced.
+                if serve_one_request(
+                    &host,
+                    &mut trigger,
+                    &request_rx,
+                    wait.min(PLUGIN_WAKE_SLICE),
+                )
+                .is_break()
+                {
+                    host.stop_all();
+                    return;
                 }
             }
             host.stop_all();
@@ -531,14 +557,65 @@ fn spawn_plugin_render_loop(
     stop
 }
 
-/// One slice of the re-render interval; the worker checks for a stop between
-/// slices so shutdown is not held up by the polling cadence.
+/// Serve one request to the plugin worker, or time out after `wait`.
+///
+/// Returns `Break` when the UI is gone, which is the worker's only reason to end
+/// other than the stop flag.
 #[cfg(feature = "plugins")]
-const PLUGIN_RENDER_SLICE: Duration = Duration::from_millis(100);
+fn serve_one_request(
+    host: &thurbox::plugin::PluginHost,
+    trigger: &mut thurbox::plugin::RenderTrigger,
+    rx: &std::sync::mpsc::Receiver<thurbox::app::PluginWorkerRequest>,
+    wait: Duration,
+) -> std::ops::ControlFlow<()> {
+    use thurbox::app::PluginWorkerRequest as Request;
 
-/// Slices per re-render interval (10 × 100 ms = 1 s).
+    match rx.recv_timeout(wait) {
+        Ok(Request::Input(req)) => {
+            let consumed = match &req.input {
+                thurbox::app::PluginInput::Key { key, binding } => host.send_key(
+                    &req.plugin,
+                    &req.pane,
+                    key,
+                    binding.as_deref(),
+                    thurbox::app::PLUGIN_KEY_TIMEOUT,
+                ),
+                thurbox::app::PluginInput::Click { row } => host.send_click(
+                    &req.plugin,
+                    &req.pane,
+                    *row,
+                    thurbox::app::PLUGIN_KEY_TIMEOUT,
+                ),
+            }
+            .unwrap_or(false);
+            let _ = req.reply.send(consumed);
+            // Whether or not the plugin claimed the event, answering it may have
+            // moved state only the plugin can see — so its pane is re-rendered on
+            // the strength of having been asked, not of what it replied.
+            trigger.pane_took_input(&req.plugin, &req.pane);
+        }
+        Ok(Request::StateMoved(sources)) => trigger.state_moved(sources),
+        Ok(Request::RenderAll) => trigger.everything_moved(),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        // The UI is gone.
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            return std::ops::ControlFlow::Break(())
+        }
+    }
+    std::ops::ControlFlow::Continue(())
+}
+
+/// The longest the worker sleeps without looking at the stop flag or the
+/// source-file poll's deadline. Unchanged from the ten-slice loop this replaced,
+/// where it was one slice of a fixed second.
 #[cfg(feature = "plugins")]
-const PLUGIN_RENDER_SLICES: usize = 10;
+const PLUGIN_WAKE_SLICE: Duration = Duration::from_millis(100);
+
+/// How often the worker stats each plugin's entry file for a hot reload, and
+/// therefore how often a pane reading its plugin's own durable state is
+/// re-rendered — the one source with no change event to trigger on.
+#[cfg(feature = "plugins")]
+const PLUGIN_SOURCE_POLL: Duration = Duration::from_secs(1);
 
 /// Grace period after signalling the plugin worker to stop, so plugins get a
 /// chance to shut down cleanly. Anything still running past it is abandoned;
