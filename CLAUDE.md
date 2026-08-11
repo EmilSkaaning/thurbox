@@ -970,7 +970,18 @@ it exists because the file viewer draws its cursor's row as a background
 thurbox's two list panes disagree about what a selected row looks like — the
 tasks pane draws it accent+bold, the file viewer in the selection pair — so an
 appearance inferred from the cursor's position would make one of them
-unreproducible.
+unreproducible. One further field is neither a colour nor an attribute:
+**`ellipsize`** says the run *yields its width* to the others on its line, so when a
+row overflows the kernel cuts **that** run with an `…` (through
+`ui::truncate_ellipsis`, the function the native panes fit with) and every other run
+keeps its columns — which is how a title too long for the tasks column keeps its
+trailing `⇄` marker (ADR-52). Consecutive yielding runs are cut as one piece of text,
+so a searched title gets one ellipsis rather than one per matched character; a
+yielding run is resolved *before* a `fill` (a fill is the line's residue, a yielding
+run is bounded by what the fixed runs leave); and it does nothing inside a `paragraph`
+(which wraps) or a `cycle` (which has already reserved its widest frame's width). It
+is reachable only through the style **table** form — `ui.text(t, { token = "muted",
+ellipsize = true })` — because the positional arguments are full.
 
 A `list` may name **which row its cursor is on** (`ui.list(children,
 selectedRow)`, 1-based), and when it does the **kernel** windows the list to keep

@@ -348,24 +348,24 @@ const BLOCKERS: &[Blocker] = &[
         id: "no-fitted-name",
         needs: "the row's name fitted to the column with an ellipsis, so a long name never pushes \
                 the schedule-and-action tail off the pane",
-        stands: "`resolve_rows` fits the name against `width − prefix − tail`; the plugin has no \
-                 width and draws the name whole, so the renderer clips and the tail is what goes. \
-                 On a narrow column the two panes show *different information*, which \
-                 `tests/bundled_automations_panel.rs` pins as an enumerated divergence. The \
-                 closure is unchanged from ADR-29: an ellipsizing clip plus a flush-right run",
+        stands: "the *vocabulary* closed with ADR-52 — a run may declare that it yields its width \
+                 and the renderer fits the group with an ellipsis, which is exactly the \
+                 \"ellipsizing clip plus a flush-right run\" ADR-29 named — and **this pane has \
+                 not adopted it**. `resolve_rows` still fits the name against \
+                 `width − prefix − tail`, so the tree it hands the renderer carries an \
+                 already-cut name while the plugin's carries a whole one, and no width can make \
+                 the two equal. Adoption is one declaration plus this pane's own re-recording, and \
+                 it belongs to its handover: the tasks pane did it in ADR-52 and its divergence \
+                 retired",
         gap: Gap::Vocabulary,
         blocked: true,
         probe: |root| {
-            let fitted_by_the_kernel =
-                source(root, "src/ui/automations_panel.rs").contains("truncate_ellipsis(&e.name");
-            // Nothing in the catalogue ellipsizes: no node kind, and no style flag.
-            let kinds = view_node_kinds(root);
-            let no_clipping_node = !kinds
-                .iter()
-                .any(|k| k == "Ellipsis" || k == "Clip" || k == "Truncate");
-            let style = block(root, "src/session/view_tree.rs", "pub struct TextStyle");
-            let no_clipping_flag = !style.contains("ellipsis") && !style.contains("clip");
-            fitted_by_the_kernel && no_clipping_node && no_clipping_flag
+            // Narrowed with ADR-52: the catalogue *can* say it now, so asking
+            // whether it can would report this row closed while the pane's copy
+            // still loses its tail. What decides it is whether **this pane** fits
+            // the name itself, since a pane that does cannot be reproduced by one
+            // that declares the fit.
+            source(root, "src/ui/automations_panel.rs").contains("truncate_ellipsis(&e.name")
         },
     },
 ];
@@ -451,32 +451,6 @@ fn method_body(root: &Path, rel: &str, header: &str) -> String {
         .find("\n    }\n")
         .unwrap_or_else(|| panic!("{rel}: `{header}` has no method-level close"));
     rest[..end].to_string()
-}
-
-/// The variant names declared in an item body, payloads and attributes ignored.
-fn variant_names(body: &str) -> Vec<String> {
-    body.lines()
-        .filter_map(|line| {
-            let unindented = line.strip_prefix("    ")?;
-            if unindented.starts_with(' ') || !unindented.starts_with(char::is_uppercase) {
-                return None;
-            }
-            let name: String = unindented
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            (!name.is_empty()).then_some(name)
-        })
-        .collect()
-}
-
-/// The node kinds the view tree defines.
-fn view_node_kinds(root: &Path) -> Vec<String> {
-    variant_names(&block(
-        root,
-        "src/session/view_tree.rs",
-        "pub enum ViewNode",
-    ))
 }
 
 /// The **signatures** of the mutation seam's methods, lowercased.

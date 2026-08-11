@@ -1251,6 +1251,7 @@ const SELECTED_STYLE: TextStyle = TextStyle {
     underline: false,
     selected: true,
     tint: None,
+    ellipsize: false,
 };
 
 /// A colour role with no emphasis — the shape most runs are.
@@ -1262,6 +1263,9 @@ const fn token_style(token: StyleToken) -> TextStyle {
         underline: false,
         selected: false,
         tint: None,
+        // The session list fits its own names in `resolve_rows`; adopting the
+        // declaration is that pane's handover's business (ADR-52).
+        ellipsize: false,
     }
 }
 

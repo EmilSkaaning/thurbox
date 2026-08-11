@@ -676,6 +676,9 @@ fn row_style(selected: bool, tint: Option<DiffTint>) -> impl Fn(Option<Token>) -
         underline: false,
         selected,
         tint,
+        // A diff body is never fitted: the review scrolls horizontally or wraps
+        // instead, so no run of it yields its width.
+        ellipsize: false,
     }
 }
 

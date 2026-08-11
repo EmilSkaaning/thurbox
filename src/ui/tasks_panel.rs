@@ -10,23 +10,24 @@
 //! [`ViewNode`] that [`super::plugin_pane::render_tree`] paints. The split is
 //! sharp on purpose, because it is the split a plugin lives on:
 //!
-//! - [`task_rows`] is the **width** step — how wide a title may be and where the
-//!   trailing marker's room comes from. A plugin never learns its pane's width,
-//!   so this stays the kernel's.
-//! - [`tasks_tree`] is the **presentation** step and carries no geometry at all:
-//!   status to glyph, status to colour token, the selected/dimmed/matched
-//!   emphasis, the marker, the empty-state line. That is the part
-//!   `tests/bundled_tasks_panel.rs` asserts a bundled Luau plugin reproduces
-//!   exactly.
+//! - [`task_rows`] is the **state** step: it folds the pane's focus into each
+//!   row's `selected` flag, which a tree builder cannot see.
+//! - [`tasks_tree`] is the **presentation** step: status to glyph, status to
+//!   colour token, the selected/dimmed/matched emphasis, the marker, the
+//!   empty-state line. That is the part `tests/bundled_tasks_panel.rs` asserts a
+//!   bundled Luau plugin reproduces exactly.
 //!
-//! **Height is not in either step.** The tree carries every row plus the index of
-//! the cursor's, and the *renderer* resolves the window — so the native pane and
-//! a plugin's copy scroll through one implementation
-//! (`ui::file_viewer::visible_window`, crate-private) instead of two that could
-//! disagree about which rows sit beside the cursor. The pane calls it a second
-//! time for its click hitboxes, which need the window as numbers rather than as a
-//! paint; same function, so the rows a user can click cannot drift from the rows
-//! that were drawn. Mirrors `ui::file_viewer::render`.
+//! **Neither step reads a dimension**, which since ADR-52 is true of this pane
+//! completely — the first pane of which it is. The tree carries every row plus the
+//! index of the cursor's and the *renderer* resolves the window
+//! (`ui::file_viewer::visible_window`, crate-private); the title run declares that
+//! it **yields its width** (`TextStyle::ellipsize`) and the renderer fits it with
+//! the ellipsis, keeping the trailing marker's columns. So the native pane and a
+//! plugin's copy scroll *and* fit through one implementation instead of two that
+//! could disagree. The pane calls the windowing helper a second time for its click
+//! hitboxes, which need the window as numbers rather than as a paint; same
+//! function, so the rows a user can click cannot drift from the rows that were
+//! drawn.
 
 use ratatui::{layout::Rect, widgets::Paragraph, Frame};
 // Only the retained pre-port oracle (`legacy_line` and friends) still assembles
@@ -43,7 +44,7 @@ use crate::session::TaskStatus;
 
 #[cfg(test)]
 use super::theme::Theme;
-use super::{focus_block, truncate_ellipsis, FocusLevel};
+use super::{focus_block, FocusLevel};
 
 /// One row in the tasks panel (view data built by the app layer).
 pub struct TaskPaneEntry {
@@ -80,15 +81,16 @@ pub struct TaskPaneState<'a> {
     pub preview_selected: bool,
 }
 
-/// One row as the pane's view tree describes it: the title fitted to the column,
-/// its status, and the three facts that pick its style.
+/// One row as the pane's view tree describes it: its title, its status, and the
+/// three facts that pick its style.
 ///
-/// Distinct from [`TaskPaneEntry`] because this is the *resolved* row — `title`
-/// has been fitted to a width and `selected` has folded in the pane's focus — so
-/// building the tree from it needs no geometry and no focus.
+/// Distinct from [`TaskPaneEntry`] because this is the *resolved* row — `selected`
+/// has folded in the pane's focus — so building the tree from it needs no focus.
+/// It carries no geometry either: the title is whole, and the run that draws it
+/// declares that it yields its width (ADR-52).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRow {
-    /// Display title, already fitted to the column.
+    /// Display title, whole: the renderer fits it (`TextStyle::ellipsize`).
     pub title: String,
     pub status: TaskStatus,
     /// Byte offsets in `title` a running search matched.
@@ -144,7 +146,7 @@ fn render_task_list(
     area: Rect,
     state: &TaskPaneState<'_>,
 ) -> Vec<super::RowHitbox> {
-    let rows = task_rows(state, area.width);
+    let rows = task_rows(state);
     let cursor = cursor_row(state);
     let tree = tasks_tree(&rows, cursor, matches!(state.focus, FocusLevel::Focused));
     // A fresh frame table every paint: nothing in this pane animates, and a
@@ -175,34 +177,24 @@ fn cursor_row(state: &TaskPaneState<'_>) -> Option<usize> {
     (!state.entries.is_empty()).then(|| state.selected.min(state.entries.len() - 1))
 }
 
-/// Resolve how every row looks at a pane of `width`.
+/// Resolve how every row looks — the pane's **state** step.
 ///
-/// The one width-dependent step in the pane: each title's fitted form and the
-/// room the trailing marker needs. A plugin reproducing this pane has no width, so
-/// it draws its titles whole and lets the renderer clip them — the one divergence
-/// `tests/bundled_tasks_panel.rs` still enumerates.
+/// It reads no dimension. Fitting the title to the column used to happen here,
+/// because a plugin reproducing this pane has no width; since ADR-52 the title run
+/// *declares* that it yields its width and the renderer fits it, so both panes are
+/// fitted by one implementation and the tree is identical at every size.
 ///
 /// Every row is resolved, not just the visible ones, because the window is the
-/// renderer's to choose from the tree's declared cursor. At most
-/// `MAX_TASK_ROWS`-worth of `truncate_ellipsis` calls, on a pane that paints only
-/// when the UI is dirty.
-pub fn task_rows(state: &TaskPaneState<'_>, width: u16) -> Vec<TaskRow> {
+/// renderer's to choose from the tree's declared cursor.
+pub fn task_rows(state: &TaskPaneState<'_>) -> Vec<TaskRow> {
     let focused = matches!(state.focus, FocusLevel::Focused);
-    let width = width as usize;
     state
         .entries
         .iter()
         .enumerate()
         .map(|(i, e)| {
-            // Reserve room for the trailing link marker so it never pushes the
-            // title off-row; the glyph plus its space is the other two columns.
-            let reserved = if e.linked {
-                2 + LINKED_MARKER.chars().count()
-            } else {
-                2
-            };
             TaskRow {
-                title: truncate_ellipsis(&e.title, width.saturating_sub(reserved)),
+                title: e.title.clone(),
                 status: e.status,
                 match_positions: e.match_positions.clone(),
                 dimmed: e.dimmed,
@@ -262,7 +254,16 @@ fn task_row_node(row: &TaskRow) -> ViewNode {
     };
     for (range, matched) in super::highlight::highlight_runs(&row.title, positions) {
         let style = if matched { MATCHED_STYLE } else { base };
-        runs.push(ViewNode::styled(&row.title[range], style));
+        // The title is the part that gives way: the glyph before it and the marker
+        // after it keep their columns, and the renderer cuts the title — as one
+        // string across these runs — with the ellipsis (ADR-52).
+        runs.push(ViewNode::styled(
+            &row.title[range],
+            TextStyle {
+                ellipsize: true,
+                ..style
+            },
+        ));
     }
 
     // Trailing accent marker for tasks with a live session. Dimmed rows
@@ -295,6 +296,7 @@ const MATCHED_STYLE: TextStyle = TextStyle {
     underline: true,
     selected: false,
     tint: None,
+    ellipsize: false,
 };
 
 /// A row's resting style, in the precedence the session list and automations
@@ -606,9 +608,8 @@ mod tests {
         }
     }
 
-    /// The tree must be a description of content only: a pane's rows are fitted
-    /// by [`task_rows`], so nothing in the tree may depend on a width — which
-    /// shows up as a row whose text was padded to fill one.
+    /// The tree must be a description of content only: nothing in it may depend on
+    /// a width — which shows up as a row whose text was padded to fill one.
     #[test]
     fn the_tree_carries_no_geometry() {
         let (_, rows, focused) = differential_rows().remove(4);
@@ -624,30 +625,53 @@ mod tests {
         assert_no_padding(&tasks_tree(&rows, Some(0), focused));
     }
 
-    /// `task_rows` is the only place a *width* is consulted, so what it does with
-    /// one — fit a title, reserve the marker's room — is asserted here rather than
-    /// through a rendered frame. Height is not consulted at all: the window is the
-    /// renderer's, resolved from the tree's cursor.
+    /// The pane consults **no** dimension: fitting a title to the column is the
+    /// renderer's now (ADR-52), so it is asserted through a painted frame rather
+    /// than on a resolved row.
+    ///
+    /// Two claims, and the second is the one that used to be lost in a plugin's
+    /// copy: the title is cut with an ellipsis, and the trailing marker is still
+    /// there — because the title yielded the columns the marker needed.
     #[test]
-    fn task_rows_fits_titles_and_reserves_the_marker() {
-        let mut linked = entry("a very long task title indeed");
-        linked.linked = true;
-        let entries = vec![entry("a very long task title indeed"), linked];
-        let state = TaskPaneState {
-            entries: &entries,
-            selected: 0,
-            focus: FocusLevel::Inactive,
-            preview_selected: false,
+    fn the_renderer_fits_the_title_and_keeps_the_marker() {
+        let row = |linked: bool| TaskRow {
+            title: "a very long task title indeed".to_string(),
+            status: TaskStatus::Todo,
+            match_positions: Vec::new(),
+            dimmed: false,
+            selected: false,
+            linked,
         };
-        let rows = task_rows(&state, 12);
-        // 12 columns less the glyph and its space: 10 characters of title.
-        assert_eq!(rows[0].title.chars().count(), 10);
-        assert!(rows[0].title.ends_with('…'));
-        // The linked row gives up the marker's width as well, so the marker is
-        // never pushed off the row.
-        assert_eq!(
-            rows[1].title.chars().count(),
-            10 - LINKED_MARKER.chars().count()
+        let painted = |linked: bool, width: u16| -> String {
+            let area = Rect::new(0, 0, width, 1);
+            let mut buf = Buffer::empty(area);
+            super::super::plugin_pane::render_tree(
+                &tasks_tree(&[row(linked)], Some(0), false),
+                area,
+                &super::super::theme::current(),
+                &FrameTable::default(),
+                &mut buf,
+            );
+            (0..width).map(|x| buf[(x, 0)].symbol()).collect()
+        };
+
+        // 12 columns, less the glyph and its space: ten of title, the last an
+        // ellipsis. The same arithmetic the pane used to do itself.
+        let plain = painted(false, 12);
+        assert_eq!(plain.chars().count(), 12, "{plain:?}");
+        assert!(plain.starts_with("☐ "), "{plain:?}");
+        assert!(plain.ends_with('…'), "{plain:?}");
+
+        // The linked row gives up the marker's columns as well, so the marker is
+        // never pushed off the row — the half a clip at the pane edge lost.
+        let linked = painted(true, 12);
+        assert!(
+            linked.ends_with(LINKED_MARKER),
+            "the marker must survive an overflowing title: {linked:?}"
+        );
+        assert!(
+            linked.contains('…'),
+            "and the title is still ellipsized: {linked:?}"
         );
     }
 
@@ -663,7 +687,7 @@ mod tests {
             focus: FocusLevel::Focused,
             preview_selected: false,
         };
-        let rows = task_rows(&state, 20);
+        let rows = task_rows(&state);
         assert_eq!(rows.len(), 10, "no row is windowed away");
         assert!(rows[9].selected, "the cursor's row is marked");
         assert!(!rows[0].selected);
@@ -709,12 +733,12 @@ mod tests {
             focus: FocusLevel::Inactive,
             preview_selected: false,
         };
-        assert!(task_rows(&state, 20).iter().all(|r| !r.selected));
+        assert!(task_rows(&state).iter().all(|r| !r.selected));
         let previewed = TaskPaneState {
             preview_selected: true,
             ..state
         };
-        assert!(task_rows(&previewed, 20)[1].selected);
+        assert!(task_rows(&previewed)[1].selected);
         // The *anchor* is there either way: it is the row a list scrolls to, not
         // the row that is drawn as the cursor's.
         assert_eq!(cursor_row(&state), Some(1));

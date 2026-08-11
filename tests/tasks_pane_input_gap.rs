@@ -25,8 +25,10 @@
 //! host powers this table asks for are not needed at all — the kernel moves its own
 //! cursor, opens its own editor, and opens its own picker — so a blocked row here
 //! says "this pane's keys cannot be ported **to a plugin**", never "this pane cannot
-//! be handed over". The one row untouched by the distinction is
-//! `no-ellipsizing-clip`, which is about drawing.
+//! be handed over". The one row that was untouched by the distinction —
+//! `no-ellipsizing-clip`, the only one about *drawing* — is now **closed** (ADR-52),
+//! so every row left here is structural and every one of them is about the route
+//! this pane's plugin does not have to take.
 //!
 //! **The finding this gate exists to keep true** is the second row below, because
 //! it is the one nobody predicted. The port was expected to fail on the pane's two
@@ -53,9 +55,9 @@
 //!   no either way. One table answering two questions produces failures that do
 //!   not say which question moved;
 //! - it is **not** a claim that the pane's rendering is inexpressible. The plugin
-//!   builds the native pane's view tree and paints its frame when the pane
-//!   scrolls (`tests/bundled_tasks_panel.rs`); one vocabulary row is left, and it
-//!   is marked as such;
+//!   builds the native pane's view tree and paints its frame when the pane scrolls
+//!   *and* when a title is too wide for it (`tests/bundled_tasks_panel.rs`); no
+//!   drawing row is left;
 //! - it is **not** a copy of the global-search gate's verdict. That surface is not
 //!   a pane at all; this one is a pane whose *keys* have nowhere to land.
 //!
@@ -244,20 +246,26 @@ const BLOCKERS: &[Blocker] = &[
         id: "no-ellipsizing-clip",
         needs: "fitting a title too wide for the column, with an ellipsis and room kept for the \
                 trailing link marker",
-        stands: "no node clips: a `line` clips at the pane edge without an ellipsis, and the \
-                 renderer that paints a plugin's tree never fits a run to a width",
+        stands: "**closed** (ADR-52), and it is the only row here that was ever about drawing. A \
+                 run declares that it *yields its width* (`TextStyle::ellipsize`) and the renderer \
+                 fits the group with `ui::truncate_ellipsis` — the same function the native panes \
+                 fitted with — while every other run on the line keeps its columns, so the marker \
+                 survives. Both panes now declare it and neither consults a width, which is why \
+                 `tests/bundled_tasks_panel.rs` asserts the same painted frame at a width narrow \
+                 enough to cut the title, where it used to assert the two differed",
         gap: Gap::Vocabulary,
-        blocked: true,
+        blocked: false,
         probe: |root| {
-            let kinds = view_node_kinds(root);
-            let no_clipping_node = !kinds
-                .iter()
-                .any(|k| k == "Clip" || k == "Ellipsis" || k == "Truncate");
-            // And the renderer does not fit a run itself — the kernel's helper is
-            // `ui::truncate_ellipsis`, which the tree painter never calls.
-            let renderer_fits_nothing =
-                !source(root, "src/ui/plugin_pane.rs").contains("truncate_ellipsis");
-            no_clipping_node && renderer_fits_nothing
+            // Two halves, because either alone would be the wrong claim: the
+            // catalogue must be able to *say* it, and the renderer must act on it.
+            // A probe reading only the field would report this closed for a flag
+            // nothing honours.
+            let style = block(root, "src/session/view_tree.rs", "pub struct TextStyle");
+            let declarable = style.contains("ellipsize");
+            let renderer_fits_it = source(root, "src/ui/plugin_pane.rs")
+                .contains("fn fit_yielding_runs")
+                && source(root, "src/ui/plugin_pane.rs").contains("truncate_ellipsis");
+            !(declarable && renderer_fits_it)
         },
     },
 ];
@@ -277,6 +285,17 @@ fn structural_blockers(blockers: &[Blocker]) -> Vec<&'static str> {
     blockers
         .iter()
         .filter(|b| b.blocked && b.gap == Gap::Structural)
+        .map(|b| b.id)
+        .collect()
+}
+
+/// The drawing rows still blocking. Empty since ADR-52, which is a fact worth
+/// asserting rather than leaving implicit: the reproduction is complete, so
+/// everything left is about what a plugin's keys could *do*.
+fn outstanding_vocabulary(blockers: &[Blocker]) -> Vec<&'static str> {
+    blockers
+        .iter()
+        .filter(|b| b.blocked && b.gap == Gap::Vocabulary)
         .map(|b| b.id)
         .collect()
 }
@@ -387,15 +406,6 @@ fn variant_names(body: &str) -> Vec<String> {
         .collect()
 }
 
-/// The node kinds the view tree defines.
-fn view_node_kinds(root: &Path) -> Vec<String> {
-    variant_names(&block(
-        root,
-        "src/session/view_tree.rs",
-        "pub enum ViewNode",
-    ))
-}
-
 /// Every name inserted into a plugin's `@thurbox` module table.
 ///
 /// The granted surface is exactly this list — enforcement in the host is by
@@ -486,13 +496,20 @@ fn the_verdict_is_derived_from_the_blockers() {
          gate deliberately (and port them) rather than leaving it passing vacuously"
     );
 
-    // The load-bearing half: the reason is structural. Closing the one vocabulary
-    // row would improve the *reproduction* — a fitted title — and change nothing
-    // about a single key.
+    // The load-bearing half: the reason is structural, and now *only* structural.
+    // The one vocabulary row closed (ADR-52) and closing it improved the
+    // reproduction — a fitted title — without changing a single key, which is the
+    // claim this half was written to make.
     let structural = structural_blockers(BLOCKERS);
     assert!(
         structural.len() >= 5,
         "the recorded reason is supposed to be structural, but only {structural:?} are"
+    );
+    assert!(
+        outstanding_vocabulary(BLOCKERS).is_empty(),
+        "a drawing row came back: {:?}. The reproduction was complete at ADR-52, so a new one is \
+         a regression in the catalogue rather than a row to record",
+        outstanding_vocabulary(BLOCKERS)
     );
     let vocabulary_closed: Vec<Blocker> = BLOCKERS
         .iter()

@@ -2512,3 +2512,81 @@ keys scoped actions first) is confirmed rather than bypassed.
 Nothing is handed over in this change: no renderer is deleted, no bundled manifest
 declares the field, and every snapshot is byte-identical. What is different is that
 the next handover argues about *drawing*.
+
+## 27. The last drawing gap the tasks pane had (ADR-52)
+
+§26 left the tasks pane with one row: *a title too wide for the column loses its
+ellipsis*. This closes it, and the closure was specified two sections' worth of
+gates ago.
+
+### The gap, measured rather than described
+
+`ui::tasks_panel::task_rows` reserved the trailing marker's columns and ellipsized
+the title into what was left. A plugin has no width, so its copy drew the whole title
+and the renderer clipped it at the pane edge. At the pane's actual size — 20% of the
+screen, so 24 columns at 120 — that is not a missing `…`:
+
+```text
+native:  ☐ implement the wo… ⇄
+plugin:  ☐ implement the worktre
+```
+
+The marker is the part that hurts. It says *this task has a live session, press `o`*,
+and clipping ate it.
+
+### What was added: one field
+
+`TextStyle::ellipsize` — the run **yields its width** to the others on its line. Every
+other run keeps its columns, the remainder goes to the yielding runs, and the kernel
+cuts them with `ui::truncate_ellipsis`: the same function the native panes fitted
+with, so the two cannot drift.
+
+Three details are the design rather than the implementation:
+
+- **Consecutive yielding runs share one budget.** A searched title is three runs
+  (`wri`, `t`, `e it`) and one string to a reader. One ellipsis, at the cut.
+- **A yielding run is resolved before a fill**, because a fill is the line's residue
+  and a yielding run is bounded by what the *fixed* runs leave.
+- **The native pane stopped fitting.** `task_rows` lost its `width` argument. Without
+  that the two trees would differ by construction — one carrying `implement the wo…`
+  and the other `implement the worktree move` plus a flag — and no width could make
+  them equal.
+
+`ui::tasks_panel` now reads **neither a width nor a height**. It is the first pane of
+which that is completely true, and it is exactly the shape a handed-over pane wants: a
+tree builder with no geometry in it.
+
+### The evidence changed direction
+
+The oracle used to assert the two panes **differ** at a narrow width
+(`a_title_wider_than_the_column_is_fitted_by_the_kernel_only`). It now asserts they
+paint the **same frame** at 18 columns, ellipsis and marker included — a painted frame
+rather than a tree, because the trees are equal at every width now, so only a paint
+shows the *fit* was resolved the same way. Same argument the scroll window's test
+makes.
+
+The twelve recordings were regenerated **from the native builder**, which ADR-42
+requires and permits: the native tree genuinely changed, and the builder is still here
+to record from. The claim is checkable rather than asserted — the diff is 35 lines,
+each the same line plus the word `ellipsize`, verified as a multiset with nothing else
+moved in any file.
+
+### Two gates re-verdicted themselves, in opposite directions
+
+- `tests/tasks_pane_input_gap.rs`'s `no-ellipsizing-clip` is **closed**, and the file
+  now asserts that **no** drawing row is outstanding — so a new one is a regression in
+  the catalogue rather than a row to record. Everything left in that table is about
+  what a *plugin's own* keys could do, which ADR-51 answered by a different route.
+- `tests/automations_pane_handover_gap.rs`'s `no-fitted-name` stays **blocked**, and
+  its probe narrowed. "The catalogue cannot say it" stopped being true; what is left is
+  that *this pane* still fits its name in `resolve_rows`, so its plugin's copy still
+  loses its tail. A probe that had kept asking the old question would have reported the
+  row closed while the divergence remained — which is the failure mode a gate exists
+  to prevent, met from the direction nobody expects.
+
+### Where this leaves the tasks pane
+
+Its reproduction is complete: equal trees at every width, the same painted frame when
+the pane scrolls and when a title is too wide, and no drawing row outstanding. With
+ADR-51's route its keyboard is the kernel's. What is left before its renderer can be
+deleted is the handover itself.

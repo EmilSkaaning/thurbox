@@ -3197,3 +3197,86 @@ names, so the editor and the run history do appear for it), and the session list
 review is the one pane the route cannot reach, and for a reason worth having: its keys
 are a `self.focus` capture rather than scoped actions, so there is nothing for a
 declaration to name — ADR-45's ordering (make them actions first) stands.
+
+## ADR-52: A run may yield its width, and the kernel ellipsizes it
+
+**Context.** Three of thurbox's own list panes fit one run of each row to the column
+and the plugin catalogue could not say it. The tasks pane reserved the trailing `⇄`
+marker's room and ellipsized the title into what was left; the automations pane fits
+a name against `width − prefix − tail`; the session list does the same. A plugin has
+no width — refused five times (ADR-26, ADR-29, ADR-30, ADR-31, ADR-39) — so its copy
+drew the whole title and the renderer clipped it at the pane edge.
+
+The consequence was not cosmetic. On a 20%-wide column a long title lost its `…`
+*and* the marker after it: the two panes showed **different information**, recorded
+as the tasks port's last enumerated divergence and as its one vocabulary gap row. The
+closure has been named since ADR-29 — *an ellipsizing clip plus a flush-right run* —
+and `ViewNode::Fill` had already landed the second half.
+
+**Decision.** `TextStyle::ellipsize`: the run **yields its width** to the other runs
+on its line.
+
+1. **The kernel resolves it.** Every other run on the line keeps its intrinsic width,
+   the remainder goes to the yielding runs, and they are truncated with `…`. Same
+   trade as every other node: the plugin declares the intent, the kernel resolves the
+   geometry.
+2. **Consecutive yielding runs share one budget.** A title split at its
+   global-search match offsets is three runs and one string to a reader, so the cut
+   falls where the concatenation would have been cut and later runs draw nothing —
+   never one ellipsis per matched character.
+3. **It fits with `ui::truncate_ellipsis`**, the function the native panes fitted
+   with. One implementation, two callers, the arrangement ADR-30 chose for the scroll
+   window and ADR-39 for the scroll track. The known corner is inherited on purpose:
+   that function counts *characters* while a line is laid out in *cells*, so a run of
+   double-width glyphs can exceed its budget exactly as it does in the native panes.
+   Being "correct" here would make a plugin's copy differ from the pane it
+   reproduces, which is the one thing a reproduction may not do.
+4. **A style field, not a node kind.** It is not a container (nothing sensible
+   ellipsizes a list or a gauge), a node kind multiplies across seven exhaustive
+   walks, and both gates that asked for this probed `TextStyle` for exactly this flag
+   — so they re-verdict themselves rather than needing rewritten probes. The doc
+   comment states the tension plainly: it is the one field that is neither a colour
+   nor an attribute but a rule for what happens when the line runs out.
+5. **Yielding is resolved before a fill.** A yielding run is bounded by what the
+   *fixed* runs leave; a fill is the residue of everything. So a full line gives its
+   fill nothing, which is the right answer.
+6. **A yielding run inside a motion does nothing.** A motion has already reserved its
+   widest frame's width and pads to it, so there is no residue for a run in it to
+   give up, and truncating one would leave the padding computing from a width that no
+   longer exists.
+7. **The native tasks pane declares it instead of fitting.** `task_rows` loses its
+   `width` argument and its `truncate_ellipsis` call. This is the load-bearing half:
+   a native pane that kept fitting in its tree while the plugin declared the flag
+   would produce trees that differ *by construction*, and no width could make them
+   equal. `ui::tasks_panel` now reads neither a width nor a height — the first pane of
+   which that is completely true, and the shape a handed-over pane wants.
+
+**The evidence.** `tests/bundled_tasks_panel.rs`'s enumerated divergence is replaced
+by its opposite: at 18 columns the two panes paint the **same frame**, ellipsis and
+marker included. The twelve recordings were regenerated from the *native* builder —
+which ADR-42 requires (the tree genuinely changed) and permits (the builder is still
+here) — and the diff was verified mechanically to be 35 lines, each the same line plus
+the word `ellipsize`, with nothing else moved in any file.
+
+**Rejected.** *Report the resolved width into the plugin* — the sixth request and the
+sixth refusal: rendering would become width-dependent, so a resize must re-enter a VM
+before the frame that needs it. *Publish the fitted title in the snapshot* — it bakes
+one pane's geometry (including its own marker's width) into state any pane in any
+column reads, and a plugin acting on a row would match a string the kernel invented.
+*A `maxWidth` in cells* — geometry with extra steps; computing it needs the width the
+plugin is not told. *Infer which run gives way* (the last, the longest) — three native
+panes fit a *different* run of their row, so any rule would be wrong in at least one.
+*One ellipsis per yielding run* — visibly wrong on a searched title. *Adopt it in all
+three panes now* — each adoption carries that pane's re-recording, and landing three
+in the change that introduces the mechanism would make any failure report "the
+ellipsis change broke a pane" rather than which one. *Ellipsize in a paragraph* — a
+paragraph wraps, so nothing overflows.
+
+**Consequences.** The tasks pane's reproduction is **complete**: no drawing row is
+left in `tests/tasks_pane_input_gap.rs`, whose remaining rows are all about what a
+*plugin's own* keys could do — and ADR-51 already answered those by a different
+route. The automations gate's `no-fitted-name` stays blocked and its probe narrows to
+the reason that is actually left: that pane still fits its name in `resolve_rows`, so
+its plugin's copy still loses its tail. Adopting the declaration there, and in the
+session list, is one line plus that pane's re-recording, and belongs to each pane's
+own handover.

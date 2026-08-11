@@ -5,14 +5,14 @@ expression: "view_tree_record::tree(&native)"
 list cursor=0 scrollbar=false
   line
     text "◐ " accent
-    text "has a session" accent
+    text "has a session" accent ellipsize
     text " ⇄" accent
   line
     text "☐ " muted dim
-    text "linked but filtered" muted dim
+    text "linked but filtered" muted dim ellipsize
     text " ⇄" muted dim
   line
     text "☑ " muted
-    text "l" accent bold underline
-    text "inked and matched" muted
+    text "l" accent bold underline ellipsize
+    text "inked and matched" muted ellipsize
     text " ⇄" accent

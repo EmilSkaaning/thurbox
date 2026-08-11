@@ -5,4 +5,4 @@ expression: "view_tree_record::tree(&native)"
 list cursor=0 scrollbar=false
   line
     text "☐ "
-    text "only"
+    text "only" ellipsize

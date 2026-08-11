@@ -188,6 +188,7 @@ fn style_facts(style: &TextStyle) -> String {
         underline,
         selected,
         tint,
+        ellipsize,
     } = style;
     let mut facts: Vec<String> = Vec::new();
     if let Some(token) = token {
@@ -207,6 +208,9 @@ fn style_facts(style: &TextStyle) -> String {
     }
     if let Some(tint) = tint {
         facts.push(format!("tint={}", tint.as_str()));
+    }
+    if *ellipsize {
+        facts.push("ellipsize".to_string());
     }
     if facts.is_empty() {
         String::new()

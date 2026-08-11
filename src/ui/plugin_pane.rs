@@ -263,7 +263,12 @@ fn inline_spans<'a>(
     // the answer before it exists. The placeholder keeps each fill's position,
     // so a fill in the middle of a line still pushes what follows it right.
     let mut placeholders: Vec<(usize, char)> = Vec::new();
-    collect_inline_spans(runs, palette, frames, out, &mut placeholders);
+    let mut yielding: Vec<usize> = Vec::new();
+    collect_inline_spans(runs, palette, frames, out, &mut placeholders, &mut yielding);
+    // Yielding runs are resolved **first**: one is bounded by what the fixed runs
+    // leave, while a fill is the residue of everything — so a full line gives its
+    // fill nothing, which is the right answer (ADR-52).
+    fit_yielding_runs(out, &yielding, width);
     if placeholders.is_empty() {
         return;
     }
@@ -287,22 +292,72 @@ fn inline_spans<'a>(
     }
 }
 
+/// Fit the runs that yielded their width into what the line's fixed runs left,
+/// truncating the group with a single ellipsis.
+///
+/// The group is cut as **one** piece of text: a title split at its search-match
+/// offsets is one string to a reader, so this reproduces
+/// `truncate_ellipsis(concatenation, budget)` exactly — which is what makes a
+/// native pane's tree and a plugin's copy of it equal rather than merely similar.
+/// It calls the same [`super::truncate_ellipsis`] the native panes fitted with, so
+/// the two cannot disagree about where a title was cut.
+///
+/// Known corner, inherited on purpose: that function counts **characters** while
+/// the line is laid out in **cells**, so a run of double-width glyphs can still
+/// exceed its budget. The native panes do exactly this, and matching them is the
+/// requirement here (ADR-52).
+fn fit_yielding_runs(out: &mut [Span<'_>], yielding: &[usize], width: usize) {
+    if yielding.is_empty() {
+        return;
+    }
+    let fixed: usize = out
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !yielding.contains(i))
+        .map(|(_, span)| span.content.width())
+        .sum();
+    let budget = width.saturating_sub(fixed);
+    let total: usize = yielding.iter().map(|&i| out[i].content.width()).sum();
+    if total <= budget {
+        return;
+    }
+    // `truncate_ellipsis` yields nothing at all below two columns, and the group
+    // is one string — so the whole group goes, rather than one run surviving
+    // because the cut happened to fall after it.
+    let mut remaining = if budget <= 1 { 0 } else { budget };
+    for &i in yielding {
+        let run_width = out[i].content.width();
+        if run_width <= remaining {
+            remaining -= run_width;
+            continue;
+        }
+        let style = out[i].style;
+        let fitted = super::truncate_ellipsis(&out[i].content, remaining);
+        out[i] = Span::styled(fitted, style);
+        remaining = 0;
+    }
+}
+
 /// The walk [`inline_spans`] wraps: push one span per run, recording where each
-/// fill's placeholder landed.
+/// fill's placeholder landed and which runs yielded their width.
 fn collect_inline_spans<'a>(
     runs: &'a [ViewNode],
     palette: &ThemePalette,
     frames: &FrameTable,
     out: &mut Vec<Span<'a>>,
     placeholders: &mut Vec<(usize, char)>,
+    yielding: &mut Vec<usize>,
 ) {
     for run in runs {
         match run {
             ViewNode::Text { content, style } => {
+                if style.ellipsize {
+                    yielding.push(out.len());
+                }
                 out.push(Span::styled(content.clone(), text_style(*style, palette)));
             }
             ViewNode::Line(nested) => {
-                collect_inline_spans(nested, palette, frames, out, placeholders)
+                collect_inline_spans(nested, palette, frames, out, placeholders, yielding)
             }
             ViewNode::Fill { glyph, style } => {
                 placeholders.push((out.len(), *glyph));
@@ -315,12 +370,20 @@ fn collect_inline_spans<'a>(
                     .min(motion.frames().len().saturating_sub(1));
                 let before = out.len();
                 if let Some(frame) = motion.frames().get(index) {
+                    // A yielding run *inside* a motion is collected into a list
+                    // nobody reads, so it does nothing: a motion has already
+                    // reserved its widest frame's width and pads to it, so there
+                    // is no residue for a run in it to give up — and truncating
+                    // one would leave the padding below computing from a width
+                    // that no longer exists.
+                    let mut inside = Vec::new();
                     collect_inline_spans(
                         std::slice::from_ref(frame),
                         palette,
                         frames,
                         out,
                         placeholders,
+                        &mut inside,
                     );
                 }
                 let drawn: usize = out[before..].iter().map(|s| s.content.width()).sum();
@@ -709,6 +772,101 @@ mod tests {
             width: w,
             height: h,
         }
+    }
+
+    /// A run that yields its width, in the shape a pane declares it.
+    fn yielding(content: &str) -> ViewNode {
+        ViewNode::styled(
+            content,
+            TextStyle {
+                ellipsize: true,
+                ..TextStyle::default()
+            },
+        )
+    }
+
+    /// A line that fits is untouched: the declaration costs nothing until the line
+    /// runs out of room.
+    #[test]
+    fn a_line_that_fits_keeps_its_yielding_run_whole() {
+        let line = ViewNode::Line(vec![
+            ViewNode::text("* "),
+            yielding("short"),
+            ViewNode::text(" x"),
+        ]);
+        assert_eq!(draw(&line, 20, 1), vec!["* short x"]);
+    }
+
+    /// The claim the tasks pane needed: the fixed runs keep their columns, so the
+    /// trailing marker survives an overflowing title — which is the half a clip at
+    /// the pane's edge used to lose.
+    #[test]
+    fn an_overflowing_line_cuts_the_yielding_run_and_keeps_the_marker() {
+        let line = ViewNode::Line(vec![
+            ViewNode::text("* "),
+            yielding("a title far wider than the pane"),
+            ViewNode::text(" x"),
+        ]);
+        let drawn = draw(&line, 12, 1).remove(0);
+        assert_eq!(drawn, "* a title… x");
+        assert!(drawn.ends_with(" x"), "the marker must survive: {drawn:?}");
+    }
+
+    /// Consecutive yielding runs are cut as **one** piece of text. A title split at
+    /// its search-match offsets is three runs and one string to a reader, so one
+    /// ellipsis at the cut — not one per run.
+    #[test]
+    fn consecutive_yielding_runs_are_cut_as_one_string() {
+        let split = ViewNode::Line(vec![
+            ViewNode::text("* "),
+            yielding("a ti"),
+            yielding("t"),
+            yielding("le far wider than the pane"),
+            ViewNode::text(" x"),
+        ]);
+        let whole = ViewNode::Line(vec![
+            ViewNode::text("* "),
+            yielding("a title far wider than the pane"),
+            ViewNode::text(" x"),
+        ]);
+        // The same cut the concatenation would have taken, which is what makes a
+        // searched title and an unsearched one fit identically.
+        assert_eq!(draw(&split, 12, 1), draw(&whole, 12, 1));
+        assert_eq!(draw(&split, 12, 1).remove(0).matches('…').count(), 1);
+    }
+
+    /// A line that declares none clips at the pane's edge exactly as before — so
+    /// the field changes *what* is clipped, never whether.
+    #[test]
+    fn a_line_with_no_yielding_run_clips_as_before() {
+        let line = ViewNode::Line(vec![
+            ViewNode::text("* "),
+            ViewNode::text("a title far wider than the pane"),
+            ViewNode::text(" x"),
+        ]);
+        let drawn = draw(&line, 12, 1).remove(0);
+        assert_eq!(drawn, "* a title fa");
+        assert!(!drawn.contains('…'));
+        assert!(!drawn.ends_with(" x"), "the marker is what a clip loses");
+    }
+
+    /// A fill is the line's residue and a yielding run is bounded by what the
+    /// *fixed* runs leave, so the yielding run is resolved first — and a full line
+    /// gives its fill nothing.
+    #[test]
+    fn a_yielding_run_is_resolved_before_a_fill() {
+        let line = ViewNode::Line(vec![
+            yielding("a title far wider than the pane"),
+            ViewNode::Fill {
+                glyph: '.',
+                style: TextStyle::default(),
+            },
+            ViewNode::text("|"),
+        ]);
+        // Twelve columns less the one the `|` keeps: eleven for the title, the
+        // last of them the ellipsis. The fill gets the nothing that is left.
+        let drawn = draw(&line, 12, 1).remove(0);
+        assert_eq!(drawn, "a title fa…|", "{drawn:?}");
     }
 
     /// Render a tree and return the buffer's lines as plain strings.

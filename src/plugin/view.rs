@@ -516,6 +516,7 @@ fn convert_style(table: &Table, kind: &str) -> Result<TextStyle, ViewError> {
         underline: flag("underline"),
         selected: flag("selected"),
         tint,
+        ellipsize: flag("ellipsize"),
     })
 }
 
@@ -849,6 +850,7 @@ mod tests {
                     underline: true,
                     selected: true,
                     tint: None,
+                    ellipsize: false,
                 }
             )
         );
@@ -862,6 +864,9 @@ mod tests {
             r#"underline = false"#,
             r#"underline = "yes""#,
             r#"underline = 1"#,
+            r#"ellipsize = false"#,
+            r#"ellipsize = "yes""#,
+            r#"ellipsize = 1"#,
             r#"dim = {}"#,
             r#"selected = false"#,
             r#"selected = "yes""#,

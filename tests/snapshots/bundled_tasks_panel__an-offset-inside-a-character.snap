@@ -5,7 +5,7 @@ expression: "view_tree_record::tree(&native)"
 list cursor=0 scrollbar=false
   line
     text "☐ "
-    text "a" accent bold underline
-    text "bc…"
-    text " " accent bold underline
-    text "def"
+    text "a" accent bold underline ellipsize
+    text "bc…" ellipsize
+    text " " accent bold underline ellipsize
+    text "def" ellipsize

@@ -5,10 +5,10 @@ expression: "view_tree_record::tree(&native)"
 list cursor=0 scrollbar=false
   line
     text "☐ "
-    text "write the port"
+    text "write the port" ellipsize
   line
     text "◐ " accent
-    text "review the diff" accent
+    text "review the diff" accent ellipsize
   line
     text "☑ " muted
-    text "ship it" muted
+    text "ship it" muted ellipsize

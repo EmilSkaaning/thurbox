@@ -334,7 +334,10 @@ fn apply_style_arg(node: &Table, style: Option<mlua::Value>) -> mlua::Result<()>
                     node.set("style", token)?;
                 }
             }
-            for key in ["bold", "dim", "underline", "selected", "tint"] {
+            // `ellipsize` is table-only, and deliberately: the positional form
+            // was already full at six arguments, and the note left there said the
+            // next field converts to a table rather than continuing.
+            for key in ["bold", "dim", "underline", "selected", "tint", "ellipsize"] {
                 if let Ok(value) = t.get::<mlua::Value>(key) {
                     if !value.is_nil() {
                         node.set(key, value)?;

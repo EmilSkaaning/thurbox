@@ -253,6 +253,23 @@ pub struct TextStyle {
     /// theme defines — the rule `ui::code_review`'s own renderer already
     /// applies.
     pub tint: Option<DiffTint>,
+    /// The run **yields its width** to the other runs on its line, and the kernel
+    /// ellipsizes it when the line overflows (ADR-52).
+    ///
+    /// The one field that is neither a colour nor an attribute: it is a rule for
+    /// what happens when a line runs out of room. Every other run on the line
+    /// keeps its intrinsic width, so a trailing marker survives an overflowing
+    /// title — which is what three of thurbox's own list panes do and what nothing
+    /// in this catalog could say, since a plugin is never told a width.
+    ///
+    /// Consecutive yielding runs share **one** budget: a title split at its
+    /// search-match offsets is one string to a reader, so the ellipsis falls where
+    /// the concatenation would have been cut and the runs after it draw nothing.
+    ///
+    /// Meaningful inside a [`ViewNode::Line`] (and on a run drawn as a line of
+    /// one). A [`ViewNode::Paragraph`] wraps rather than clips, so there is
+    /// nothing to cut and the field does nothing there.
+    pub ellipsize: bool,
 }
 
 /// A gauge's fill, as a percentage.

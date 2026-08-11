@@ -7,5 +7,5 @@ list cursor=0 scrollbar=false
     text "☐ " accent bold
   line
     text "☑ " muted
-    text "x" muted
+    text "x" muted ellipsize
     text " ⇄" accent

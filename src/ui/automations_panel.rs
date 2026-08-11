@@ -316,6 +316,7 @@ const MATCHED_STYLE: TextStyle = TextStyle {
     underline: true,
     selected: false,
     tint: None,
+    ellipsize: false,
 };
 
 /// A row's resting style, in the precedence thurbox's list panes share: selected

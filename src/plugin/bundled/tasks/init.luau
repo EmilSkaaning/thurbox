@@ -21,10 +21,11 @@
 -- 3. **Nothing here knows the pane's size**, and it still scrolls. It names the
 --    row its cursor is on and the host windows the list to it from a height this
 --    plugin is never told, which is the same trade the gauge node made for width.
---    What is *not* reproduced is title fitting — a title wider than the column is
---    clipped by the renderer rather than ellipsized — and that one remaining
---    divergence is enumerated in `tests/bundled_tasks_panel.rs` rather than
---    hidden.
+--    Title fitting works the same way and used to be the one thing this pane could
+--    not reproduce: the title runs declare that they **yield their width**
+--    (`ellipsize`), and the host cuts them with an ellipsis while the glyph and the
+--    trailing marker keep their columns. So there is no divergence left to
+--    enumerate in `tests/bundled_tasks_panel.rs`.
 
 local thurbox = require("@thurbox")
 local ui = thurbox.ui
@@ -43,6 +44,24 @@ type RowStyle = {
 
 local function text(content: string, style: RowStyle): ViewNode
     return ui.text(content, style.token, style.bold, style.underline, style.dim)
+end
+
+-- The same run, declaring that it **yields its width**: when the row is wider than
+-- the column the host cuts this run with an ellipsis and leaves every other run on
+-- the line its columns, so the trailing marker survives. Still no width here — the
+-- declaration is the intent and the host resolves the geometry.
+--
+-- It goes through the style *table* form because the positional arguments are full;
+-- `ui.text(content, { token = …, ellipsize = true })` is the only spelling that
+-- reaches it.
+local function fittedText(content: string, style: RowStyle): ViewNode
+    return ui.text(content, {
+        token = style.token,
+        bold = style.bold,
+        underline = style.underline,
+        dim = style.dim,
+        ellipsize = true,
+    })
 end
 
 -- ── status ──────────────────────────────────────────────────────────────────
@@ -159,7 +178,10 @@ local function rowNode(entry: TaskEntry): ViewNode
     -- two agreeing is what keeps the rule from mattering.
     local positions = if entry.dimmed then {} else entry.matchPositions
     for _, run in ipairs(matchedRuns(entry.title, positions)) do
-        table.insert(runs, text(run.text, if run.matched then MATCHED else base))
+        -- The title is the part that gives way. Every run of it declares it, and the
+        -- host cuts the group as **one** string — so a searched title gets one
+        -- ellipsis rather than one per matched character.
+        table.insert(runs, fittedText(run.text, if run.matched then MATCHED else base))
     end
 
     if entry.linked then

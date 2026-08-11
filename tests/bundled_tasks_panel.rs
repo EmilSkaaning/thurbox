@@ -72,10 +72,6 @@ use thurbox::session::TaskStatus;
 use thurbox::ui::tasks_panel::{task_rows, tasks_tree, TaskPaneEntry, TaskPaneState, TaskRow};
 use thurbox::ui::FocusLevel;
 
-/// A column with room to spare, so `task_rows` fits no title. Checked rather than
-/// trusted by [`the_comparison_size_adjusts_nothing`].
-const WIDE: u16 = 60;
-
 /// The recorder that turns a view tree into the checked-in expectation.
 ///
 /// Shared across every recorded pane rather than copied: its exhaustiveness over
@@ -137,19 +133,18 @@ impl Case {
             .collect()
     }
 
-    /// The rows the native pane resolves at `width`. Every row, in the model's
-    /// order: the window is the renderer's, resolved from the cursor below.
-    fn native_rows(&self, width: u16) -> Vec<TaskRow> {
+    /// The rows the native pane resolves. Every row, in the model's order: the
+    /// window is the renderer's, resolved from the cursor below — and since ADR-52
+    /// so is the fit, which is why no width appears in this file's comparison at
+    /// all.
+    fn native_rows(&self) -> Vec<TaskRow> {
         let entries = self.entries();
-        task_rows(
-            &TaskPaneState {
-                entries: &entries,
-                selected: self.selected,
-                focus: self.focus,
-                preview_selected: self.preview,
-            },
-            width,
-        )
+        task_rows(&TaskPaneState {
+            entries: &entries,
+            selected: self.selected,
+            focus: self.focus,
+            preview_selected: self.preview,
+        })
     }
 
     /// The cursor's row, clamped the way both panes clamp it.
@@ -157,8 +152,8 @@ impl Case {
         (!self.rows.is_empty()).then(|| self.selected.min(self.rows.len() - 1))
     }
 
-    fn native_tree(&self, width: u16) -> ViewNode {
-        tasks_tree(&self.native_rows(width), self.cursor(), self.is_focused())
+    fn native_tree(&self) -> ViewNode {
+        tasks_tree(&self.native_rows(), self.cursor(), self.is_focused())
     }
 
     fn is_focused(&self) -> bool {
@@ -171,11 +166,11 @@ impl Case {
     /// the kernel is what knows which row the cursor is visibly on, so publishing
     /// that per row is what stops the plugin having to reconstruct a rule it
     /// cannot see the inputs to.
-    fn context(&self, width: u16) -> PaneContext {
+    fn context(&self) -> PaneContext {
         PaneContext {
             tasks: TasksSnapshot {
                 entries: self
-                    .native_rows(width)
+                    .native_rows()
                     .into_iter()
                     .map(|r| TaskSnapshot {
                         id: 0,
@@ -429,9 +424,9 @@ fn the_plugin_builds_the_native_panes_view_tree() {
     let host = host();
 
     for case in cases() {
-        thurbox::session::pane_context::publish(case.context(WIDE));
+        thurbox::session::pane_context::publish(case.context());
         let plugin = render(&host);
-        let native = case.native_tree(WIDE);
+        let native = case.native_tree();
         // Edge one: the checked-in expectation is the native pane's tree. It is
         // what survives the handover, and the only moment its baseline can be
         // shown to come from the pane rather than from the plugin is while
@@ -453,14 +448,18 @@ fn the_plugin_builds_the_native_panes_view_tree() {
     }
 }
 
-/// The equality above is only meaningful at a width where the kernel's fitting
-/// step is a no-op, so that is asserted rather than assumed: no title fitted. No
-/// row is windowed away at any width — the tree carries every one — which the row
-/// count here also pins.
+/// The equality above is now size-independent, and this is what makes that a fact
+/// rather than a hope: the native pane resolves **every** row and fits **no** title,
+/// so there is no width at which the two trees could differ.
+///
+/// It replaces a test that asserted the *comparison size* was wide enough to make
+/// the fitting step a no-op — which was the honest thing to assert while the pane
+/// fitted its own titles, and is not needed now that it declares the fit instead
+/// (ADR-52).
 #[test]
-fn the_comparison_size_adjusts_nothing() {
+fn the_native_pane_resolves_no_geometry() {
     for case in cases() {
-        let rows = case.native_rows(WIDE);
+        let rows = case.native_rows();
         assert_eq!(
             rows.len(),
             case.rows.len(),
@@ -470,7 +469,7 @@ fn the_comparison_size_adjusts_nothing() {
         for (resolved, original) in rows.iter().zip(&case.rows) {
             assert_eq!(
                 resolved.title, original.title,
-                "`{}` had a title fitted at the comparison size",
+                "`{}` had a title fitted before the tree — the fit is the renderer's",
                 case.name
             );
         }
@@ -485,7 +484,7 @@ fn the_compared_tree_is_a_whole_pane() {
         .into_iter()
         .find(|c| c.name == "a running search")
         .expect("the search case");
-    let tree = case.native_tree(WIDE);
+    let tree = case.native_tree();
     let (rows, selected) = match &tree {
         ViewNode::List {
             children, selected, ..
@@ -500,17 +499,22 @@ fn the_compared_tree_is_a_whole_pane() {
     assert!(runs >= 8, "{tree:#?}");
 }
 
-/// **Enumerated divergence 1: a title wider than the column.** The kernel fits it
-/// with an ellipsis and reserves room for the trailing marker, using a width the
-/// plugin is never told. The plugin's copy draws the whole title and the renderer
-/// clips it at the pane edge — so a long title loses its ellipsis and a linked row
-/// can lose its marker.
+/// **The last divergence, closed: a title wider than the column.** It used to be
+/// the one enumerated gap left in this port — the kernel fitted the title with an
+/// ellipsis and reserved the marker's room using a width the plugin is never told,
+/// so the plugin's copy drew the whole title, the renderer clipped it at the pane
+/// edge, and a linked row could lose its `⇄` entirely.
 ///
-/// Closing it needs a `line` that clips with an ellipsis and a flush-right run.
-/// The mechanism exists inside the renderer already (a gauge right-aligns its
-/// suffix); what is missing is a node that asks for it.
+/// Both panes now *declare* that the title run yields its width (ADR-52) and the
+/// same renderer fits it, so this asserts what the divergence asserted the negation
+/// of: at a width narrow enough to cut the title, the two panes paint the **same
+/// frame** — ellipsis, marker and all.
+///
+/// A painted frame rather than the trees, deliberately: the trees are now equal at
+/// every width (the case above proves that), so only a paint can show the *fit* was
+/// resolved the same way. Same argument as the scroll window's test below.
 #[test]
-fn a_title_wider_than_the_column_is_fitted_by_the_kernel_only() {
+fn the_plugin_paints_the_native_frame_when_a_title_is_too_wide() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
     let host = host();
     let case = Case {
@@ -523,42 +527,33 @@ fn a_title_wider_than_the_column_is_fitted_by_the_kernel_only() {
         focus: FocusLevel::Inactive,
         preview: false,
     };
+    /// Narrow enough that the title cannot fit, so the fit is exercised rather
+    /// than skipped.
     const NARROW: u16 = 18;
 
-    // The plugin reads what the kernel publishes, which is not fitted to a width.
-    thurbox::session::pane_context::publish(case.context(WIDE));
+    thurbox::session::pane_context::publish(case.context());
     let plugin = render(&host);
-    let native = case.native_tree(NARROW);
-    assert_ne!(
+    let native = case.native_tree();
+    assert_eq!(
         plugin, native,
-        "if these ever agree, the pane stopped fitting titles and this \
-         divergence should be retired"
+        "the plugin declares the same yielding run the pane does"
     );
+    assert_eq!(paint(&plugin, NARROW, 1), paint(&native, NARROW, 1));
 
-    let text_of = |tree: &ViewNode| -> String {
-        fn walk(node: &ViewNode, out: &mut String) {
-            if let ViewNode::Text { content, .. } = node {
-                out.push_str(content);
-            }
-            node.children().iter().for_each(|c| walk(c, out));
-        }
-        let mut out = String::new();
-        walk(tree, &mut out);
-        out
+    // And the frame is the *fitted* one, so the equality above is not two panes
+    // agreeing about an unfitted title.
+    let painted: String = {
+        let buf = paint(&plugin, NARROW, 1);
+        (0..NARROW).map(|x| buf[(x, 0)].symbol()).collect()
     };
     assert!(
-        text_of(&native).contains('…'),
-        "the native pane fits the title: {:?}",
-        text_of(&native)
+        painted.contains('…'),
+        "the title should be cut with an ellipsis: {painted:?}"
     );
     assert!(
-        !text_of(&plugin).contains('…'),
-        "the plugin draws the whole title and lets the renderer clip: {:?}",
-        text_of(&plugin)
+        painted.trim_end().ends_with('⇄'),
+        "and the marker should survive, which is the half a clip lost: {painted:?}"
     );
-    // And the marker is still *in* the plugin's tree — it is the renderer that
-    // will clip it, not the plugin that drops it.
-    assert!(text_of(&plugin).contains('⇄'));
 }
 
 /// **The gap that closed: a list longer than the pane.** The previous port left
@@ -602,12 +597,12 @@ fn the_plugin_paints_the_native_frame_when_the_pane_scrolls() {
         focus: FocusLevel::Focused,
         preview: false,
     };
-    thurbox::session::pane_context::publish(case.context(WIDE));
+    thurbox::session::pane_context::publish(case.context());
 
     const WIDTH: u16 = 30;
     const HEIGHT: u16 = 3;
     let plugin = paint(&render(&host), WIDTH, HEIGHT);
-    let native = paint(&case.native_tree(WIDE), WIDTH, HEIGHT);
+    let native = paint(&case.native_tree(), WIDTH, HEIGHT);
     assert_eq!(plugin, native, "the plugin's frame is not the native frame");
 
     // And that frame is the *scrolled* one — otherwise the two could agree by

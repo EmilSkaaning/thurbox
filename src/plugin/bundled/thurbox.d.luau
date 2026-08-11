@@ -27,6 +27,12 @@ export type DiffTint = "added" | "removed"
 -- and the fields are the node's own — so this is a spelling, not a second model.
 -- It exists because a style now carries more than a call can reasonably order:
 -- `tint` has no positional slot and never will.
+-- `ellipsize` is the one field that is neither a colour nor an attribute: the run
+-- **yields its width** to the others on its line. When the line overflows the host
+-- cuts this run with an `…` and every other run keeps its columns, which is how a
+-- trailing marker survives a title too long for the pane. Consecutive yielding runs
+-- are cut as one piece of text, so a title split at its search-match offsets gets a
+-- single ellipsis. It does nothing in a `paragraph`, which wraps rather than clips.
 export type TextStyle = {
     token: StyleToken?,
     bold: boolean?,
@@ -34,6 +40,7 @@ export type TextStyle = {
     underline: boolean?,
     selected: boolean?,
     tint: DiffTint?,
+    ellipsize: boolean?,
 }
 
 export type ViewNode = {
@@ -89,7 +96,7 @@ export type Ui = {
     -- in declaration order (bold, underline, dim).
     -- `style` is either a token name (the positional form, whose flags follow it)
     -- or a whole `TextStyle` table. Both build the same node; the table is the
-    -- only form that reaches `tint`.
+    -- only form that reaches `tint` and `ellipsize`.
     text: (
         content: string | number,
         style: (StyleToken | TextStyle)?,
