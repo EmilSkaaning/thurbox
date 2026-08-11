@@ -40,7 +40,8 @@ use thurbox::session::plugin_manifest::PluginManifest;
 /// on screen (ADR-50). So the list is also the answer to "which bundled panes are no
 /// longer reproductions", which is why an entry earns its place even when the seed
 /// did not change.
-const PANES_DRAWN_IN_A_NATIVE_PANES_PLACE: &[(&str, &str)] = &[("info-panel", "info")];
+const PANES_DRAWN_IN_A_NATIVE_PANES_PLACE: &[(&str, &str)] =
+    &[("info-panel", "info"), ("tasks", "tasks")];
 
 fn bundled_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/plugin/bundled")

@@ -69,7 +69,6 @@ use thurbox::session::motion::FrameTable;
 use thurbox::session::pane_context::{PaneContext, TaskSnapshot, TasksSnapshot};
 use thurbox::session::view_tree::ViewNode;
 use thurbox::session::TaskStatus;
-use thurbox::ui::tasks_panel::{task_rows, tasks_tree, TaskPaneEntry, TaskPaneState, TaskRow};
 use thurbox::ui::FocusLevel;
 
 /// The recorder that turns a view tree into the checked-in expectation.
@@ -104,11 +103,12 @@ fn row(title: &'static str, status: TaskStatus) -> Row {
     }
 }
 
-/// One comparison case.
+/// One case: the published section a pane reads, plus the recording it must draw.
 ///
-/// Both sides are derived from `rows` by [`Case::native_rows`], so an equality
-/// failure is a statement about the plugin rather than about two hand-written
-/// fixtures drifting apart.
+/// `focus` and `preview` are here because the *kernel* is what resolves which row a
+/// cursor is drawn on (the pane focused, or a global-search preview moving it) — the
+/// rule `App::build_tasks_snapshot` applies, mirrored here so a fixture cannot
+/// publish a state the kernel never would.
 struct Case {
     name: &'static str,
     rows: Vec<Row>,
@@ -118,42 +118,16 @@ struct Case {
 }
 
 impl Case {
-    fn entries(&self) -> Vec<TaskPaneEntry> {
-        self.rows
-            .iter()
-            .map(|r| TaskPaneEntry {
-                // Not drawn by either pane; fixed so the trees stay comparable.
-                id: 0,
-                title: r.title.to_string(),
-                status: r.status,
-                match_positions: r.matches.clone(),
-                dimmed: r.dimmed,
-                linked: r.linked,
-            })
-            .collect()
+    /// Whether the cursor is drawn at all — the kernel's rule, not the pane's: a row
+    /// is marked as the cursor's while the pane is focused, or while a global-search
+    /// preview is moving the cursor there.
+    fn cursor_visible(&self) -> bool {
+        self.is_focused() || self.preview
     }
 
-    /// The rows the native pane resolves. Every row, in the model's order: the
-    /// window is the renderer's, resolved from the cursor below — and since ADR-52
-    /// so is the fit, which is why no width appears in this file's comparison at
-    /// all.
-    fn native_rows(&self) -> Vec<TaskRow> {
-        let entries = self.entries();
-        task_rows(&TaskPaneState {
-            entries: &entries,
-            selected: self.selected,
-            focus: self.focus,
-            preview_selected: self.preview,
-        })
-    }
-
-    /// The cursor's row, clamped the way both panes clamp it.
+    /// The cursor's row, clamped the way the publisher clamps it.
     fn cursor(&self) -> Option<usize> {
         (!self.rows.is_empty()).then(|| self.selected.min(self.rows.len() - 1))
-    }
-
-    fn native_tree(&self) -> ViewNode {
-        tasks_tree(&self.native_rows(), self.cursor(), self.is_focused())
     }
 
     fn is_focused(&self) -> bool {
@@ -167,19 +141,22 @@ impl Case {
     /// that per row is what stops the plugin having to reconstruct a rule it
     /// cannot see the inputs to.
     fn context(&self) -> PaneContext {
+        let visible = self.cursor_visible();
         PaneContext {
             tasks: TasksSnapshot {
                 entries: self
-                    .native_rows()
-                    .into_iter()
-                    .map(|r| TaskSnapshot {
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| TaskSnapshot {
+                        // Not drawn; fixed so the recordings stay comparable.
                         id: 0,
-                        title: r.title,
+                        title: r.title.to_string(),
                         status: r.status.as_str(),
-                        selected: r.selected,
+                        selected: visible && i == self.selected,
                         dimmed: r.dimmed,
                         linked: r.linked,
-                        match_positions: r.match_positions,
+                        match_positions: r.matches.clone(),
                     })
                     .collect(),
                 cursor: self.cursor(),
@@ -412,12 +389,15 @@ fn paint(tree: &ViewNode, width: u16, height: u16) -> Buffer {
     buf
 }
 
-/// The headline claim: for every case, the plugin's tree equals the native
-/// pane's. Equal trees paint identically, so this is byte-identity of the pane.
+/// The headline claim: for every case, the plugin draws the recorded pane.
 ///
-/// The recorded edge is asserted **first**, so a run in which both edges break
-/// reports the recording — the fact about the pane — rather than only that two
-/// implementations disagree.
+/// The recordings are the native pane's trees, generated from
+/// `ui::tasks_panel::tasks_tree` while it existed and asserted against it in the
+/// same test (ADR-42). They are the only thing left holding this plugin to the pane,
+/// which is why they must never be regenerated from it: a `cargo insta accept` here
+/// would convert twelve statements about the pane into twelve statements about
+/// whatever the plugin currently does, and the test could no longer fail for the
+/// reason it exists.
 #[test]
 fn the_plugin_builds_the_native_panes_view_tree() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
@@ -426,65 +406,26 @@ fn the_plugin_builds_the_native_panes_view_tree() {
     for case in cases() {
         thurbox::session::pane_context::publish(case.context());
         let plugin = render(&host);
-        let native = case.native_tree();
-        // Edge one: the checked-in expectation is the native pane's tree. It is
-        // what survives the handover, and the only moment its baseline can be
-        // shown to come from the pane rather than from the plugin is while
-        // `tasks_tree` is still here to generate it.
-        insta::assert_snapshot!(case.snapshot_name(), view_tree_record::tree(&native));
-        // Edge two: the plugin reproduces that recording. Asserted through the
-        // records rather than the trees, because a failure here has to be
-        // readable — the structural equality below says the same thing in two
-        // thousand-character dumps a reader has to diff by eye.
-        view_tree_record::assert_matches(case.name, &plugin, &native);
-        // Edge three: the port's original claim, exact rather than legible. Kept
-        // beneath the readable one so a divergence reports itself twice, most
-        // useful form first.
-        assert_eq!(
-            plugin, native,
-            "the plugin's tree diverges from the native pane for `{}`",
-            case.name
-        );
+        insta::assert_snapshot!(case.snapshot_name(), view_tree_record::tree(&plugin));
     }
 }
 
-/// The equality above is now size-independent, and this is what makes that a fact
-/// rather than a hope: the native pane resolves **every** row and fits **no** title,
-/// so there is no width at which the two trees could differ.
+/// The compared tree must be a whole pane, or the assertion above could pass on a
+/// nearly-empty list.
 ///
-/// It replaces a test that asserted the *comparison size* was wide enough to make
-/// the fitting step a no-op — which was the honest thing to assert while the pane
-/// fitted its own titles, and is not needed now that it declares the fit instead
-/// (ADR-52).
-#[test]
-fn the_native_pane_resolves_no_geometry() {
-    for case in cases() {
-        let rows = case.native_rows();
-        assert_eq!(
-            rows.len(),
-            case.rows.len(),
-            "`{}` lost rows before the tree, which windows nothing",
-            case.name
-        );
-        for (resolved, original) in rows.iter().zip(&case.rows) {
-            assert_eq!(
-                resolved.title, original.title,
-                "`{}` had a title fitted before the tree — the fit is the renderer's",
-                case.name
-            );
-        }
-    }
-}
-
-/// The compared tree must be a whole pane, or the equality could pass on two
-/// nearly-empty lists.
+/// Counted from the **plugin's** tree now: the native builder that used to answer
+/// this is gone, and the recording it left is what the test above compares against.
+/// The numbers are unchanged, which is the point — they were true of the pane.
 #[test]
 fn the_compared_tree_is_a_whole_pane() {
+    let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
+    let host = host();
     let case = cases()
         .into_iter()
         .find(|c| c.name == "a running search")
         .expect("the search case");
-    let tree = case.native_tree();
+    thurbox::session::pane_context::publish(case.context());
+    let tree = render(&host);
     let (rows, selected) = match &tree {
         ViewNode::List {
             children, selected, ..
@@ -505,14 +446,14 @@ fn the_compared_tree_is_a_whole_pane() {
 /// so the plugin's copy drew the whole title, the renderer clipped it at the pane
 /// edge, and a linked row could lose its `⇄` entirely.
 ///
-/// Both panes now *declare* that the title run yields its width (ADR-52) and the
-/// same renderer fits it, so this asserts what the divergence asserted the negation
-/// of: at a width narrow enough to cut the title, the two panes paint the **same
-/// frame** — ellipsis, marker and all.
+/// The plugin *declares* that the title run yields its width (ADR-52) and the kernel
+/// fits it, so this asserts the frame the recording cannot: an ellipsis at the cut
+/// and the marker still on the row.
 ///
-/// A painted frame rather than the trees, deliberately: the trees are now equal at
-/// every width (the case above proves that), so only a paint can show the *fit* was
-/// resolved the same way. Same argument as the scroll window's test below.
+/// A painted frame rather than a tree, deliberately — the tree carries the whole
+/// title at every width, so only a paint shows the fit was resolved. Same argument as
+/// the scroll window's test below. Neither has a recording: an expectation states
+/// what a *tree* is, and these two are about what the renderer did with one.
 #[test]
 fn the_plugin_paints_the_native_frame_when_a_title_is_too_wide() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
@@ -533,15 +474,6 @@ fn the_plugin_paints_the_native_frame_when_a_title_is_too_wide() {
 
     thurbox::session::pane_context::publish(case.context());
     let plugin = render(&host);
-    let native = case.native_tree();
-    assert_eq!(
-        plugin, native,
-        "the plugin declares the same yielding run the pane does"
-    );
-    assert_eq!(paint(&plugin, NARROW, 1), paint(&native, NARROW, 1));
-
-    // And the frame is the *fitted* one, so the equality above is not two panes
-    // agreeing about an unfitted title.
     let painted: String = {
         let buf = paint(&plugin, NARROW, 1);
         (0..NARROW).map(|x| buf[(x, 0)].symbol()).collect()
@@ -563,11 +495,10 @@ fn the_plugin_paints_the_native_frame_when_a_title_is_too_wide() {
 /// cursor is on and the *renderer* resolves the window, so both panes scroll
 /// through one implementation.
 ///
-/// The claim is therefore the file viewer's stronger one: not equal trees but the
-/// same painted frame at a height where the pane has to scroll. Tree equality
-/// alone could not say it — the two trees are equal at *every* height, which is
-/// the point of moving the window into the renderer, so only a paint can show the
-/// window was resolved the same way.
+/// The claim is therefore about a painted frame at a height where the pane has to
+/// scroll: the recorded tree is equal at *every* height — which is the point of the
+/// window being the renderer's — so only a paint can show the window was resolved to
+/// the cursor's row.
 #[test]
 fn the_plugin_paints_the_native_frame_when_the_pane_scrolls() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
@@ -602,11 +533,9 @@ fn the_plugin_paints_the_native_frame_when_the_pane_scrolls() {
     const WIDTH: u16 = 30;
     const HEIGHT: u16 = 3;
     let plugin = paint(&render(&host), WIDTH, HEIGHT);
-    let native = paint(&case.native_tree(), WIDTH, HEIGHT);
-    assert_eq!(plugin, native, "the plugin's frame is not the native frame");
 
-    // And that frame is the *scrolled* one — otherwise the two could agree by
-    // both being wrong.
+    // The frame is the *scrolled* one: the window the renderer resolved from the
+    // cursor the plugin declared.
     let text: String = (0..HEIGHT)
         .flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
         .map(|(x, y)| plugin[(x, y)].symbol().to_string())
@@ -639,24 +568,44 @@ fn the_plugin_declares_every_power_it_uses() {
         "a bundled pane that quietly asked for more would stop being evidence \
          about what a third party can build: {declared:?}"
     );
-    // Additive port: the pane must not appear on anyone's screen unasked, since
-    // the native pane is still the one thurbox draws.
+    // Handed over (ADR-53), and still hidden by default: `show_tasks_panel`
+    // initialised to `false` and F5 showed the panel, so the pane that replaced it
+    // seeds `false` too — a handover changes which code draws a pane, not whether it
+    // is on screen. `tests/bundled_manifests.rs` is where that rule lives; this
+    // asserts the manifest the oracle above is about.
     assert!(
         !plugin.manifest.panes[0].default_visible,
-        "the reproduction must be hidden by default"
+        "the pane must not appear on anyone's screen unasked"
+    );
+    assert_eq!(
+        plugin.manifest.panes[0].key_context,
+        Some(thurbox::session::KeyContext::Tasks),
+        "the pane answers thurbox's tasks keyboard, which is what makes its keys survive \
+         the handover"
     );
 }
 
 /// Before the host has published anything the reader answers "no tasks", so the
 /// plugin's first render must produce the empty-state pane rather than an error.
+///
+/// Compared against the recording of the equivalent *case* rather than against a
+/// call into the deleted builder: an empty publication and an empty task list are the
+/// same pane, so the unfocused empty-state recording is exactly the expectation.
 #[test]
 fn the_first_render_before_any_publication_succeeds() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
     let host = host();
     thurbox::session::pane_context::publish(PaneContext::default());
+    let unpublished = view_tree_record::tree(&render(&host));
+
+    let empty = cases()
+        .into_iter()
+        .find(|c| c.name == "no tasks, unfocused")
+        .expect("the unfocused empty case");
+    thurbox::session::pane_context::publish(empty.context());
     assert_eq!(
-        render(&host),
-        tasks_tree(&[], None, false),
+        unpublished,
+        view_tree_record::tree(&render(&host)),
         "an empty publication draws the same pane an empty task list does"
     );
 }

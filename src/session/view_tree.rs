@@ -393,7 +393,8 @@ pub enum ViewNode {
         ///
         /// Deliberately **not** inferred from `selected`. Three of thurbox's own
         /// panes draw selectable lists that overflow without a scrollbar
-        /// (`ui::tasks_panel`, `ui::automations_panel`, `ui::project_list`), so
+        /// (`ui::automations_panel`, `ui::project_list`, and the tasks pane before it was
+        /// handed over), so
         /// inferring one would put a track into panes that deliberately have
         /// none — and would move their frames.
         scrollbar: bool,

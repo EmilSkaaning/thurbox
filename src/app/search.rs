@@ -68,7 +68,11 @@ pub(crate) struct SearchSnapshot {
     pub active_index: usize,
     pub task_panel_index: usize,
     pub automation_panel_index: usize,
-    pub show_tasks_panel: bool,
+    /// The **stored** visibility of the pane that provides the task list, which is
+    /// a plugin's since ADR-53 — `None` when nothing provides it. Stored rather than
+    /// on-screen, so restoring cannot erase a choice a `[features]` switch was
+    /// hiding.
+    pub tasks_pane_visible: Option<bool>,
     pub show_file_viewer: bool,
 }
 
@@ -125,7 +129,8 @@ impl App {
             active_index: self.active_index,
             task_panel_index: self.task_ui.task_panel_index,
             automation_panel_index: self.automation_ui.automation_panel_index,
-            show_tasks_panel: self.show_tasks_panel,
+            tasks_pane_visible: self
+                .pane_keyboard_stored_visibility(crate::session::KeyContext::Tasks),
             show_file_viewer: self.show_file_viewer,
         });
         self.global_search.active = true;
@@ -147,7 +152,9 @@ impl App {
             self.active_index = snap.active_index.min(self.sessions.len().saturating_sub(1));
             self.task_ui.task_panel_index = snap.task_panel_index;
             self.automation_ui.automation_panel_index = snap.automation_panel_index;
-            self.show_tasks_panel = snap.show_tasks_panel;
+            if let Some(visible) = snap.tasks_pane_visible {
+                self.set_pane_keyboard_visible(crate::session::KeyContext::Tasks, visible);
+            }
             self.show_file_viewer = snap.show_file_viewer;
             self.focus = snap.focus;
         }
@@ -430,7 +437,10 @@ impl App {
                 }
             }
             SearchTarget::Task { id } => {
-                self.show_tasks_panel = true;
+                // Revealing the pane is how a task result is *shown*, and it is a
+                // plugin's pane now (ADR-53) — so a build with none has nowhere to
+                // jump, and the preview simply moves the cursor it can.
+                self.set_pane_keyboard_visible(crate::session::KeyContext::Tasks, true);
                 self.refresh_tasks();
                 if let Some(pos) = self
                     .task_ui
@@ -490,7 +500,12 @@ impl App {
                 }
             }
             SearchTarget::Task { id } => {
-                self.show_tasks_panel = true;
+                // Revealing the pane is how a task result is *opened*, and the pane is
+                // a plugin's now (ADR-53). A build with none has nowhere to land, so
+                // the jump reports that instead of focusing a pane that is not there
+                // — the one case where a result cannot be honoured.
+                let revealed =
+                    self.set_pane_keyboard_visible(crate::session::KeyContext::Tasks, true);
                 self.refresh_tasks();
                 if let Some(pos) = self
                     .task_ui
@@ -500,7 +515,12 @@ impl App {
                 {
                     self.task_ui.task_panel_index = pos;
                 }
-                self.focus = InputFocus::TaskList;
+                if revealed {
+                    self.focus = InputFocus::TaskList;
+                } else {
+                    self.focus = fallback_focus;
+                    self.set_info(format!("Tasks panel: {}", Self::no_pane_hint("tasks")));
+                }
             }
             SearchTarget::Automation { id } => {
                 if let Some(pos) = self

@@ -6,7 +6,7 @@
 //! helpers. File I/O (reading directory entries) is performed lazily when a
 //! folder is expanded.
 //!
-//! Like [`super::tasks_panel`], the tree renders
+//! Like [`super::automations_panel`], the tree renders
 //! through the **view tree**: [`file_tree`] describes the rows and
 //! [`super::plugin_pane::render_tree`] paints them. The split is sharper here
 //! than in the tasks pane, and that is the point of this port:

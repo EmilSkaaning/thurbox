@@ -1,13 +1,19 @@
-# thurbox's tasks pane, as a plugin.
+# thurbox's tasks pane.
 #
-# The second pane of Phase 4, and the first *list* pane: a selectable list with
-# search emphasis, which is the shape every remaining native pane has. It is a
-# *reproduction*, not a replacement — the native pane is still what thurbox
-# draws, and `tests/bundled_tasks_panel.rs` asserts this plugin builds the
-# identical view tree, so the two cannot drift while both exist.
+# Not a reproduction any more: `src/ui/tasks_panel.rs` is deleted and this is the
+# pane (ADR-53). It is the first of thurbox's own panes **with a keyboard** that the
+# kernel does not draw, and the measure of the whole v2 pane model — a third party
+# could write this file, because every host power below is a declared capability and
+# the keys are declared rather than granted.
 #
-# Two capabilities, and that is the whole reach: it renders, and it reads the
-# task list. Nothing here is privileged.
+# `tests/bundled_tasks_panel.rs` still holds it to the native pane's tree: the twelve
+# checked-in recordings under `tests/snapshots/` were generated from
+# `ui::tasks_panel::tasks_tree` while it existed, so they are a statement about the
+# pane rather than about this file.
+#
+# Two capabilities, and that is the whole reach: it renders, and it reads the task
+# list. Nothing here is privileged — in particular, answering `j`/`Space`/`d` needs
+# no capability at all, because the *kernel* performs those actions (ADR-51).
 name = "tasks"
 api_version = 1
 
@@ -15,9 +21,27 @@ capabilities = ["render", "tasks"]
 
 [[panes]]
 id = "tasks"
-title = "Tasks (plugin)"
-slot = "right"
-# Off by default. The native tasks pane is still what F5 shows, so shipping this
-# visible would put two task lists side by side on every install. Turn it on to
-# compare them.
+# The native pane's title, not "Tasks (plugin)": a name that marks the pane as a
+# plugin is right for a copy drawn beside the original and wrong for the pane.
+title = "Tasks"
+# The seat the tasks pane occupies: the right column's first occupant, left of the
+# file viewer (ADR-53). `right` would have put it to the *right* of both, which is a
+# change a user notices.
+slot = "tasks"
+# The key that always showed the tasks panel (`F5`/`Ctrl+W`). With no kernel pane
+# left for this seat it flips this pane, and the kernel's own arm does what the flip
+# cannot: follow it with focus.
+toggle_action = "FocusTasks"
+# The switch that always gated the tasks panel. Off, this is not a pane: not shown,
+# no seat, not rendered — and the user's stored visibility survives, so turning it
+# back on restores what they had.
+feature = "tasks"
+# thurbox's tasks keyboard (ADR-51). This pane *is* that pane, so all ten
+# `KeyContext::Tasks` actions resolve while it holds focus and the kernel performs
+# them against its own state — the cursor `j` moves, the status `Space` cycles, the
+# editor `n` opens. Still rebindable in the F1 editor, and this plugin never sees a
+# key.
+key_context = "Tasks"
+# Hidden, because `App::show_tasks_panel` initialised to `false`: a handover changes
+# which code draws a pane, not whether it is on screen.
 default_visible = false

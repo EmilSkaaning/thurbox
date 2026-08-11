@@ -430,6 +430,17 @@ pub enum PaneSlot {
     /// The central pane, which the agent terminal, the shell view and the code
     /// review share.
     Center,
+    /// The right column's **first** occupant — the seat the tasks pane occupies,
+    /// left of the file viewer.
+    ///
+    /// A seat inside a column, which ADR-46 declined to add on the ground that
+    /// [`PaneSlot::Right`] already seats a pane in that column. It does, and it is
+    /// not the same seat: the column's occupants are drawn in a fixed order
+    /// (tasks, file viewer, then plugin panes), so a `right` pane lands to the
+    /// *right* of the file viewer while the tasks column is to its left. A
+    /// position in a column is part of the pane, so the seat is named rather than
+    /// approximated (ADR-53).
+    Tasks,
 }
 
 impl PaneSlot {
@@ -441,6 +452,7 @@ impl PaneSlot {
             PaneSlot::LeftBottom => "left-bottom",
             PaneSlot::CenterLeft => "center-left",
             PaneSlot::Center => "center",
+            PaneSlot::Tasks => "tasks",
         }
     }
 
@@ -452,6 +464,7 @@ impl PaneSlot {
             PaneSlot::LeftBottom,
             PaneSlot::CenterLeft,
             PaneSlot::Center,
+            PaneSlot::Tasks,
         ]
     }
 
@@ -474,6 +487,7 @@ impl PaneSlot {
             PaneSlot::LeftBottom => Some(RegionId::Automations),
             PaneSlot::CenterLeft => Some(RegionId::Info),
             PaneSlot::Center => Some(RegionId::Center),
+            PaneSlot::Tasks => Some(RegionId::Tasks),
         }
     }
 }

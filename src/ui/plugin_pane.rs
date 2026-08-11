@@ -2,7 +2,7 @@
 //!
 //! Named for the pane kind it was written for, but **not** limited to one: since
 //! Phase 0's exit criterion this is also how thurbox's own panes are painted —
-//! [`crate::ui::tasks_panel`], [`crate::ui::file_viewer`] and the rest — so it
+//! [`crate::ui::file_viewer`], [`crate::ui::project_list`] and the rest — so it
 //! compiles in every build rather than only with the plugin host. The name is kept
 //! as a deliberate non-decision — renaming it carries no behaviour and would have
 //! obscured the diff that ungated it.

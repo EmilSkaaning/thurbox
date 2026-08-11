@@ -28,7 +28,7 @@ pub mod task;
 pub mod theme_config;
 pub mod workspace_tree;
 // The view tree is **not** plugin-gated, though it began as plugin surface. It
-// is now the kernel's own rendering IR: `ui::tasks_panel` and the other native
+// is now the kernel's own rendering IR: `ui::project_list` and the other native
 // panes build one and `ui::plugin_pane` paints it, in every build. Gating it
 // would mean a native pane had two renderers selected by a Cargo feature — which
 // is exactly the divergence Phase 0's byte-identity criterion exists to prevent.

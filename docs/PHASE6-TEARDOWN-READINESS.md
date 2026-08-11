@@ -9,8 +9,8 @@ Every claim below is traced to the code that makes it true, and each is enforced
 by `tests/teardown_gate.rs` (ADR-23) so it cannot quietly go stale — if you
 implement one of these replacements, that test will tell you to come back here.
 
-Status: **2 of 14 replacements ready.** One unit is deleted: the info panel's native
-renderer (ADR-50). No other unit is deletable.
+Status: **3 of 14 replacements ready.** Two units are deleted: the info panel's native
+renderer (ADR-50) and the tasks pane's (ADR-53). No other unit is deletable.
 
 ## 1. The deletion targets are real and exactly the claimed size
 
@@ -75,7 +75,7 @@ written for now has one.
 | Pane | Native renderer | Bundled plugin | Drawn by |
 |---|---|---|---|
 | Info panel | **deleted** (ADR-50) | `info-panel` | **the plugin** |
-| Tasks | `src/ui/tasks_panel.rs` | `tasks` | the native pane |
+| Tasks | **deleted** (ADR-53) | `tasks` | **the plugin** |
 | Automations | `src/ui/automations_panel.rs` | `automations` (its rows **and** five of its seven keys, PHASE4 §17) | the native pane |
 | File viewer | `src/ui/file_viewer.rs` | `file-viewer` | the native pane |
 | Global search | `src/ui/global_search.rs` | none possible yet (PHASE4 §10) | the native pane |
@@ -95,13 +95,14 @@ own, and writes their cursors and the focus, none of which a plugin pane may do.
 `tests/global_search_pane_gap.rs` holds that verdict as probes, so whoever closes
 one of its blockers is told to revisit it.
 
-The tasks row is the first on which a **handover** was attempted with keys in the
-way, and PHASE4 §15 is the record: its rendering is now reproduced to the frame
-(the plugin's copy scrolls with the cursor, ADR-38), and eight of its ten keys
-need a power a plugin pane is not given. That was a second blocker beside
-ADR-37's, and a different kind — the build blocker was one release decision, taken
-since (ADR-40); this one is a question about what an installed plugin may do to the
-interface, and it is now the binding constraint. It is step 8 of §4's worklist.
+The tasks row was the first on which a **handover** was attempted with keys in the
+way (PHASE4 §15), and its refusal is worth keeping because of how it was resolved.
+Eight of the pane's ten keys needed a power a plugin pane is not given — and none of
+those powers was granted. ADR-51 changed the question instead: a pane declares the
+kernel's key context, and the *kernel* keeps dispatching those ten actions against
+its own state. So the row is `ready` (ADR-53) with the write seam exactly as narrow as
+it was, and the refused table is preserved in that ADR rather than deleted, because it
+is still the answer for any pane that wants keys **of its own**.
 
 The code-review row is the first that is **partly** filled: the bundled plugin
 reproduces the unified diff stream's lines and nothing else, and §11 of the same
@@ -132,7 +133,18 @@ seat rather than a grant. The session list's row was refused the same day for th
 opposite reason: its keys move the **active session**, which is kernel view state
 no capability writes.
 
-**The info panel is handed over, and it is the only one** (ADR-50, PHASE4 §25).
+**Two panes are handed over.** The tasks pane went second (ADR-53, PHASE4 §28) and is
+the first **with a keyboard**: `src/ui/tasks_panel.rs` is deleted, the bundled plugin
+draws the column from a new `tasks` seat, and `key_context = "Tasks"` is what keeps all
+ten of its scoped actions firing — against kernel state, still rebindable in F1, with
+the plugin never handed a key. Three things that handover had to decide: the **seat**
+(named, reversing part of ADR-46 — a position within a column is part of the pane), the
+**hint row** (kernel **seat chrome**, because those chords are rebindable and no
+published state carries a keymap — the mechanism the file viewer's search bar will
+need), and the **flag** (`show_tasks_panel` deleted, with the three focus questions it
+was quietly answering kept). Its recordings did not move.
+
+**The info panel was the first** (ADR-50, PHASE4 §25).
 `src/ui/info_panel.rs` is deleted, its row is the gate's first `ready`, and
 `every_listed_path_survives_until_its_unit_is_ready` no longer protects the path.
 It went first because it is the one reproduced pane with **no gap file**: it declares
@@ -145,16 +157,17 @@ and it surfaced two latent bugs that no *reproduction* could have: a pane visibi
 change never resized the sessions, and an input-less pane was swallowing clicks in
 front of drag-select.
 
-**A pane's row is ready only on handover, not on existence.** The five remaining
-panes show why the distinction is load-bearing rather than pedantic: each plugin
-exists and reproduces its pane (three exactly, code review in the part it declares,
-the session list in its rows), while the native renderer is still what the interface
-draws. Deleting `src/ui/tasks_panel.rs` today would remove the pane every user is
-looking at. So `tests/teardown_gate.rs`'s pane probe is a four-way conjunction, and
+**A pane's row is ready only on handover, not on existence.** The four remaining panes
+show why the distinction is load-bearing rather than pedantic: each plugin exists and
+reproduces its pane (two exactly, code review in the part it declares, the session list
+in its rows), while the native renderer is still what the interface draws. Deleting
+`src/ui/automations_panel.rs` today would remove the pane every user is looking at. So
+`tests/teardown_gate.rs`'s pane probe is a four-way conjunction, and
 `a_reproduced_pane_is_not_a_replaced_one` pins that reasoning so it cannot be
-"simplified" back to a directory check — with the **tasks pane** as its worked
-example now, guarded by a test that fails if that pane is handed over without moving
-the example, because the repair that passes is to flip the assertions.
+"simplified" back to a directory check — with the **automations pane** as its worked
+example now (the info panel until ADR-50, the tasks pane until ADR-53), guarded by a
+test that fails if that pane is handed over without moving the example, because the
+repair that passes is to flip the assertions.
 
 Two of the gate's own rules had to be **scoped to blocked rows** for the same reason,
 and it is worth naming as a class: a handover inverts the direction they read the tree
@@ -194,7 +207,7 @@ mistake** (ADR-48): the pane's equality oracle must hold a **recorded** expectat
 not only a comparison against the native builder the deletion removes. Conditions
 1-3 protect the pane — violate one and a column is empty, which someone notices.
 Condition 4 protects the *evidence*: each oracle asserts the plugin's tree equals
-`ui::tasks_panel::tasks_tree` or the like, so the deletion takes the right-hand side
+`ui::project_list::session_tree` or the like, so the deletion takes the right-hand side
 with it and the repair that compiles is to drop the comparison. What survives is a
 test that the plugin renders without erroring, and the pane looks perfect while
 nothing constrains it. The recording is provable only while the native builder is
@@ -210,9 +223,13 @@ needs the plugin pane to be reachable from the keyboard (PHASE4 §5, done), to b
 seatable in the native pane's region (PHASE4 §21, done), to answer its action and
 feature flag (PHASE4 §22, done), to carry a recorded oracle (PHASE4 §23, done for
 all six reproduced panes), and to render on events rather than on a 1 s poll
-(PHASE4 §24, done). All five are closed, and the info panel took that route first
-(PHASE4 §25). What holds the remaining five is **focus** plus each pane's own
-recorded rows.
+(PHASE4 §24, done). All five are closed; the info panel took that route first (PHASE4
+§25) and the tasks pane second (PHASE4 §28). **Focus is closed too** for four of the
+five that remain (ADR-51: a pane declares the kernel's key context and is focused as
+that pane), so what holds each of them is its own recorded rows — a module that is also
+the kernel's model, a drawing gap, a second seat. The code review is the exception and
+the route cannot reach it: its keys are a `self.focus` capture rather than scoped
+actions, so there is nothing for a declaration to name.
 
 Stage B's *exit* criterion ("at least one plugin that thurbox did not write") is a
 separate matter and cannot be met until a release carrying the host has shipped —

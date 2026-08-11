@@ -753,6 +753,11 @@ pub(crate) enum ClickAction {
     /// `render_order_indices()` at click time, like `Ctrl+J`/`Ctrl+K`).
     SelectSession(usize),
     /// Select the task at this index in the filtered tasks panel.
+    ///
+    /// Recorded only by the pane that provides the task list, which is a plugin's
+    /// since ADR-53 — so like [`ClickAction::PluginPaneRow`] it exists only where a
+    /// plugin can exist. A build with no plugin host has no tasks pane to click.
+    #[cfg(feature = "plugins")]
     SelectTask(usize),
     /// Select the automation at this index in the automations pane.
     SelectAutomation(usize),
@@ -1063,8 +1068,6 @@ pub struct App {
     /// like `features` and re-applied on a live reload — the render path reads
     /// it every frame, so it cannot come from the write-once global.
     pub(crate) motion_settings: crate::session::settings::MotionSettings,
-    /// Whether the tasks panel column is shown (toggled like the file viewer).
-    pub(crate) show_tasks_panel: bool,
     /// Plugin-contributed panes and what each is currently showing.
     ///
     /// Held here rather than in `main` because, unlike the host itself, this is
@@ -1483,7 +1486,6 @@ impl App {
             session_counter,
             features: crate::session::settings::global().features,
             motion_settings: crate::session::settings::global().motion,
-            show_tasks_panel: false,
             published_pane_context: None,
             #[cfg(feature = "plugins")]
             plugin_panes: Vec::new(),
@@ -1714,11 +1716,15 @@ impl App {
                 self.focus = self.focus_fallback();
             }
         }
-        if !self.features.tasks {
-            self.show_tasks_panel = false;
-            if matches!(self.focus, InputFocus::TaskList | InputFocus::TaskEditor) {
-                self.focus = self.focus_fallback();
-            }
+        // The tasks pane hides *itself* when this flag goes off — it declares
+        // `feature = "tasks"` (ADR-47) — but focus does not follow, and a focus left
+        // on a pane that is gone keeps the central preview drawing for a list nobody
+        // can see. The flag that used to be flipped here is deleted (ADR-53); the
+        // question it was answering for focus is not.
+        if !self.features.tasks
+            && matches!(self.focus, InputFocus::TaskList | InputFocus::TaskEditor)
+        {
+            self.focus = self.focus_fallback();
         }
         if !self.features.automations
             && matches!(
@@ -3399,6 +3405,7 @@ impl App {
                 self.on_focus_changed();
                 false
             }
+            #[cfg(feature = "plugins")]
             ClickAction::SelectTask(i) => {
                 self.focus = InputFocus::TaskList;
                 let len = self.task_ui.filtered_task_indices.len();
@@ -4750,13 +4757,14 @@ impl App {
         // transient `show_*` flag. `compute_layout` already refuses the seat below
         // 120 columns, so narrowing hides it and widening brings it back —
         // destroying the choice on a resize would be the worse behaviour of the two.
-        if cols < 120 {
-            self.show_tasks_panel = false;
-            // Rescue the editor too, not just the list — otherwise focus stays
-            // on the hidden panel's editor, which keeps capturing every key.
-            if matches!(self.focus, InputFocus::TaskList | InputFocus::TaskEditor) {
-                self.focus = self.focus_fallback();
-            }
+        // Below 120 columns the layout refuses this seat, so the pane is not on
+        // screen however it is configured — and focus has to leave it. The pane's own
+        // visibility is the user's stored choice now (ADR-53), so widening brings it
+        // back rather than a resize having destroyed it. The editor is rescued too,
+        // not just the list: focus left on the hidden pane's editor keeps capturing
+        // every key.
+        if cols < 120 && matches!(self.focus, InputFocus::TaskList | InputFocus::TaskEditor) {
+            self.focus = self.focus_fallback();
         }
 
         self.resize_sessions_to_content_area();
@@ -7850,7 +7858,7 @@ impl App {
     /// be two answers to "which tasks, matched how". Titles are reduced to a
     /// display cap here and the search is matched against the *reduced* title, so
     /// a highlight offset always indexes the string that is drawn.
-    pub(crate) fn task_pane_entries(&self) -> Vec<crate::ui::tasks_panel::TaskPaneEntry> {
+    pub(crate) fn task_pane_entries(&self) -> Vec<task_state::TaskPaneEntry> {
         let search = self.global_search_query();
         self.task_ui
             .filtered_task_indices
@@ -7859,7 +7867,7 @@ impl App {
             .map(|t| {
                 let title = view::truncate_str(&t.title, 40);
                 let m = search.and_then(|q| crate::fuzzy::fuzzy_match(q, &title));
-                crate::ui::tasks_panel::TaskPaneEntry {
+                task_state::TaskPaneEntry {
                     id: t.id,
                     title,
                     status: t.status,
@@ -8441,6 +8449,66 @@ impl App {
             .find(|p| p.is_shown(&features) && p.key_context == Some(context))
     }
 
+    /// The **stored** visibility of the pane that declared `context`, or `None` when
+    /// no pane declares it.
+    ///
+    /// The user's choice rather than "is it on screen": a `[features]` switch being
+    /// off makes the pane invisible without erasing the choice (ADR-47), and a caller
+    /// that captured and restored the *screen* state would erase it on the way back.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn pane_keyboard_stored_visibility(
+        &self,
+        context: crate::session::KeyContext,
+    ) -> Option<bool> {
+        self.plugin_panes
+            .iter()
+            .find(|p| p.key_context == Some(context))
+            .map(|p| p.visible)
+    }
+
+    /// Without the plugin host no pane declares a keyboard, so there is no stored
+    /// choice to carry.
+    #[cfg(not(feature = "plugins"))]
+    pub(crate) fn pane_keyboard_stored_visibility(
+        &self,
+        _context: crate::session::KeyContext,
+    ) -> Option<bool> {
+        None
+    }
+
+    /// Show or hide the interface's pane for `context`, whoever draws it.
+    ///
+    /// Returns whether there was a pane to act on, so a caller that *needs* the pane
+    /// on screen — global search jumping to a task — can report the absence rather
+    /// than jumping into nothing.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn set_pane_keyboard_visible(
+        &mut self,
+        context: crate::session::KeyContext,
+        visible: bool,
+    ) -> bool {
+        let Some((plugin, pane)) = self
+            .plugin_panes
+            .iter()
+            .find(|p| p.key_context == Some(context))
+            .map(|p| (p.plugin.clone(), p.id.clone()))
+        else {
+            return false;
+        };
+        self.set_plugin_pane_visible(&plugin, &pane, visible);
+        true
+    }
+
+    /// Without the plugin host there is no such pane to reveal.
+    #[cfg(not(feature = "plugins"))]
+    pub(crate) fn set_pane_keyboard_visible(
+        &mut self,
+        _context: crate::session::KeyContext,
+        _visible: bool,
+    ) -> bool {
+        false
+    }
+
     /// Whether a plugin pane is the pane for `context`, so the interface's pane of
     /// that name is on screen even when the kernel's own occupant is not.
     ///
@@ -8484,6 +8552,35 @@ impl App {
             // (`KeyContext::pane_keyboards`). Answered rather than panicked so the
             // table stays a total function.
             KeyContext::Global | KeyContext::Terminal => None,
+        }
+    }
+
+    /// The key-hint row the kernel draws inside a seated pane's frame, when that
+    /// pane holds focus (ADR-53).
+    ///
+    /// **Data rather than a closure**, so what a seat may draw stays enumerable: a
+    /// painter argument would make "the kernel paints whatever it likes inside a
+    /// plugin pane" the rule. `None` for a pane with no such row.
+    ///
+    /// It stays the kernel's because a plugin could not draw it honestly. These are
+    /// *rebindable* chords: a user who moved `TasksRun` to `x` should see `x`, and no
+    /// published section carries a keymap — a plugin printing the letters it happened
+    /// to know would print a lie for that user. (That the row is hardcoded here is a
+    /// separate defect, inherited from the native pane, and not one worth propagating
+    /// into a plugin.)
+    #[cfg(feature = "plugins")]
+    pub(crate) fn pane_hints(
+        context: crate::session::KeyContext,
+    ) -> Option<&'static [(&'static str, &'static str)]> {
+        use crate::session::KeyContext;
+        match context {
+            // The same relative order as the central preview's footer (e · r · n).
+            KeyContext::Tasks => Some(&[("e", " edit "), ("r", " run "), ("n", " new ")]),
+            KeyContext::SessionList
+            | KeyContext::Automations
+            | KeyContext::FileViewer
+            | KeyContext::Global
+            | KeyContext::Terminal => None,
         }
     }
 
@@ -8675,7 +8772,10 @@ impl App {
             layout::LayoutParams {
                 show_session_list: self.show_session_list || self.seat_taken(PaneSlot::Left),
                 show_info_panel: self.seat_taken(PaneSlot::CenterLeft),
-                show_tasks_panel: self.show_tasks_panel,
+                // The kernel's own occupant of this seat went with its renderer
+                // (ADR-53), so the column is carved by a claim or not at all — a
+                // retained flag would carve a column nothing paints.
+                show_tasks_panel: self.seat_taken(PaneSlot::Tasks),
                 // The review's changed-files list lives in the file-viewer
                 // column, so force that column present while a review is open.
                 show_file_viewer: self.show_file_viewer || self.active_review().is_some(),
@@ -9235,6 +9335,27 @@ mod tests {
             filter: None,
             matches: (0..count).collect(),
         }
+    }
+
+    /// Seat the pane that provides the task list, as the bundled `tasks` plugin's
+    /// manifest does (ADR-53) — these tests build an `App` directly, so nothing has
+    /// started a plugin host for them.
+    #[cfg(feature = "plugins")]
+    fn seat_tasks_pane(app: &mut App) {
+        use crate::session::plugin_manifest::PaneSlot;
+        use crate::session::settings::FeatureFlag;
+        let mut pane =
+            crate::plugin::PluginPane::loading("tasks", "tasks", "Tasks", PaneSlot::Tasks, false);
+        pane.toggle_action = Some(crate::session::Action::FocusTasks);
+        pane.feature = Some(FeatureFlag::Tasks);
+        pane.key_context = Some(crate::session::KeyContext::Tasks);
+        app.set_plugin_panes(vec![pane]);
+    }
+
+    /// Whether the interface's task list is on screen — the question
+    /// `show_tasks_panel` answered before the pane was handed over.
+    fn tasks_pane_shown(app: &App) -> bool {
+        app.pane_keyboard_taken(crate::session::KeyContext::Tasks)
     }
 
     fn app_with_sessions(count: usize) -> App {
@@ -10757,18 +10878,20 @@ mod tests {
         assert!(msg.text.contains("plugin"), "{}", msg.text);
     }
 
+    #[cfg(feature = "plugins")]
     #[test]
     fn f5_toggles_tasks_panel() {
         let mut app = app_with_sessions(1);
         app.update(AppMessage::Resize(160, 40));
-        assert!(!app.show_tasks_panel);
-        // F5 shows + focuses the tasks panel (like F3 for the file viewer).
+        seat_tasks_pane(&mut app);
+        assert!(!tasks_pane_shown(&app));
+        // F5 shows + focuses the tasks pane (like F3 for the file viewer).
         app.handle_key(KeyCode::F(5), KeyModifiers::NONE);
-        assert!(app.show_tasks_panel);
+        assert!(tasks_pane_shown(&app));
         assert_eq!(app.focus, InputFocus::TaskList);
         // F5 again hides it and drops focus back to the session list.
         app.handle_key(KeyCode::F(5), KeyModifiers::NONE);
-        assert!(!app.show_tasks_panel);
+        assert!(!tasks_pane_shown(&app));
         assert_eq!(app.focus, InputFocus::SessionList);
     }
 
@@ -10799,23 +10922,30 @@ mod tests {
     /// (here `Ctrl+W` = delete-word) defer to the PTY instead of running their
     /// thurbox command — but the same chord still works from the session list,
     /// and the `F`-key alternate works everywhere.
+    ///
+    /// The observable effect is the tasks pane appearing, and that pane is a plugin's
+    /// (ADR-53) — so this needs the plugin host. The mechanism itself is covered in
+    /// both builds by `terminal_focus_keeps_navigation_chords_active` next door.
+    #[cfg(feature = "plugins")]
     #[test]
     fn terminal_focus_defers_readline_ctrl_chords_to_pty() {
         let mut app = app_with_sessions(1);
         app.update(AppMessage::Resize(160, 40));
 
-        // From the session list, Ctrl+W (FocusTasks) toggles the tasks panel.
+        seat_tasks_pane(&mut app);
+
+        // From the session list, Ctrl+W (FocusTasks) toggles the tasks pane.
         app.focus = InputFocus::SessionList;
         app.handle_key(KeyCode::Char('w'), KeyModifiers::CONTROL);
-        assert!(app.show_tasks_panel, "Ctrl+W toggles tasks from the list");
+        assert!(tasks_pane_shown(&app), "Ctrl+W toggles tasks from the list");
 
         // Reset, then focus the terminal: Ctrl+W now forwards to the PTY, so
-        // the tasks panel is left untouched.
-        app.show_tasks_panel = false;
+        // the tasks pane is left untouched.
+        app.set_pane_keyboard_visible(crate::session::KeyContext::Tasks, false);
         app.focus = InputFocus::Terminal;
         app.handle_key(KeyCode::Char('w'), KeyModifiers::CONTROL);
         assert!(
-            !app.show_tasks_panel,
+            !tasks_pane_shown(&app),
             "Ctrl+W should defer to the PTY when the terminal is focused"
         );
         assert_eq!(app.focus, InputFocus::Terminal);
@@ -10823,7 +10953,7 @@ mod tests {
         // The F5 alternate is not a Ctrl+letter chord, so it still toggles.
         app.handle_key(KeyCode::F(5), KeyModifiers::NONE);
         assert!(
-            app.show_tasks_panel,
+            tasks_pane_shown(&app),
             "F5 keeps toggling tasks even in the terminal"
         );
     }
@@ -10867,7 +10997,7 @@ mod tests {
         };
 
         app.handle_key(KeyCode::F(5), KeyModifiers::NONE);
-        assert!(!app.show_tasks_panel);
+        assert!(!tasks_pane_shown(&app));
         assert_eq!(app.focus, InputFocus::SessionList);
         assert!(app.status_message.take().unwrap().text.contains("disabled"));
 
@@ -10940,12 +11070,14 @@ mod tests {
         assert_eq!(app.active_index, 1, "k above the first wraps to the last");
     }
 
+    #[cfg(feature = "plugins")]
     #[test]
     fn opening_tasks_panel_populates_central_preview() {
-        // Focusing the tasks panel (F5/Ctrl+W) must build the central-pane
+        // Focusing the tasks pane (F5/Ctrl+W) must build the central-pane
         // preview for the selected task, not leave the empty hint showing.
         let mut app = app_with_sessions(1);
         app.update(AppMessage::Resize(160, 40));
+        seat_tasks_pane(&mut app);
         app.db
             .create_task(&crate::storage::tasks::NewTask::local("only task"))
             .unwrap();
@@ -11029,12 +11161,14 @@ mod tests {
         assert_eq!(app.focus, InputFocus::SessionList);
     }
 
+    #[cfg(feature = "plugins")]
     #[test]
     fn ctrl_l_includes_tasks_panel_when_visible() {
         let mut app = app_with_sessions(1);
-        // With the tasks panel showing, the cycle is
+        // With the tasks pane showing, the cycle is
         // SessionList → Terminal → TaskList → SessionList (no file viewer).
-        app.show_tasks_panel = true;
+        seat_tasks_pane(&mut app);
+        app.set_pane_keyboard_visible(crate::session::KeyContext::Tasks, true);
         app.focus = InputFocus::SessionList;
         app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL);
         assert_eq!(app.focus, InputFocus::Terminal);
@@ -11053,8 +11187,9 @@ mod tests {
     #[test]
     fn ctrl_l_skips_tasks_panel_when_hidden() {
         let mut app = app_with_sessions(1);
-        // Panel off → TaskList is not a cycle stop.
-        app.show_tasks_panel = false;
+        // No pane provides the task list → `TaskList` is not a cycle stop. In a build
+        // with no plugin host that is the only state there is.
+        assert!(!tasks_pane_shown(&app));
         app.focus = InputFocus::Terminal;
         app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL);
         assert_eq!(app.focus, InputFocus::SessionList);
@@ -12676,7 +12811,7 @@ mod tests {
         app.sessions[2].info.name = "bronco".into();
         app.active_index = 0;
         app.focus = InputFocus::Terminal;
-        let tasks_before = app.show_tasks_panel;
+        let tasks_before = tasks_pane_shown(&app);
 
         app.open_global_search();
         for c in "bro".chars() {
@@ -12690,7 +12825,11 @@ mod tests {
         assert!(!app.global_search.active);
         assert_eq!(app.active_index, 0, "active session restored");
         assert_eq!(app.focus, InputFocus::Terminal, "focus restored");
-        assert_eq!(app.show_tasks_panel, tasks_before, "panel toggles restored");
+        assert_eq!(
+            tasks_pane_shown(&app),
+            tasks_before,
+            "panel toggles restored"
+        );
     }
 
     #[test]

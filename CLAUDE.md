@@ -1739,12 +1739,22 @@ sync, but the TUI editor never sets it.)
   the session ring (`SessionList → Terminal → TaskList → FileViewer`, each a
   cycle stop only while visible). Layout: `compute_layout`'s
   `show_tasks_panel` flag adds a 20% column (`PanelAreas::tasks_panel`)
-  between `terminal` and `file_viewer` at width ≥ 120. Rendered by
-  `ui/tasks_panel.rs` (checkbox glyphs ☐/◐/☑) with the shared
-  `ui::focus_block` for the highlighted title + accent border, matching the
-  session list / file viewer. `InputFocus::TaskList` is the panel focus. Rows
-  whose task has an **open related session** get a trailing accent `⇄` marker
-  (`TaskPaneEntry::linked`).
+  between `terminal` and `file_viewer` at width ≥ 120. `InputFocus::TaskList`
+  is the pane's focus. Rows whose task has an **open related session** get a
+  trailing accent `⇄` marker (`task_state::TaskPaneEntry::linked`).
+  **The pane itself is a bundled plugin** (ADR-53): `src/ui/tasks_panel.rs` is
+  deleted, `src/plugin/bundled/tasks/init.luau` draws the column (checkbox
+  glyphs ☐/◐/☑) from the `tasks` seat, and its manifest declares
+  `toggle_action = "FocusTasks"`, `feature = "tasks"` and
+  `key_context = "Tasks"` — so F5, the switch and **all ten scoped keys** behave
+  exactly as before, with the kernel still dispatching every action against its
+  own state and the plugin never handed a key. Two things stay the kernel's:
+  the frame (`ui::focus_block`, so the focused border matches the session list)
+  and the **hint row** (`e edit · r run · n new`, drawn into the seat above the
+  plugin's tree, because those chords are rebindable and no published state
+  carries a keymap). A build with **no plugin host** has no tasks pane at all —
+  F5 says so — and with it no central preview, editor or picker, since the pane
+  is the only door to `InputFocus::TaskList`; `thurbox-cli task` is unaffected.
 - **Full-screen preview / edit toggle** — the central pane is a clean toggle
   (`view::render_task_workspace`): while the tasks panel is focused
   (`InputFocus::TaskList`) it shows the selected task's **full-screen,

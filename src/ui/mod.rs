@@ -32,7 +32,6 @@ pub mod syntax;
 pub mod task_action_picker_modal;
 pub mod task_detail;
 pub mod task_editor_modal;
-pub mod tasks_panel;
 pub mod terminal_view;
 pub mod theme;
 pub mod theme_picker_modal;

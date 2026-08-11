@@ -3,7 +3,7 @@
 //! Read-and-act: it mirrors `cached_automations` and, when focused, drives the
 //! same toggle/run/edit/delete actions as the Ctrl+P modal.
 //!
-//! Like [`super::tasks_panel`], the pane renders through the **view tree**: it is
+//! Like [`super::file_viewer`], the pane renders through the **view tree**: it is
 //! ordinary in-process Rust on the UI thread, but its rows are a
 //! [`ViewNode`] that [`super::plugin_pane::render_tree`] paints. The split is the
 //! one a plugin lives on:
@@ -306,7 +306,7 @@ fn row_node(row: &AutomationRow) -> ViewNode {
 /// How a matched character is drawn: accent, bold and underlined, over whatever
 /// the row's base style was.
 ///
-/// A constant rather than a function of the base, for [`super::tasks_panel`]'s
+/// A constant rather than a function of the base, for the tasks pane's
 /// reason: the layering only ever resolves to this, and the one base carrying an
 /// attribute of its own (dimmed) never has matches to emphasise.
 const MATCHED_STYLE: TextStyle = TextStyle {

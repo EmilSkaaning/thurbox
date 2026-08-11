@@ -3280,3 +3280,118 @@ the reason that is actually left: that pane still fits its name in `resolve_rows
 its plugin's copy still loses its tail. Adopting the declaration there, and in the
 session list, is one line plus that pane's re-recording, and belongs to each pane's
 own handover.
+
+## ADR-53: The tasks pane is deleted, and a plugin is the pane — keyboard included
+
+**Context.** ADR-50 handed over the info panel and could do so *because* that pane
+takes no input. The tasks pane is the opposite end: ten `KeyContext::Tasks` actions, a
+cursor the central pane follows, and two surfaces its keys open (the task editor, the
+trigger-time action picker). Two changes made it reachable — ADR-51 (a pane declares
+the kernel's keyboard and is focused as that pane) and ADR-52 (a run yields its width,
+closing the last drawing gap) — leaving one thing: the **seat**.
+
+**Decision.** `src/ui/tasks_panel.rs` is **deleted**. The tasks column is
+`src/plugin/bundled/tasks/init.luau`, drawn from a new `tasks` seat, bound to
+`FocusTasks`, gated by `[features] tasks`, and declaring `key_context = "Tasks"`.
+Five decisions the deletion needed:
+
+**The seat is named, reversing part of ADR-46.** That ADR declined slots for this pane
+and the file viewer because *"`right` already seats a plugin pane in that column"*.
+True, and insufficient: the column's occupants are drawn in a fixed order (tasks, file
+viewer, plugin panes), so a `right` pane lands to the *right* of the file viewer while
+the tasks column is to its left. **A position within a column is part of the pane**, so
+`PaneSlot::Tasks → RegionId::Tasks` is added rather than approximated. Letting a
+manifest declare a *position* was refused for the reason `PaneSlot` exists: it makes
+every pane's place depend on which panes are installed.
+
+**The hint row stays the kernel's, and that makes seat chrome a concept.** The native
+pane reserved its bottom row while focused for `e edit · r run · n new`. A plugin
+cannot draw it honestly — those are *rebindable* chords, and no published section
+carries a keymap, so a plugin printing the letters it happens to know prints a lie for
+a user who rebound them. Dropping the row was the alternative and it is a real loss of
+discoverability in a change whose claim is that a user does not notice. So the kernel
+draws it **into the seat**, above the plugin's tree, exactly where it was: the same
+subtraction the native pane made before rendering its list, so the plugin's content
+area — and its row hitboxes — are the area that pane's content had. It is described as
+data (`App::pane_hints`) rather than a painter, so what a seat may draw stays
+enumerable instead of becoming "the kernel paints whatever it likes inside a plugin
+pane". It is also the mechanism the file viewer's search bar will need (ADR-39 called
+it "the pane-chrome row"), established here for one row instead of there for a bordered
+block with a caret.
+
+**`show_tasks_panel` is deleted, and the focus rescues it was doing are kept.**
+ADR-50's rule (a handed-over seat's kernel occupant is *deleted*, because
+`layout_for` carves a seat when either occupant wants it). But this flag was
+load-bearing in a way `show_info_panel` was not: it answered *"is the pane on screen"*
+for **focus**. Three callers keep that question with a new answer — the ring stop, the
+`[features]` teardown, and the below-120-columns resize — and the monkey invariant
+becomes *stronger*: `focus == TaskList` now implies *a pane provides the task list*,
+which in a build with no plugin host is unsatisfiable, so the invariant asserts that
+build can never reach the focus and a seeded random walk hunts for a counter-example.
+
+**`TaskPaneEntry` moves; the rendering dies with the renderer.** The entry is what
+`App` *builds* — for the pane and, unchanged, for the published snapshot — so it moves
+to `src/app/task_state.rs` (the move `SystemMetrics` made in ADR-50). `TaskRow`,
+`TaskPaneState`, `task_rows` and `tasks_tree` go: the plugin builds the tree, and the
+recordings hold it to the pane.
+
+**The oracle keeps the recordings and loses its other two edges.** `plugin ==
+recording` is what survives, and the twelve `.snap` files are **byte-identical after
+the deletion** — `git status tests/snapshots/` empty, which is the whole payoff of
+ADR-42, since a `cargo insta accept` here would convert twelve statements about the
+pane into twelve about the plugin.
+
+**The retired gate, and what it recorded.** `tests/tasks_pane_input_gap.rs` is deleted.
+Its question was *what would a **plugin's own** keys need to drive this pane?* — and
+the answer is preserved here, because it is still true of any pane that wants its own
+keys:
+
+| Row | What it needed | Still refused |
+|-----|----------------|---------------|
+| `no-cursor-write` | `j`/`k`, the preview scroll, `o` — all move view state | yes: no binding writes a cursor, focus or the active session |
+| `input-and-cursor-are-disjoint` | acting on the row the user sees, through the kernel's cursor | yes for a *reproduction*; ADR-51 dissolved it for a pane that **is** the surface |
+| `no-record-creation` | `n`, `e` — creating a task and authoring its text | yes: the write seam changes existing records by id |
+| `no-modal-surface` | `r` — a modal that captures input ahead of every binding | yes: a manifest declares panes, not the interface's input |
+| `no-agent-reach` | what that picker does — prompt a session, or spawn one | yes: `Capability::Spawn` adds environment to spawns thurbox makes |
+| `no-ellipsizing-clip` | a fitted title with room for the marker | **closed** (ADR-52) |
+
+Nothing in that table was granted. The pane is handed over because the keys were never
+the plugin's to hold.
+
+**Consequences.** `Action::FocusTasks` flips the plugin's pane (ADR-47) and the
+kernel's own arm does what the flip cannot: follow it with focus, and *report* when
+nothing provides the pane. Global search's task result reveals the pane through the
+same door and reports when there is none, which is the one search result that can
+fail to open. `ClickAction::SelectTask` and `App::pane_hints` become
+`#[cfg(feature = "plugins")]`, like `PluginPaneRow` before them, because the surface
+that produces them is a plugin's.
+
+**`--no-default-features` loses the whole task TUI surface**, deliberately. The pane is
+the only door to `InputFocus::TaskList`, so the central preview, the editor and the
+picker are unreachable there and global search's task scope has nowhere to land — each
+reporting rather than silently doing nothing. `thurbox-cli task` is untouched. Stage B
+made `plugins` a default feature precisely so no install is in this position, and
+`tests/teardown_gate.rs` fails if it ever leaves. Keeping the renderer under
+`#[cfg(not(feature = "plugins"))]` was refused for `migration/phase-4`'s reason, which
+is stronger here than for the info panel: two task panes differing by build, and the
+one users install is the one nobody tests hardest.
+
+**Driven, not assumed** (150×26, and 150×16 for the chrome): `F5` opens the column in
+the native pane's position with the hint row on its bottom line and the accent border;
+`j` moves the cursor and the central preview follows; `Space` cycles the status
+(confirmed by `task list`); `n` opens the central editor and `r` the trigger picker,
+both kernel; `Esc` leaves; `F5` hides it. `[features] tasks = false` removes the column
+within a poll and `F5` then names the switch; turning it back on restores the column
+from the **stored** choice with no keystroke. The `--no-default-features` binary carves
+nothing and reports `Tasks panel: provided by a plugin, and this build has no plugin
+host` — its own words, since it ships no `thurbox-cli plugin` subcommand.
+
+**Not done: the file viewer.** It was the other pane proposed for this work. ADR-51
+removed its two dangerous grants from the argument — the kernel still reads the
+directory and launches the editor — so what blocks it is now: its **search bar** (three
+rows of kernel chrome with a caret and a match counter, a bigger version of the row
+this change establishes), the fact that `src/ui/file_viewer.rs` is the pane's **model**
+and the home of `visible_window`, which every plugin list scrolls by, and its column's
+**second kernel occupant**, the code review's changed-files list, which ADR-45 records
+as wanting `RegionId::FileViewer` specifically. Three decisions, none of them made
+here.

@@ -280,6 +280,46 @@ impl Harness {
         repo
     }
 
+    /// Seat the pane that provides the task list, the way the bundled `tasks`
+    /// plugin's manifest does (ADR-53).
+    ///
+    /// The harness starts no plugin host — it builds an `App` directly — so a test
+    /// that drives the tasks pane has to seat its pane itself. The declarations
+    /// mirror `src/plugin/bundled/tasks/plugin.toml` exactly, which is what makes
+    /// these tests about the pane rather than about a fixture: the seat, the action
+    /// `F5`/`Ctrl+W` resolve to, the `[features]` switch, and the keyboard whose
+    /// actions the kernel dispatches into it.
+    ///
+    /// Seeded **hidden**, like the manifest, so a test that wants it on screen
+    /// presses the key a user presses.
+    #[cfg(feature = "plugins")]
+    fn seat_tasks_pane(&mut self) -> &mut Self {
+        use crate::session::plugin_manifest::PaneSlot;
+        use crate::session::settings::FeatureFlag;
+        use crate::session::{Action, KeyContext};
+
+        let mut pane =
+            crate::plugin::PluginPane::loading("tasks", "tasks", "Tasks", PaneSlot::Tasks, false);
+        pane.toggle_action = Some(Action::FocusTasks);
+        pane.feature = Some(FeatureFlag::Tasks);
+        pane.key_context = Some(KeyContext::Tasks);
+        // A tree, so the pane has rows to click and a frame to paint.
+        pane.apply(Ok(crate::session::view_tree::ViewNode::selectable_list(
+            vec![crate::session::view_tree::ViewNode::text("a task")],
+            Some(0),
+        )));
+        self.app.set_plugin_panes(vec![pane]);
+        self
+    }
+
+    /// Whether the interface's task list is on screen — the question
+    /// `App::show_tasks_panel` used to answer before the pane was handed over.
+    #[cfg(feature = "plugins")]
+    fn tasks_pane_shown(&self) -> bool {
+        self.app
+            .pane_keyboard_taken(crate::session::KeyContext::Tasks)
+    }
+
     /// Feed one key event, exactly as the real event loop converts a crossterm
     /// `KeyPress` into an [`AppMessage`].
     fn key(&mut self, code: KeyCode, mods: KeyModifiers) -> &mut Self {
@@ -630,28 +670,61 @@ fn ctrl_j_and_k_cycle_session_selection() {
     assert_eq!(h.app.active_index, 1, "Ctrl+K moves back up");
 }
 
+/// `Ctrl+W` shows and hides the interface's task list — which is a plugin's pane
+/// since ADR-53, so the key flips *that* pane's visibility and focuses it.
+#[cfg(feature = "plugins")]
 #[test]
 fn ctrl_w_toggles_tasks_panel() {
     let mut h = Harness::standard(0);
-    assert!(!h.app.show_tasks_panel);
+    h.seat_tasks_pane();
+    assert!(!h.tasks_pane_shown());
 
     h.ctrl('w'); // FocusTasks
-    assert!(h.app.show_tasks_panel, "Ctrl+W reveals the tasks panel");
+    assert!(h.tasks_pane_shown(), "Ctrl+W reveals the tasks panel");
+    assert_eq!(h.app.focus, InputFocus::TaskList, "and focuses it");
     h.ctrl('w');
-    assert!(!h.app.show_tasks_panel, "Ctrl+W again hides it");
+    assert!(!h.tasks_pane_shown(), "Ctrl+W again hides it");
+    assert_ne!(h.app.focus, InputFocus::TaskList, "and drops focus");
 }
 
+/// F5 is the documented alternate chord for `FocusTasks` (`Ctrl+W`); both must
+/// drive the same toggle.
+#[cfg(feature = "plugins")]
 #[test]
 fn f5_toggles_tasks_panel_like_ctrl_w() {
-    // F5 is the documented alternate chord for FocusTasks (Ctrl+W); both must
-    // drive the same toggle.
     let mut h = Harness::standard(0);
-    assert!(!h.app.show_tasks_panel);
+    h.seat_tasks_pane();
+    assert!(!h.tasks_pane_shown());
 
     h.func(5);
-    assert!(h.app.show_tasks_panel, "F5 reveals the tasks panel");
+    assert!(h.tasks_pane_shown(), "F5 reveals the tasks panel");
     h.func(5);
-    assert!(!h.app.show_tasks_panel, "F5 again hides it");
+    assert!(!h.tasks_pane_shown(), "F5 again hides it");
+}
+
+/// The build with no plugin host has no task pane at all, and the key says so
+/// rather than doing nothing — the same honest surface `ToggleInfoPanel` grew in
+/// ADR-50.
+#[cfg(not(feature = "plugins"))]
+#[test]
+fn without_the_plugin_host_focus_tasks_reports_the_absence() {
+    let mut h = Harness::standard(0);
+    h.ctrl('w');
+    let message = h
+        .app
+        .status_message
+        .as_ref()
+        .map(|m| m.text.clone())
+        .unwrap_or_default();
+    assert!(
+        message.contains("Tasks panel") && message.contains("plugin host"),
+        "the key should name what provides the pane: {message:?}"
+    );
+    assert_ne!(
+        h.app.focus,
+        InputFocus::TaskList,
+        "and must not focus a pane that cannot exist"
+    );
 }
 
 #[test]
@@ -1417,11 +1490,16 @@ fn shift_j_reorders_sessions() {
 
 // ── Tasks: panel focus + new-task editor ─────────────────────────────────────
 
+/// `n` in the tasks pane opens the central-pane editor — which stays **kernel**
+/// after the handover (it is not a pane, so no manifest could claim it) and is
+/// reached because the kernel is what dispatches the key (ADR-53).
+#[cfg(feature = "plugins")]
 #[test]
 fn tasks_panel_new_task_opens_editor() {
     let mut h = Harness::standard(0);
-    h.ctrl('w'); // FocusTasks → panel shown and focused
-    assert!(h.app.show_tasks_panel);
+    h.seat_tasks_pane();
+    h.ctrl('w'); // FocusTasks → pane shown and focused
+    assert!(h.tasks_pane_shown());
     assert!(matches!(h.app.focus, InputFocus::TaskList));
 
     h.key(KeyCode::Char('n'), KeyModifiers::NONE); // new task
@@ -1562,10 +1640,12 @@ fn help_editor_capture_rebinds_the_selected_action() {
     }
 }
 
+#[cfg(feature = "plugins")]
 #[test]
 fn task_editor_creates_task_and_space_cycles_status() {
     let mut h = Harness::standard(0);
-    h.ctrl('w'); // focus the tasks panel
+    h.seat_tasks_pane();
+    h.ctrl('w'); // focus the tasks pane
     h.key(KeyCode::Char('n'), KeyModifiers::NONE); // new-task editor
 
     for ch in "Demo task".chars() {
@@ -2144,7 +2224,14 @@ async fn disabling_a_live_feature_tears_down_its_open_surfaces() {
     // teardown pass — which is also what preserves the user's stored choice across
     // the switch going off and on (`a_gated_off_pane_keeps_its_stored_visibility`).
     h.app.show_file_viewer = true;
-    h.app.show_tasks_panel = true;
+    // The tasks pane exists only where a plugin can provide it (ADR-53), so its half
+    // of this test does too.
+    #[cfg(feature = "plugins")]
+    {
+        h.seat_tasks_pane();
+        h.app
+            .set_pane_keyboard_visible(crate::session::KeyContext::Tasks, true);
+    }
     h.app
         .session_terminal_views
         .insert(sid, TerminalView::Shell);
@@ -2161,7 +2248,11 @@ async fn disabling_a_live_feature_tears_down_its_open_surfaces() {
     h.app.apply_live_settings(&settings);
 
     assert!(!h.app.show_file_viewer, "file viewer hidden");
-    assert!(!h.app.show_tasks_panel, "tasks panel hidden");
+    // The tasks pane hides itself: it declares `feature = "tasks"`, so the switch is
+    // enforced on every read of its visibility rather than by a teardown pass — like
+    // the info panel, and which is what preserves the user's stored choice.
+    #[cfg(feature = "plugins")]
+    assert!(!h.tasks_pane_shown(), "tasks pane hidden");
     assert_eq!(
         h.app.session_terminal_views.get(&sid).copied(),
         Some(TerminalView::Claude),
@@ -3127,17 +3218,22 @@ fn global_search_on_short_terminal_does_not_panic_session_resize() {
     assert!(h.app.global_search.active);
 }
 
+#[cfg(feature = "plugins")]
 #[test]
 fn narrow_resize_rescues_task_editor_focus() {
     // Shrinking below 120 cols hides the tasks panel; focus must leave the
     // *editor* too, or it keeps capturing every key for an invisible surface.
     let mut h = Harness::standard(1);
+    h.seat_tasks_pane();
     h.ctrl('w'); // FocusTasks
     h.key(KeyCode::Char('n'), KeyModifiers::NONE); // new task → TaskEditor
     assert!(matches!(h.app.focus, InputFocus::TaskEditor));
 
     h.resize(100, 40);
-    assert!(!h.app.show_tasks_panel, "narrow layout hides the panel");
+    assert!(
+        h.app.screen_layout().tasks_panel.is_none(),
+        "narrow layout refuses the seat"
+    );
     assert!(
         matches!(h.app.focus, InputFocus::SessionList),
         "focus is rescued off the hidden panel's editor"
@@ -3281,11 +3377,10 @@ fn assert_invariants(app: &App, ctx: &str) {
         "[{ctx}] automation pane selection out of bounds"
     );
 
-    // Panel visibility never outlives its feature flag.
-    assert!(
-        !app.show_tasks_panel || app.features.tasks,
-        "[{ctx}] tasks panel shown with the feature disabled"
-    );
+    // Panel visibility never outlives its feature flag. The tasks pane is not here:
+    // it is a plugin pane (ADR-53) whose `[features]` switch is enforced by
+    // `PluginPane::is_shown` on every read, which the focus rule below is what
+    // exercises.
     assert!(
         !app.show_file_viewer || app.features.file_viewer,
         "[{ctx}] file viewer shown with the feature disabled"
@@ -3295,9 +3390,13 @@ fn assert_invariants(app: &App, ctx: &str) {
     match app.focus {
         #[cfg(feature = "plugins")]
         InputFocus::PluginPane => {}
+        // Since the handover this says something stronger, and says it in both
+        // builds: a pane has to *provide* the task list for its focus to be
+        // reachable, and in a build with no plugin host nothing can — so this
+        // asserts that build never reaches the focus at all (ADR-53).
         InputFocus::TaskList | InputFocus::TaskEditor => assert!(
-            app.features.tasks && app.show_tasks_panel,
-            "[{ctx}] focus {:?} but the tasks panel is hidden",
+            app.pane_keyboard_taken(crate::session::KeyContext::Tasks),
+            "[{ctx}] focus {:?} but no pane provides the task list",
             app.focus
         ),
         InputFocus::FileViewer => assert!(
@@ -4561,9 +4660,7 @@ fn a_pane_declaring_the_tasks_keyboard_is_driven_by_the_kernel() {
     );
     assert!(h.app.pane_keyboard_taken(KeyContext::Tasks));
 
-    // The kernel's own tasks panel is not shown, so the only tasks pane on screen
-    // is the plugin's — and the focus cycle still reaches it.
-    assert!(!h.app.show_tasks_panel);
+    // The focus cycle reaches it, as the interface's task list.
     h.ctrl('l');
     while !matches!(h.app.focus, InputFocus::TaskList) {
         h.ctrl('l');
@@ -4677,6 +4774,118 @@ fn a_focused_plugin_pane_draws_a_focused_border() {
         unfocused[corner].fg, focused[corner].fg,
         "a focused pane's border must not be drawn like an unfocused one, or a user cannot see \
          where their keys are going"
+    );
+}
+
+/// The tasks seat is carved by the plugin's claim alone, and the pane lands in the
+/// column the native pane occupied — left of the file viewer, not after it (ADR-53).
+///
+/// Asserted as rects rather than as prose, because "one column over" is exactly the
+/// change a handover may not make and the only thing that would have caught it.
+#[cfg(feature = "plugins")]
+#[test]
+fn the_tasks_seat_is_carved_by_the_claim_and_sits_left_of_the_file_viewer() {
+    let mut h = Harness::new(160, 40, 1);
+    h.app.show_file_viewer = true;
+    h.seat_tasks_pane();
+    assert!(
+        h.app.screen_layout().tasks_panel.is_none(),
+        "a hidden pane claims no seat"
+    );
+
+    h.app
+        .set_pane_keyboard_visible(crate::session::KeyContext::Tasks, true);
+    let areas = h.app.screen_layout();
+    let tasks = areas.tasks_panel.expect("the claim carves the seat");
+    let files = areas.file_viewer.expect("the file viewer is shown");
+    assert!(
+        tasks.x < files.x,
+        "the pane must sit where the native column sat: {tasks:?} vs {files:?}"
+    );
+    assert!(
+        tasks.x > areas.terminal.x,
+        "and to the right of the central pane"
+    );
+    // It is not one of the right column's *plugin* regions either — those are what a
+    // `right`-slot pane gets, and they come after the file viewer.
+    assert!(
+        areas.plugin_panes.is_empty(),
+        "a seated pane is not counted as a right-column occupant"
+    );
+}
+
+/// The hint row is the kernel's, drawn into the seat while the pane holds focus, and
+/// the plugin's rows are laid out in what remains (ADR-53).
+///
+/// Two claims in one test because they are one mechanism: reserving the row and
+/// getting the hitboxes right are the same subtraction, and a test that checked only
+/// the paint would pass for a pane whose last row had become unclickable.
+#[cfg(feature = "plugins")]
+#[test]
+fn the_kernel_draws_the_tasks_hint_row_into_the_seat() {
+    let mut h = Harness::standard(1);
+    for title in ["first task", "second task"] {
+        h.app
+            .db
+            .create_task(&crate::storage::tasks::NewTask::local(title))
+            .unwrap();
+    }
+    h.app.refresh_tasks();
+    h.seat_tasks_pane();
+    h.app
+        .set_pane_keyboard_visible(crate::session::KeyContext::Tasks, true);
+    // A list taller than the seat, so the *last* visible row is the one that would
+    // have collided with the chrome had the reservation been forgotten.
+    let mut pane = h.app.plugin_panes[0].clone();
+    pane.apply(Ok(crate::session::view_tree::ViewNode::selectable_list(
+        (0..40)
+            .map(|i| crate::session::view_tree::ViewNode::text(format!("row {i}")))
+            .collect(),
+        Some(0),
+    )));
+    h.app.set_plugin_panes(vec![pane]);
+
+    let seat = |h: &mut Harness| -> Vec<String> {
+        let rect = h.app.screen_layout().tasks_panel.expect("the seat");
+        let buf = h.render_buffer();
+        (rect.y..rect.y + rect.height)
+            .map(|y| {
+                (rect.x..rect.x + rect.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    };
+
+    // Unfocused: no hint row, and the pane's tree owns the whole seat.
+    h.app.focus = InputFocus::SessionList;
+    let quiet = seat(&mut h).join("\n");
+    assert!(!quiet.contains("edit"), "{quiet}");
+
+    // Focused: the row is the seat's last content line.
+    h.app.focus = InputFocus::TaskList;
+    let driven = seat(&mut h);
+    let last = driven[driven.len() - 2].clone();
+    assert!(
+        last.contains("edit") && last.contains("run") && last.contains("new"),
+        "the hint row should be the seat's last content line: {driven:#?}"
+    );
+
+    // And every row stays clickable *above* the chrome: the reservation moved the
+    // tree's area, so the hitboxes have to have moved with it.
+    let rect = h.app.screen_layout().tasks_panel.expect("the seat");
+    let hint_y = rect.y + rect.height - 2;
+    let rows: Vec<u16> = h
+        .app
+        .click_targets
+        .iter()
+        .filter(|t| matches!(t.action, ClickAction::SelectTask(_)))
+        .map(|t| t.rect.y)
+        .collect();
+    assert!(!rows.is_empty(), "the pane records row targets");
+    assert!(
+        rows.iter().all(|y| *y < hint_y),
+        "no row hitbox may overlap the chrome: rows at {rows:?}, hint at {hint_y}"
     );
 }
 
@@ -5524,10 +5733,12 @@ fn pane_context_describes_the_active_session() {
 /// The task section carries the rows a pane draws plus the three view facts a
 /// plugin cannot observe: which row the cursor is on, what a search dimmed, and
 /// what it matched.
+#[cfg(feature = "plugins")]
 #[test]
 fn pane_context_describes_the_task_list() {
     let _demand = DemandGuard::new(true);
     let mut h = Harness::standard(1);
+    h.seat_tasks_pane();
     for title in ["write it", "ship it"] {
         h.app
             .db
@@ -5574,10 +5785,12 @@ fn pane_context_describes_the_task_list() {
 /// Asserted next to `pane_context_describes_the_task_list`'s focus-gated
 /// `selected` because the pair *is* the rule (ADR-38): publishing one and deriving
 /// the other in either direction is what this pins against.
+#[cfg(feature = "plugins")]
 #[test]
 fn pane_context_publishes_the_task_cursor_whatever_holds_focus() {
     let _demand = DemandGuard::new(true);
     let mut h = Harness::standard(1);
+    h.seat_tasks_pane();
     for title in ["write it", "ship it", "land it"] {
         h.app
             .db
@@ -6292,7 +6505,6 @@ fn no_claim_leaves_every_rect_unchanged() {
     use crate::session::plugin_manifest::PaneSlot;
 
     let mut h = Harness::new(160, 40, 1);
-    h.app.show_tasks_panel = true;
     h.app.show_file_viewer = true;
     let before = h.app.screen_layout();
 

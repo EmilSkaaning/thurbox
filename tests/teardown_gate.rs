@@ -179,12 +179,26 @@ const REPLACEMENTS: &[Replacement] = &[
         native_module: Some("info_panel"),
         oracle: Some("bundled_info_panel"),
     },
-    pane(
-        "tasks-plugin",
-        "the tasks pane",
-        "tasks_panel",
-        Some("bundled_tasks_panel"),
-    ),
+    // The second pane handed over (ADR-53), and the first *with a keyboard*:
+    // `src/ui/tasks_panel.rs` is deleted, the bundled plugin draws the tasks column
+    // from the `tasks` seat, and its manifest declares the `Tasks` key context so all
+    // ten of the pane's scoped actions still fire against the kernel's own state.
+    Replacement {
+        id: "tasks-plugin",
+        v1_capability: "the tasks pane",
+        v2_home: "a bundled plugin under src/plugin/bundled/, drawn instead of the native pane",
+        ready: true,
+        probe: |root, id| {
+            pane_is_handed_over(
+                bundled_plugin_exists(root, id),
+                view_draws_native_pane(root, id),
+                plugin_host_reaches_the_installed_build(root),
+                pane_oracle_records_the_native_tree(root, id),
+            )
+        },
+        native_module: Some("tasks_panel"),
+        oracle: Some("bundled_tasks_panel"),
+    },
     pane(
         "automations-plugin",
         "the automations pane",
@@ -664,9 +678,9 @@ fn readiness_is_derived_from_the_verdicts() {
         .collect();
     assert_eq!(
         handed_over,
-        vec!["info-panel-plugin"],
-        "the handed-over set is a deliberate list, so a second pane joining it is a \
-         decision made here and not a side effect"
+        vec!["info-panel-plugin", "tasks-plugin"],
+        "the handed-over set is a deliberate list, so a pane joining it is a decision made \
+         here and not a side effect"
     );
     for r in REPLACEMENTS
         .iter()
@@ -674,10 +688,12 @@ fn readiness_is_derived_from_the_verdicts() {
     {
         assert!(blocked.contains(&r.id), "{} is recorded ready", r.id);
     }
-    assert!(
-        !blocked.contains(&"info-panel-plugin"),
-        "the info panel is handed over, so its row is not a blocker"
-    );
+    for handed in ["info-panel-plugin", "tasks-plugin"] {
+        assert!(
+            !blocked.contains(&handed),
+            "{handed} is handed over, so its row is not a blocker"
+        );
+    }
     // A row recorded ready is not a blocker.
     assert!(!blocked.contains(&"self-heal"));
 
@@ -699,12 +715,13 @@ fn readiness_is_derived_from_the_verdicts() {
 /// attached, rather than quietly permitting the deletion of the pane every user is
 /// looking at.
 ///
-/// The worked example is the **tasks pane**, and that choice is load-bearing. It was
-/// the info panel until the info panel was handed over (ADR-50), at which point every
-/// assertion here would have been false — and the repair that passes is to flip them,
-/// which turns an argument about why a row is blocked into a record of what the tree
-/// happens to say. So the example must always name a pane the interface still draws;
-/// `the_example_pane_is_still_drawn_natively` is what fails if it stops being one.
+/// The worked example is the **automations pane**, and that choice is load-bearing.
+/// It was the info panel until ADR-50 and the tasks pane until ADR-53, at which point
+/// every assertion here would have been false — and the repair that passes is to flip
+/// them, which turns an argument about why a row is blocked into a record of what the
+/// tree happens to say. So the example must always name a pane the interface still
+/// draws; `the_example_pane_is_still_drawn_natively` is what fails if it stops being
+/// one.
 #[test]
 fn a_reproduced_pane_is_not_a_replaced_one() {
     let root = repo_root();
@@ -734,7 +751,7 @@ fn a_reproduced_pane_is_not_a_replaced_one() {
 ///
 /// A `const` rather than a literal in four places, so moving the example after the
 /// next handover is one edit and cannot be done halfway.
-const EXAMPLE_BLOCKED_PANE: &str = "tasks-plugin";
+const EXAMPLE_BLOCKED_PANE: &str = "automations-plugin";
 
 /// The example must name a pane that is still drawn natively, or the illustration
 /// above comes to assert the opposite of the tree and the passing repair is to

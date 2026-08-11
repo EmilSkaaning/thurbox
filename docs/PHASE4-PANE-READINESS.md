@@ -2590,3 +2590,93 @@ Its reproduction is complete: equal trees at every width, the same painted frame
 the pane scrolls and when a title is too wide, and no drawing row outstanding. With
 ADR-51's route its keyboard is the kernel's. What is left before its renderer can be
 deleted is the handover itself.
+
+## 28. The second handover, and the first pane with a keyboard (ADR-53)
+
+§26 closed focus for four panes and §27 closed the tasks pane's last drawing row. This
+is the pane, handed over: `src/ui/tasks_panel.rs` is deleted.
+
+### What was left after §26 and §27
+
+One thing, and it is not what §14's table would have predicted: the **seat**. ADR-46
+had declined to add one for this pane, because `right` already seats a plugin pane in
+that column. The column's occupants are drawn in a fixed order, though, so a `right`
+pane lands to the *right* of the file viewer while the tasks column is to its left —
+and moving a pane one column over is exactly the kind of change a handover may not
+make. So `PaneSlot::Tasks` is added and ADR-46's rejection is revisited with the reason
+recorded: **a position within a column is part of the pane.**
+
+### The finding: chrome a plugin cannot draw
+
+The native pane reserved its bottom row, while focused, for `e edit · r run · n new`.
+Nothing in the port had ever covered it — the recordings are of the *list* — so it
+surfaced only when the pane was driven.
+
+A plugin cannot draw it. Those are **rebindable** chords: a user who moved `TasksRun`
+to `x` should see `x`, and no published section carries a keymap. A plugin printing the
+letters it happened to know would print a lie for that user, which is worse than a
+missing hint.
+
+So the kernel draws it into the seat, above the plugin's tree — the same subtraction the
+native pane made before rendering its list, so the plugin's content area and its row
+hitboxes are the area that pane's content had. That is a new concept (**seat chrome**),
+introduced as *data* rather than a painter so what a seat may draw stays enumerable.
+
+It is also the mechanism the file viewer needs: ADR-39 records its search bar as needing
+"the pane-chrome row PHASE4 §13 records". Establishing it here, for one row of hints, is
+cheaper than establishing it there for a bordered block with a caret and a match
+counter.
+
+### The flag that was doing more than it looked
+
+`App::show_tasks_panel` had to go — ADR-50's rule, because `layout_for` carves a seat
+when *either* occupant wants it, so a flag nobody paints from carves an empty column.
+But unlike `show_info_panel` it was answering a second question: **is the pane on screen**,
+for *focus*. Three callers needed it, and each kept the question:
+
+| Caller | Was | Is |
+|--------|-----|-----|
+| the focus ring's tasks stop | `show_tasks_panel` | a pane provides the task list |
+| `[features] tasks` going off | flip the flag, rescue focus | the pane hides itself; rescue focus |
+| a resize below 120 columns | flip the flag, rescue focus | the layout refuses the seat; rescue focus |
+
+And the monkey invariant got **stronger**: `focus == TaskList` now implies *a pane
+provides the task list*, which is unsatisfiable in a build with no plugin host — so the
+invariant asserts that build can never reach the focus, and a seeded random walk is what
+looks for the counter-example.
+
+### What the tests had to become
+
+The harness builds an `App` directly and starts no plugin host, so a test that drives
+the tasks pane now seats its pane itself (`Harness::seat_tasks_pane`, mirroring
+`plugin.toml` field for field — the seat, the action, the switch, the keyboard). Six
+tests that used the tasks panel as an observable are `#[cfg(feature = "plugins")]` now,
+which is the honest consequence: that surface exists where a plugin can provide it.
+
+The recordings did **not** move. `git status tests/snapshots/` is empty with
+`tasks_tree` deleted — the fact ADR-42 existed to secure, and the only one that could
+not have been established afterwards.
+
+### Driven
+
+At 150×26: `F5` opens the column *in the native pane's position*, focused, with the
+hint row on its bottom line; `j` moves the cursor and the central preview follows;
+`Space` cycles the status (confirmed by `task list`); `n` opens the central editor and
+`r` the trigger picker — both kernel, both reached because the kernel dispatches the
+key; `Esc` leaves; `F5` hides it. `[features] tasks = false` removes the column within a
+poll and `F5` then names the switch; back on, the *stored* choice returns the column
+with no keystroke. The `--no-default-features` binary carves nothing and says
+`Tasks panel: provided by a plugin, and this build has no plugin host`.
+
+### Where the five remaining panes stand
+
+| Pane | Focus | Drawing | What is left |
+|------|-------|---------|--------------|
+| tasks | — | — | **handed over** |
+| file viewer | closed (ADR-51) | the search bar | that bar as seat chrome; the module is the pane's model *and* the home of `visible_window`; its column's second kernel occupant (the review's changed-files list) |
+| automations | closed (ADR-51) | a fitted name (ADR-52 not adopted) | the module is also the `Ctrl+P` modal's summary builder; two drawing rows |
+| session list | closed (ADR-51) | three rows | the module is the kernel's model; the pending-spawn row; a centred line |
+| code review | **not reachable** | closed (ADR-44) | its keys are not actions, so nothing can declare them; then two seats and five operations |
+
+The file viewer is now the closest, and what it needs is three decisions rather than a
+capability. That is the change ADR-53's own "not done" section names.

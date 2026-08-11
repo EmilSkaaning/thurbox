@@ -8,6 +8,33 @@ use std::collections::HashMap;
 use super::modals;
 use crate::session::{SessionId, Task};
 
+/// One row the tasks pane shows, as the *model* has it.
+///
+/// Declared here rather than in `ui` because this is what [`App`](super::App)
+/// **builds** — for the pane and, unchanged, for the published snapshot a plugin
+/// reads. It lived in the pane it fed until that renderer was deleted (ADR-53), the
+/// same relocation `SystemMetrics` made in ADR-50; and it is not in `session`
+/// because two of its fields are *derived view state* (the global search's verdict on
+/// this row, and whether the task has an open related session) rather than anything
+/// the record carries.
+pub(crate) struct TaskPaneEntry {
+    /// The task's row id — what a pane that may *change* a task addresses it by
+    /// (ADR-35). Resolving it a second time from the cached tasks would be the same
+    /// lookup with a second chance to disagree about which row is which.
+    pub(crate) id: i64,
+    pub(crate) title: String,
+    pub(crate) status: crate::session::TaskStatus,
+    /// Byte offsets in `title` matched by the active global-search query. Empty
+    /// when there is no global search, or this row did not match.
+    pub(crate) match_positions: Vec<usize>,
+    /// A running global search filtered this row out.
+    pub(crate) dimmed: bool,
+    /// The task has at least one currently-open related session (a spawned
+    /// `<title> · #<id>` window or a Send target). Drawn as a trailing marker so a
+    /// live task is glanceable; `o` jumps to it.
+    pub(crate) linked: bool,
+}
+
 /// UI state backing the tasks panel: the cached task list, panel selection,
 /// the live preview/edit editor, and the in-memory task→session links.
 #[derive(Default)]

@@ -588,7 +588,7 @@ impl App {
             ring.push(SessionList);
         }
         ring.push(central);
-        if self.show_tasks_panel || self.pane_keyboard_taken(KeyContext::Tasks) {
+        if self.pane_keyboard_taken(KeyContext::Tasks) {
             ring.push(TaskList);
         }
         // While a review is open the file-viewer column shows the
@@ -1148,22 +1148,29 @@ impl App {
         false
     }
 
-    /// What to say when `ToggleInfoPanel` finds no pane to flip.
+    /// What to say when a handed-over pane's action finds no pane to flip.
     ///
     /// Two spellings because the *reason* differs, and a message naming a command
     /// the running binary does not have is worse than no message: without the plugin
     /// host there is no `thurbox-cli plugin` subcommand to send anyone to, and the
     /// pane is not missing but absent by construction (ADR-50).
+    ///
+    /// Takes the plugin's name because there is more than one handed-over pane now
+    /// (ADR-53), and "which plugin" is the actionable half of the report.
     #[cfg(feature = "plugins")]
-    const NO_INFO_PANE_HINT: &'static str =
-        "provided by the `info-panel` plugin, which has no pane here \
-         (see `thurbox-cli plugin doctor`)";
+    pub(super) fn no_pane_hint(plugin: &str) -> String {
+        format!(
+            "provided by the `{plugin}` plugin, which has no pane here \
+             (see `thurbox-cli plugin doctor`)"
+        )
+    }
 
     /// Without the plugin host the pane cannot exist, so the report says so rather
     /// than pointing at a diagnostic this build does not ship.
     #[cfg(not(feature = "plugins"))]
-    const NO_INFO_PANE_HINT: &'static str =
-        "provided by a plugin, and this build has no plugin host";
+    pub(super) fn no_pane_hint(_plugin: &str) -> String {
+        "provided by a plugin, and this build has no plugin host".to_string()
+    }
 
     /// Whether any pane the user could show declares `action` as its toggle.
     ///
@@ -1319,7 +1326,7 @@ impl App {
             // runs first, so a disabled switch keeps naming itself.
             Action::ToggleInfoPanel => self.gated(self.features.info_panel, "Info panel", |s| {
                 if !s.pane_bound_to(crate::session::Action::ToggleInfoPanel) {
-                    s.set_info(format!("Info panel: {}", Self::NO_INFO_PANE_HINT));
+                    s.set_info(format!("Info panel: {}", Self::no_pane_hint("info-panel")));
                 }
             }),
             Action::FocusTasks => {
@@ -1545,18 +1552,25 @@ impl App {
         }
     }
 
-    /// Toggle the tasks panel column (`F5`/`Ctrl+W`), mirroring the file viewer:
-    /// showing it also focuses it; hiding it drops focus back to the list.
+    /// The tasks pane is a plugin's pane (ADR-53), so the *flip* already happened in
+    /// `toggle_panes_bound_to` before this ran and there is no kernel pane left to
+    /// toggle. What is left for the kernel is what the flip cannot do: follow the
+    /// pane with **focus**, exactly as `F5` always did — showing it focuses it,
+    /// hiding it drops focus back — and report when nothing provides the pane at
+    /// all, since a silent key is indistinguishable from a broken binding.
     fn act_toggle_tasks(&mut self) {
-        self.show_tasks_panel = !self.show_tasks_panel;
-        if self.show_tasks_panel {
+        if !self.pane_bound_to(crate::session::Action::FocusTasks) {
+            self.set_info(format!("Tasks panel: {}", Self::no_pane_hint("tasks")));
+            return;
+        }
+        if self.pane_keyboard_taken(crate::session::KeyContext::Tasks) {
             self.refresh_tasks();
             self.task_ui.task_panel_index = 0;
             self.focus = InputFocus::TaskList;
             // Populate the central-pane preview for the selected task (without
             // this the workspace shows the empty hint).
             self.sync_task_editor();
-        } else if self.focus == InputFocus::TaskList {
+        } else if matches!(self.focus, InputFocus::TaskList | InputFocus::TaskEditor) {
             self.focus = self.focus_fallback();
         }
         self.resize_sessions_to_content_area();

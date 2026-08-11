@@ -123,7 +123,7 @@ const BLOCKERS: &[Blocker] = &[
     },
     Blocker {
         id: "no-cross-pane-styling",
-        needs: "restyling rows in the session list, tasks and automations panes",
+        needs: "restyling rows in the session list, the tasks pane and the automations pane",
         stands: "the search's verdict already crosses *outward* as a property of each published \
                  row, but each native pane applies it itself from a query the view hands it, and \
                  nothing carries a query the other way",
@@ -135,15 +135,18 @@ const BLOCKERS: &[Blocker] = &[
             // plugin's tree cannot carry it. The outward direction — a published
             // row's `dimmed`/`match_positions` — is asserted separately, since
             // it is this row's *evidence* rather than its verdict.
-            let native_panes_highlight_themselves = [
-                "src/ui/project_list.rs",
-                "src/ui/tasks_panel.rs",
-                "src/ui/automations_panel.rs",
-            ]
-            .iter()
-            .all(|pane| source(root, pane).contains("highlight"));
+            let native_panes_highlight_themselves =
+                ["src/ui/project_list.rs", "src/ui/automations_panel.rs"]
+                    .iter()
+                    .all(|pane| source(root, pane).contains("highlight"));
+            // The tasks pane is handed over (ADR-53), and it makes this row's point
+            // in Luau rather than weakening it: the *plugin* applies the verdict from
+            // the published per-row facts, because nothing carries a query into it.
+            let handed_over_pane_reads_the_verdict =
+                source(root, "src/plugin/bundled/tasks/init.luau").contains("matchPositions");
             let renderer = source(root, "src/ui/plugin_pane.rs").to_lowercase();
             native_panes_highlight_themselves
+                && handed_over_pane_reads_the_verdict
                 && !renderer.contains("highlight")
                 && !renderer.contains("query")
         },
@@ -545,16 +548,20 @@ fn the_search_verdict_crosses_outward_but_no_query_comes_back() {
              cross-pane row's evidence moved, so the row's wording needs revisiting"
         );
     }
-    for pane in [
-        "src/ui/project_list.rs",
-        "src/ui/tasks_panel.rs",
-        "src/ui/automations_panel.rs",
-    ] {
+    for pane in ["src/ui/project_list.rs", "src/ui/automations_panel.rs"] {
         assert!(
             source(&root, pane).contains("highlight"),
             "{pane} no longer highlights its own rows — the cross-pane blocker's evidence moved"
         );
     }
+    // And the one surface that is a plugin does the same from the *published* verdict,
+    // which is this row's direction: outward as a per-row fact, never inward as a
+    // query (ADR-53 handed this pane over; the argument did not move with it).
+    assert!(
+        source(&root, "src/plugin/bundled/tasks/init.luau").contains("matchPositions"),
+        "the handed-over tasks pane no longer applies the search's verdict itself — the \
+         cross-pane blocker's evidence moved"
+    );
     let renderer = source(&root, "src/ui/plugin_pane.rs").to_lowercase();
     assert!(
         !renderer.contains("highlight") && !renderer.contains("query"),

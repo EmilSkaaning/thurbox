@@ -1,32 +1,34 @@
 --!strict
 -- thurbox's tasks pane, in Luau.
 --
--- A faithful reproduction of `ui::tasks_panel::tasks_tree`: the same glyph per
--- status, the same colour token, the same selected > dimmed > status precedence,
--- the same emphasis on matched characters, the same trailing marker, the same
--- empty-state line. `tests/bundled_tasks_panel.rs` asserts the two view trees are
--- *equal*, which makes this the measurement of whether a third party could have
--- written the pane.
+-- Not a reproduction any more: `src/ui/tasks_panel.rs` is deleted and this **is** the
+-- pane (ADR-53). `tests/bundled_tasks_panel.rs` still holds it to the native pane's
+-- tree — the twelve checked-in recordings were generated from
+-- `ui::tasks_panel::tasks_tree` while it existed — so this file is measured against
+-- the pane rather than against itself.
 --
--- Three things are worth reading for what they imply about writing a list pane:
+-- It is the first of thurbox's panes **with a keyboard** the kernel does not draw, and
+-- what that means is worth reading, because it is the whole v2 pane model:
 --
--- 1. **The host publishes no rendering.** A row arrives with a status *name*;
---    the glyph and the colour token below are this plugin's choices. That is the
---    opposite of a session status, whose glyph and token the host resolves
---    because two native panes share that mapping.
--- 2. **A matched run is segmented here.** The host publishes byte offsets, so the
---    UTF-8 walk that turns them into runs is the plugin's — and it has to be
---    exactly the host's walk, including its two edge rules, or a title with a
---    multi-byte character in it would highlight the wrong bytes.
--- 3. **Nothing here knows the pane's size**, and it still scrolls. It names the
---    row its cursor is on and the host windows the list to it from a height this
---    plugin is never told, which is the same trade the gauge node made for width.
---    Title fitting works the same way and used to be the one thing this pane could
---    not reproduce: the title runs declare that they **yield their width**
---    (`ellipsize`), and the host cuts them with an ellipsis while the glyph and the
---    trailing marker keep their columns. So there is no divergence left to
---    enumerate in `tests/bundled_tasks_panel.rs`.
-
+-- 1. **This file draws; it does not drive.** The manifest declares
+--    `key_context = "Tasks"`, so all ten of the pane's scoped actions resolve while
+--    the pane holds focus and the *kernel* performs them against its own state —
+--    `j` moves its cursor, `Space` cycles a status, `n` opens the central editor.
+--    Nothing here receives a key, and nothing here needed a capability to be driven.
+-- 2. **The host publishes no rendering.** A row arrives with a status *name*; the
+--    glyph and the colour token below are this plugin's choices. That is the opposite
+--    of a session status, whose glyph and token the host resolves because two panes
+--    share that mapping.
+-- 3. **A matched run is segmented here.** The host publishes byte offsets, so the
+--    UTF-8 walk that turns them into runs is this plugin's — and it has to be exactly
+--    the host's walk, including its two edge rules, or a title with a multi-byte
+--    character in it would highlight the wrong bytes.
+-- 4. **Nothing here knows the pane's size**, and it still scrolls *and* fits. It
+--    names the row its cursor is on and the host windows the list to it; it declares
+--    that the title run yields its width (`ellipsize`) and the host cuts it with an
+--    ellipsis, keeping the trailing marker's columns (ADR-52). Both are the same
+--    trade the gauge node made: declare the intent, the kernel resolves the geometry.
+--
 local thurbox = require("@thurbox")
 local ui = thurbox.ui
 

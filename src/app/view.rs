@@ -19,8 +19,8 @@ use crate::ui::theme::Theme;
 use crate::ui::{
     agent_picker_modal, automation_editor_modal, automations_list_modal, automations_panel,
     branch_selector_modal, file_viewer, global_search, project_list, restore_sessions_modal,
-    session_name_modal, status_bar, task_editor_modal, tasks_panel, terminal_view,
-    theme_picker_modal, worktree_name_modal,
+    session_name_modal, status_bar, task_editor_modal, terminal_view, theme_picker_modal,
+    worktree_name_modal,
 };
 
 #[cfg(feature = "plugins")]
@@ -208,7 +208,6 @@ impl App {
         self.render_automations_pane(frame, areas.automations_panel);
         // No `render_info_panel`: the Info column is a bundled plugin's pane
         // (ADR-50), painted by `render_plugin_panes` from the `center-left` seat.
-        self.render_tasks_panel(frame, areas.tasks_panel);
         #[cfg(feature = "plugins")]
         self.render_plugin_panes(frame, &areas);
         self.render_file_viewer(frame, areas.file_viewer);
@@ -282,19 +281,26 @@ impl App {
                         | ClickAction::RepoFocus(_)
                 )
             } else {
-                matches!(
-                    t.action,
-                    ClickAction::SelectSession(_)
-                        | ClickAction::SelectTask(_)
-                        | ClickAction::SelectAutomation(_)
-                        | ClickAction::SelectFileRow(_)
-                        | ClickAction::Global(_)
-                        | ClickAction::ReviewButton(_)
-                        | ClickAction::ReviewTarget(_)
-                        | ClickAction::CentralTab(_)
-                        | ClickAction::PaneField { .. }
-                        | ClickAction::CopyStatus
-                )
+                // The tasks row target is listed separately because it exists only in
+                // a build with the plugin host: the pane that records it is a plugin's
+                // (ADR-53).
+                #[cfg(feature = "plugins")]
+                let a_task_row = matches!(t.action, ClickAction::SelectTask(_));
+                #[cfg(not(feature = "plugins"))]
+                let a_task_row = false;
+                a_task_row
+                    || matches!(
+                        t.action,
+                        ClickAction::SelectSession(_)
+                            | ClickAction::SelectAutomation(_)
+                            | ClickAction::SelectFileRow(_)
+                            | ClickAction::Global(_)
+                            | ClickAction::ReviewButton(_)
+                            | ClickAction::ReviewTarget(_)
+                            | ClickAction::CentralTab(_)
+                            | ClickAction::PaneField { .. }
+                            | ClickAction::CopyStatus
+                    )
             };
             reachable && t.rect.contains(pos)
         });
@@ -568,6 +574,7 @@ impl App {
             (PaneSlot::Left, areas.left_panel),
             (PaneSlot::LeftBottom, areas.automations_panel),
             (PaneSlot::CenterLeft, areas.info_panel),
+            (PaneSlot::Tasks, areas.tasks_panel),
             (PaneSlot::Center, Some(areas.terminal)),
         ] {
             let (Some(pane), Some(rect)) = (self.plugin_seat(slot), rect) else {
@@ -575,7 +582,8 @@ impl App {
             };
             let focus = self.plugin_pane_focus_level(pane);
             let clicks = pane_clicks(pane);
-            let rows = Self::paint_plugin_pane(frame, pane, rect, &self.motion, focus);
+            let hints = self.plugin_pane_hints(pane, focus);
+            let rows = Self::paint_plugin_pane(frame, pane, rect, &self.motion, focus, hints);
             painted.push((pane.plugin.clone(), pane.id.clone(), rect, clicks, rows));
         }
 
@@ -588,7 +596,8 @@ impl App {
         for (pane, &rect) in column.into_iter().zip(&areas.plugin_panes) {
             let focus = self.plugin_pane_focus_level(pane);
             let clicks = pane_clicks(pane);
-            let rows = Self::paint_plugin_pane(frame, pane, rect, &self.motion, focus);
+            let hints = self.plugin_pane_hints(pane, focus);
+            let rows = Self::paint_plugin_pane(frame, pane, rect, &self.motion, focus, hints);
             painted.push((pane.plugin.clone(), pane.id.clone(), rect, clicks, rows));
         }
 
@@ -644,6 +653,24 @@ impl App {
         }
     }
 
+    /// The chrome row the kernel draws in this pane's seat, if any.
+    ///
+    /// Only for a pane that declared one of thurbox's keyboards, and only while that
+    /// pane holds focus — the same condition the native pane's own footer had. A pane
+    /// that is nobody's reproduction gets none: the kernel has nothing to say about
+    /// keys it does not dispatch there.
+    #[cfg(feature = "plugins")]
+    fn plugin_pane_hints(
+        &self,
+        pane: &crate::plugin::PluginPane,
+        focus: crate::ui::FocusLevel,
+    ) -> Option<&'static [(&'static str, &'static str)]> {
+        if !matches!(focus, crate::ui::FocusLevel::Focused) {
+            return None;
+        }
+        Self::pane_hints(pane.key_context?)
+    }
+
     /// How a plugin pane's frame is drawn: focused, active, or neither.
     ///
     /// A pane that declared one of thurbox's own keyboards is drawn by that pane's
@@ -680,6 +707,7 @@ impl App {
         rect: Rect,
         motion: &motion_state::MotionState,
         focus: crate::ui::FocusLevel,
+        hints: Option<&'static [(&'static str, &'static str)]>,
     ) -> Vec<crate::ui::RowHitbox> {
         use crate::ui::focus_block;
 
@@ -695,8 +723,19 @@ impl App {
         // copy, and wrong for a pane that is the interface's task list, whose border
         // is how a user sees where `j` is going.
         let block = focus_block(&title, focus);
-        let inner = block.inner(rect);
+        let mut inner = block.inner(rect);
         frame.render_widget(block, rect);
+
+        // Seat chrome: a row the *kernel* draws inside the frame, above the plugin's
+        // tree, because the plugin could not draw it (ADR-53). The same subtraction
+        // the native pane made before rendering its list, so the plugin's content
+        // area — and therefore its row hitboxes — is the area that pane's content
+        // had.
+        if let Some(hints) = hints.filter(|_| inner.height > 2) {
+            let hint_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+            frame.render_widget(Paragraph::new(crate::ui::key_hint_line(hints)), hint_area);
+            inner.height -= 1;
+        }
 
         let palette = crate::ui::theme::current();
         // Which frame each animated node is showing was resolved on the tick,
@@ -744,28 +783,6 @@ impl App {
                 Vec::new()
             }
         }
-    }
-
-    /// Render the tasks panel column (when present).
-    fn render_tasks_panel(&mut self, frame: &mut Frame, area: Option<Rect>) {
-        let Some(area) = area else {
-            return;
-        };
-        let entries = self.task_pane_entries();
-        let focus = self.pane_focus_level(crate::session::KeyContext::Tasks);
-        let preview_selected =
-            self.global_search_preview_kind() == Some(crate::app::search::SearchKind::Task);
-        let rows = tasks_panel::render_tasks_panel(
-            frame,
-            area,
-            &tasks_panel::TaskPaneState {
-                entries: &entries,
-                selected: self.task_ui.task_panel_index,
-                focus,
-                preview_selected,
-            },
-        );
-        self.record_row_clicks(rows, ClickAction::SelectTask, area, InputFocus::TaskList);
     }
 
     /// Record a scrollbar drawn this frame as a drag target, if one was drawn.
