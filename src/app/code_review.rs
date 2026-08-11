@@ -14,6 +14,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use std::path::{Path, PathBuf};
 
+use crate::session::pane_context as pc;
 use crate::session::review::{
     pair_hunk, parse_unified_diff, Classification, CommentAnchor, DiffFile, ReviewComment, Side,
 };
@@ -21,6 +22,15 @@ use crate::session::{HostDef, SessionId};
 
 use super::modals::TextArea;
 use super::{App, InputFocus, StatusLevel};
+
+/// The label opening the review-summary section.
+///
+/// A const because it crosses to a plugin pane verbatim: it names the keystroke
+/// that adds a summary comment, which a plugin pane never receives, so the kernel
+/// is the only honest author of the string (see
+/// [`pc::ReviewRowSnapshot::SummaryHeader`]). Both the native renderer and the
+/// published row read it here, so the two cannot drift.
+pub(crate) const SUMMARY_HEADER_LABEL: &str = "── Review summary (s to add) ──";
 
 /// One repository under review — a session worktree. A single-repo session has
 /// one; a multi-repo session has several (each on the shared branch). `base` is
@@ -375,6 +385,97 @@ impl CodeReviewState {
             }
             _ => None,
         }
+    }
+
+    /// The rows a plugin pane is published, and the cursor's index into them.
+    ///
+    /// The one extraction from [`Self::rows`] into the pane snapshot: both the
+    /// published section (`App::build_review_snapshot`) and the geometry-free tree
+    /// builder ([`crate::ui::code_review::review_stream_tree`]) read its output, so
+    /// there is one description of what a pane receives rather than two that must
+    /// agree.
+    ///
+    /// Bounded by [`pc::MAX_REVIEW_ROWS`] over **every** kind of row: a header and
+    /// a comment cost view-tree nodes as a line does. The cursor is dropped when it
+    /// falls past the bound, so a pane never gets an anchor into rows it was not
+    /// given.
+    pub(crate) fn snapshot_rows(&self) -> (Vec<pc::ReviewRowSnapshot>, Option<usize>) {
+        let mut rows = Vec::new();
+        let mut cursor = None;
+        for (row_index, row) in self.rows.iter().enumerate() {
+            if rows.len() >= pc::MAX_REVIEW_ROWS {
+                break;
+            }
+            // A row whose backing record has gone (a comment deleted between the
+            // rebuild and the publication) is skipped rather than published empty:
+            // the native pane draws such a row blank, and a blank row in a
+            // reproduction would look like a rendering bug in the plugin.
+            let Some(published) = self.snapshot_row(row) else {
+                continue;
+            };
+            if row_index == self.selected {
+                cursor = Some(rows.len());
+            }
+            rows.push(published);
+        }
+        (rows, cursor)
+    }
+
+    /// One row's published form, or `None` when its record is gone.
+    fn snapshot_row(&self, row: &ReviewRow) -> Option<pc::ReviewRowSnapshot> {
+        Some(match row {
+            ReviewRow::FileHeader(fi) => {
+                let f = self.files.get(*fi)?;
+                pc::ReviewRowSnapshot::File(pc::ReviewFileSnapshot {
+                    path: f.path.clone(),
+                    status: f.status.as_str(),
+                    added: f.added_count(),
+                    removed: f.deleted_count(),
+                    folded: self.is_file_folded(&f.path),
+                    reviewed: self.reviewed_files.contains(&f.path),
+                })
+            }
+            ReviewRow::HunkHeader(fi, hi) => {
+                let f = self.files.get(*fi)?;
+                let h = f.hunks.get(*hi)?;
+                pc::ReviewRowSnapshot::Hunk(pc::ReviewHunkSnapshot {
+                    old_start: h.old_start,
+                    // The two spans are the lines present on each side, counted
+                    // over the hunk's whole list — the same derivation
+                    // `ui::code_review::hunk_header_line` makes, and not derivable
+                    // from a bounded window of published lines.
+                    old_span: h.lines.iter().filter(|l| l.old_no.is_some()).count(),
+                    new_start: h.new_start,
+                    new_span: h.lines.iter().filter(|l| l.new_no.is_some()).count(),
+                    heading: h.header.clone(),
+                    reviewed: self.reviewed_hunks.contains(&(f.path.clone(), *hi)),
+                })
+            }
+            ReviewRow::Line(fi, hi, li) => {
+                let f = self.files.get(*fi)?;
+                let line = f.hunks.get(*hi)?.lines.get(*li)?;
+                pc::ReviewRowSnapshot::Line(pc::ReviewLineSnapshot {
+                    path: f.path.clone(),
+                    old_no: line.old_no,
+                    new_no: line.new_no,
+                    kind: line.kind.as_str(),
+                    text: line.text.clone(),
+                })
+            }
+            ReviewRow::Comment(id) | ReviewRow::Summary(id) => {
+                let c = self.comment(*id)?;
+                let mut lines = c.body.lines();
+                pc::ReviewRowSnapshot::Comment(pc::ReviewCommentSnapshot {
+                    classification: c.classification.as_str(),
+                    text: lines.next().unwrap_or_default().to_string(),
+                    more: lines.next().is_some(),
+                })
+            }
+            ReviewRow::SummaryHeader => pc::ReviewRowSnapshot::SummaryHeader {
+                label: SUMMARY_HEADER_LABEL.to_string(),
+            },
+            ReviewRow::Info(text) => pc::ReviewRowSnapshot::Info { text: text.clone() },
+        })
     }
 
     /// Whether `path`'s diff is folded (collapsed to just its header). A file

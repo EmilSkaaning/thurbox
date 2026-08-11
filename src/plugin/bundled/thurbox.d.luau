@@ -11,7 +11,8 @@
 -- merely different.
 export type StyleToken =
     "accent" | "muted" | "danger" | "success" | "warning"
-    | "secondary" | "role" | "branch" | "accent_bright" | "added" | "border"
+    | "secondary" | "role" | "branch" | "accent_bright" | "added"
+    | "diff_added" | "diff_removed" | "border"
     | "status_working" | "status_blocked" | "status_done"
     | "status_idle" | "status_error" | "status_unreachable"
 
@@ -379,25 +380,62 @@ export type FileTree = {
     nerdFont: boolean,
 }
 
--- One line of the diff the code-review view has open.
+-- One row of the open review, tagged by `row`.
 --
--- `oldNo`/`newNo` are absent on the side the line is not on: an insertion has no
--- old-side number, and `0` would be a number a pane could print. `kind` is
--- `"add"`, `"del"` or `"context"`.
+-- Two tags, and they mean different things: `row` is which **kind of row** this is
+-- (`"file"`, `"hunk"`, `"line"`, `"comment"`, `"summaryHeader"`, `"info"`), while a
+-- line row's `kind` is which side of the change it is on. The fields present depend
+-- on `row`, so branch on it first.
 --
--- `text` is **raw**: not split into coloured runs, not windowed to any scroll
--- offset, not padded to any width. How a diff body reads is the pane's decision,
--- so the highlighting is yours to do — `path` is there because a comment marker
+-- Facts, not glyphs. A file row gives you `status` as a name (`"modified"`,
+-- `"added"`, `"deleted"`, `"renamed"`), `folded` and `reviewed` — the status letter,
+-- the fold chevron and the reviewed mark are yours to draw. A comment row gives you
+-- `classification` (`"issue"`, `"suggestion"`, `"note"`, `"praise"`), the body's
+-- first line in `text`, and `more` when there are further lines.
+--
+-- `oldSpan`/`newSpan` are counted over the hunk's *whole* line list, which the
+-- published window may not contain — like `numberWidth`, they cross so your `@@`
+-- ranges are the review's own.
+--
+-- On a `line` row, `oldNo`/`newNo` are absent on the side the line is not on: an
+-- insertion has no old-side number, and `0` would be a number a pane could print.
+-- Its `text` is **raw** — not split into coloured runs, not windowed to any scroll
+-- offset, not padded to any width. How a diff body reads is the pane's decision, so
+-- the highlighting is yours to do, and `path` is there because a comment marker
 -- depends on the file's extension.
-export type ReviewLine = {
-    path: string,
+--
+-- `label` on a `summaryHeader` is the one row whose **text** crosses: it names a
+-- thurbox keystroke, which a plugin pane never receives, so composing the string
+-- yourself would advertise an action you cannot perform. Draw it verbatim.
+export type ReviewRow = {
+    row: string,
+    -- `file`
+    path: string?,
+    status: string?,
+    added: number?,
+    removed: number?,
+    folded: boolean?,
+    reviewed: boolean?,
+    -- `hunk`
+    oldStart: number?,
+    oldSpan: number?,
+    newStart: number?,
+    newSpan: number?,
+    heading: string?,
+    -- `line` (`path`, above, is a line's too)
     oldNo: number?,
     newNo: number?,
-    kind: string,
-    text: string,
+    kind: string?,
+    -- `line`, `comment` and `info`
+    text: string?,
+    -- `comment`
+    classification: string?,
+    more: boolean?,
+    -- `summaryHeader`
+    label: string?,
 }
 
--- The open review's diff stream.
+-- The open review's row stream.
 --
 -- `cursor` is the 1-based row the review's cursor is on — hand it to `ui.list`'s
 -- second argument and the pane scrolls. `numberWidth` is the width of each of the
@@ -405,7 +443,7 @@ export type ReviewLine = {
 -- review, which the published window is not, so a pane deriving it would draw a
 -- narrower gutter than thurbox's own.
 export type ReviewDiff = {
-    lines: { ReviewLine },
+    rows: { ReviewRow },
     cursor: number?,
     numberWidth: number,
 }

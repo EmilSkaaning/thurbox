@@ -7730,41 +7730,13 @@ impl App {
             return pc::ReviewSnapshot::default();
         };
 
-        let mut lines = Vec::new();
-        let mut cursor = None;
-        for (row_index, row) in state.rows.iter().enumerate() {
-            if lines.len() >= pc::MAX_REVIEW_ROWS {
-                break;
-            }
-            let code_review::ReviewRow::Line(fi, hi, li) = row else {
-                continue;
-            };
-            let Some(line) = state
-                .files
-                .get(*fi)
-                .and_then(|f| f.hunks.get(*hi))
-                .and_then(|h| h.lines.get(*li))
-            else {
-                continue;
-            };
-            if row_index == state.selected {
-                cursor = Some(lines.len());
-            }
-            lines.push(pc::ReviewLineSnapshot {
-                path: state.files[*fi].path.clone(),
-                old_no: line.old_no,
-                new_no: line.new_no,
-                kind: match line.kind {
-                    crate::session::review::DiffLineKind::Add => "add",
-                    crate::session::review::DiffLineKind::Del => "del",
-                    crate::session::review::DiffLineKind::Context => "context",
-                },
-                text: line.text.clone(),
-            });
-        }
+        // The whole extraction lives on the state, so the published section and
+        // the tree builder a plugin is compared against read one description of a
+        // pane's rows rather than two.
+        let (rows, cursor) = state.snapshot_rows();
 
         pc::ReviewSnapshot {
-            lines,
+            rows,
             cursor,
             number_width: crate::ui::code_review::gutter_number_width(&state.files),
         }

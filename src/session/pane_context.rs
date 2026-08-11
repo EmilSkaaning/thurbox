@@ -490,12 +490,140 @@ pub struct ReviewLineSnapshot {
     pub text: String,
 }
 
-/// The open review's diff stream.
+/// One file header of the open review, as a pane draws it.
+///
+/// Facts, not glyphs: the fold chevron, the status glyph and the reviewed mark are
+/// the pane's to draw from `folded`, `status` and `reviewed`. Two panes can both
+/// derive a marker from a wire name, and the rule the snapshot follows is that a
+/// rendering crosses only when they cannot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewFileSnapshot {
+    /// The path the diff names, `"<repo>/<path>"` in a multi-repo review.
+    pub path: String,
+    /// Stable wire name of the file's status: `modified`, `added`, `deleted` or
+    /// `renamed`.
+    pub status: &'static str,
+    /// Inserted lines across the file's hunks.
+    pub added: usize,
+    /// Deleted lines across the file's hunks.
+    pub removed: usize,
+    /// Whether the file's diff is collapsed to this row.
+    ///
+    /// A view fact the pane cannot derive: it is `reviewed XOR` a transient
+    /// per-file override, so a pane reading `reviewed` alone would draw the wrong
+    /// chevron for a file the user expanded by hand.
+    pub folded: bool,
+    /// Whether the file is marked reviewed.
+    pub reviewed: bool,
+}
+
+/// One hunk header of the open review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewHunkSnapshot {
+    /// First line number on the old side.
+    pub old_start: u32,
+    /// Lines the hunk covers on the old side.
+    ///
+    /// Counted over the hunk's **whole** line list, for [`ReviewSnapshot::
+    /// number_width`]'s reason: the bound may cut the hunk's lines short, and a
+    /// pane counting what it received would print a shorter range than the review's
+    /// own.
+    pub old_span: usize,
+    /// First line number on the new side.
+    pub new_start: u32,
+    /// Lines the hunk covers on the new side.
+    pub new_span: usize,
+    /// The section heading git put after the ranges (often the enclosing
+    /// function), empty when there is none.
+    pub heading: String,
+    /// Whether the hunk is marked reviewed.
+    pub reviewed: bool,
+}
+
+/// One comment of the open review — line-level, file-level or a summary.
+///
+/// The three levels render alike, so they are one kind here; where a comment is
+/// anchored is not published, because the row's *position* in the stream is what
+/// says it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewCommentSnapshot {
+    /// Stable wire name of the classification: `issue`, `suggestion`, `note` or
+    /// `praise`.
+    pub classification: &'static str,
+    /// The body's first line — the only line a row draws.
+    ///
+    /// The first line rather than the whole body, which is bounded at 64 KiB: the
+    /// wire would otherwise carry three orders of magnitude more than the row
+    /// renders, per comment, on every publication. It is split here rather than in
+    /// the pane because `str::lines` strips a trailing `\r` and a split on `\n`
+    /// does not, so a comment written on Windows would render differently in the
+    /// two panes.
+    pub text: String,
+    /// Whether the body has further lines, which the row marks with an ellipsis.
+    pub more: bool,
+}
+
+/// One row of the open review, in the order the pane lists them.
+///
+/// The stream is published as rows rather than as diff lines because its **order**
+/// is kernel view state and not a property of the diff: a reviewed file collapses
+/// to its header alone, a comment sits after the line it anchors to, and the
+/// summary section follows every file. A pane handed the lines and asked to
+/// interleave the rest would be recomputing that decision from a projection of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewRowSnapshot {
+    /// A file's header.
+    File(ReviewFileSnapshot),
+    /// A hunk's header.
+    Hunk(ReviewHunkSnapshot),
+    /// One line of a hunk.
+    Line(ReviewLineSnapshot),
+    /// A comment, at any of the three levels.
+    Comment(ReviewCommentSnapshot),
+    /// The heading that opens the review-summary section.
+    ///
+    /// Carries its **text**, which is the one row whose rendering crosses. The
+    /// native label names the keystroke that adds a summary comment, and a plugin
+    /// pane never receives that key: a pane composing the string would advertise an
+    /// action it cannot perform, and a pane omitting the hint would draw a
+    /// different row from the one it reproduces. Only the kernel can honestly
+    /// author it.
+    SummaryHeader {
+        /// The label to draw, verbatim.
+        label: String,
+    },
+    /// A non-selectable informational line, whose text the kernel authors.
+    Info {
+        /// The text to draw.
+        text: String,
+    },
+}
+
+impl ReviewRowSnapshot {
+    /// Stable wire name of the row's kind.
+    ///
+    /// Spelled `row` on the wire rather than `kind`, which a line row already uses
+    /// for which side of the change it is on. Renaming that one would break every
+    /// pane written against the published section, and the snapshot's promise is
+    /// that it does not.
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            ReviewRowSnapshot::File(_) => "file",
+            ReviewRowSnapshot::Hunk(_) => "hunk",
+            ReviewRowSnapshot::Line(_) => "line",
+            ReviewRowSnapshot::Comment(_) => "comment",
+            ReviewRowSnapshot::SummaryHeader { .. } => "summaryHeader",
+            ReviewRowSnapshot::Info { .. } => "info",
+        }
+    }
+}
+
+/// The open review's row stream.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReviewSnapshot {
-    /// One entry per published line, in the order the pane lists them.
-    pub lines: Vec<ReviewLineSnapshot>,
-    /// The row a list scrolls to, zero-based into `lines`. `None` when there are
+    /// One entry per published row, in the order the pane lists them.
+    pub rows: Vec<ReviewRowSnapshot>,
+    /// The row a list scrolls to, zero-based into `rows`. `None` when there are
     /// none, or when the cursor falls past [`MAX_REVIEW_ROWS`] — for
     /// [`FilesSnapshot::selected`]'s reason.
     pub cursor: Option<usize>,
@@ -509,7 +637,10 @@ pub struct ReviewSnapshot {
     pub number_width: usize,
 }
 
-/// Most diff lines a publication carries.
+/// Most review rows a publication carries.
+///
+/// Counts **every** kind of row — a header and a comment cost nodes too, so a bound
+/// that counted only diff lines would bound a fraction of the tree.
 ///
 /// A bound on the section like [`MAX_FILE_ROWS`], but for a **different reason**,
 /// and the difference is the finding rather than an implementation note. The
@@ -522,7 +653,7 @@ pub struct ReviewSnapshot {
 ///
 /// The number is chosen so that a representative row (a gutter, a fill, and a
 /// dozen token runs) leaves the budget comfortable, not so that a pathological
-/// one is impossible. Past the bound the section carries the first lines and no
+/// one is impossible. Past the bound the section carries the first rows and no
 /// cursor.
 pub const MAX_REVIEW_ROWS: usize = 60;
 

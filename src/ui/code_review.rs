@@ -10,10 +10,11 @@ use ratatui::Frame;
 
 use crate::app::code_review::{CodeReviewState, ComposeState, ReviewButton, ReviewRow};
 use crate::session::overlay::{Align, CrossExtent, Overlay};
+use crate::session::pane_context as pc;
 use crate::session::review::{
     pair_hunk, Classification, CommentAnchor, DiffFile, DiffHunk, DiffLine, DiffLineKind, SidePair,
 };
-use crate::session::view_tree::{DiffTint, TextStyle, ViewNode};
+use crate::session::view_tree::{DiffTint, StyleToken as Token, TextStyle, ViewNode};
 use crate::ui::overlay::OverlayLayer;
 use crate::ui::scrollbar::{self, ScrollbarGeom};
 use crate::ui::theme::Theme;
@@ -412,7 +413,7 @@ fn row_visual_lines<'a>(
             vec![comment_line(state, *id, width, query, sel_style)]
         }
         ReviewRow::SummaryHeader => vec![Line::from(Span::styled(
-            truncate("── Review summary (s to add) ──", width),
+            truncate(crate::app::code_review::SUMMARY_HEADER_LABEL, width),
             sel_style(
                 Style::default()
                     .fg(Theme::accent())
@@ -644,21 +645,14 @@ fn diff_row_bg(kind: DiffLineKind) -> (char, Option<Color>) {
 /// The row declares its tint **and** its selection when the cursor is on it: the
 /// renderer resolves selection first, which is the precedence this module's own
 /// `row_bg_fn` applies.
-pub fn diff_row_tree(path: &str, line: &DiffLine, num_w: usize, selected: bool) -> ViewNode {
-    let (sign, tint) = diff_row_sign_tint(line.kind);
-    let style = |token: Option<crate::session::view_tree::StyleToken>| TextStyle {
-        token,
-        bold: false,
-        dim: false,
-        underline: false,
-        selected,
-        tint,
-    };
+pub fn diff_row_tree(line: &pc::ReviewLineSnapshot, num_w: usize, selected: bool) -> ViewNode {
+    let (sign, tint) = diff_row_sign_tint(DiffLineKind::parse(line.kind));
+    let style = row_style(selected, tint);
     let mut runs = vec![ViewNode::styled(
-        diff_gutter(line, num_w, sign),
-        style(Some(crate::session::view_tree::StyleToken::Muted)),
+        gutter_text(line.old_no, line.new_no, num_w, sign),
+        style(Some(Token::Muted)),
     )];
-    let lang = crate::ui::syntax::lang_for(path);
+    let lang = crate::ui::syntax::lang_for(&line.path);
     for (run, token) in crate::ui::syntax::highlight_tokens(&line.text, &lang) {
         runs.push(ViewNode::styled(run, style(token)));
     }
@@ -668,32 +662,174 @@ pub fn diff_row_tree(path: &str, line: &DiffLine, num_w: usize, selected: bool) 
     ViewNode::Line(runs)
 }
 
-/// The unified diff stream as a view tree: one row per line, with the row the
-/// cursor is on named so the **kernel** windows the list.
+/// A run style for one row: a token, plus the row's selection and tint.
 ///
-/// The scope this port reproduces (`docs/PHASE4-PANE-READINESS.md` §11): the
-/// stream's *lines*, not its file headers, hunk headers, comments or summary
-/// rows. `cursor` is an index into `lines`, not into the pane's own row list,
-/// because those extra rows are not here.
-pub fn diff_stream_tree(
-    lines: &[(String, DiffLine)],
+/// Both roles go on **every** run of a row because the renderer resolves
+/// selection first — the cursor's row draws in one appearance rather than a
+/// selection background beside a tint, which is the precedence [`row_bg_fn`]
+/// applies natively.
+fn row_style(selected: bool, tint: Option<DiffTint>) -> impl Fn(Option<Token>) -> TextStyle {
+    move |token| TextStyle {
+        token,
+        bold: false,
+        dim: false,
+        underline: false,
+        selected,
+        tint,
+    }
+}
+
+/// A file header as a view tree: the chevron, the status glyph, the path, the
+/// two counts, the reviewed mark, and the rule that carries the row to the edge.
+///
+/// The rule is a [`ViewNode::Fill`], which is the whole reason this row is
+/// expressible: the native renderer repeats `─` for `width - used` columns, and a
+/// fill is the kernel resolving that residue for a pane that was never told its
+/// width. The trailing space is a run of its own so both paths spend the same
+/// column on it — otherwise the fill would be one character long.
+pub fn file_header_tree(f: &pc::ReviewFileSnapshot, selected: bool) -> ViewNode {
+    let style = row_style(selected, None);
+    let header = |token: Option<Token>| TextStyle {
+        bold: true,
+        ..style(token)
+    };
+    let chevron = if f.folded { "▸" } else { "▾" };
+    let status = match crate::session::review::FileStatus::parse(f.status) {
+        Some(crate::session::review::FileStatus::Added) => Token::DiffAdded,
+        Some(crate::session::review::FileStatus::Deleted) => Token::DiffRemoved,
+        Some(crate::session::review::FileStatus::Renamed) => Token::Accent,
+        // Modified, and the residual for a name this build does not know: the
+        // native pane's own default for its status colour.
+        _ => Token::StatusWorking,
+    };
+    let glyph = crate::session::review::FileStatus::parse(f.status)
+        .map(|s| s.glyph())
+        .unwrap_or("?");
+    let mut runs = vec![
+        ViewNode::styled(format!("{chevron} "), header(Some(Token::AccentBright))),
+        ViewNode::styled(glyph.to_string(), header(Some(status))),
+        ViewNode::styled(format!(" {}  ", f.path), header(Some(Token::AccentBright))),
+        ViewNode::styled(format!("+{}", f.added), style(Some(Token::DiffAdded))),
+        ViewNode::styled(format!(" -{}", f.removed), style(Some(Token::DiffRemoved))),
+    ];
+    if f.reviewed {
+        runs.push(ViewNode::styled(" ✓", style(Some(Token::StatusDone))));
+    }
+    runs.push(ViewNode::styled(" ", header(Some(Token::AccentBright))));
+    runs.push(ViewNode::fill('─', header(Some(Token::AccentBright))));
+    ViewNode::Line(runs)
+}
+
+/// A hunk header as a view tree: the `@@` ranges, the heading, and the mark.
+pub fn hunk_header_tree(h: &pc::ReviewHunkSnapshot, selected: bool) -> ViewNode {
+    let mark = if h.reviewed { " ✓" } else { "" };
+    let text = format!(
+        "  @@ -{},{} +{},{} @@ {}{}",
+        h.old_start, h.old_span, h.new_start, h.new_span, h.heading, mark
+    );
+    ViewNode::styled(
+        text,
+        TextStyle {
+            dim: true,
+            ..row_style(selected, None)(Some(Token::Accent))
+        },
+    )
+}
+
+/// A comment as a view tree: its classification badge, then its first line.
+///
+/// Unlike a diff row this ends without a fill, because the native row does not
+/// pad either: the columns past the body keep the terminal's default style.
+pub fn comment_tree(c: &pc::ReviewCommentSnapshot, selected: bool) -> ViewNode {
+    let style = row_style(selected, None);
+    let class = crate::session::review::Classification::parse(c.classification);
+    let token = match class {
+        Some(Classification::Issue) => Token::Danger,
+        Some(Classification::Suggestion) => Token::Accent,
+        Some(Classification::Praise) => Token::StatusDone,
+        // Note, and the residual for an unknown name.
+        _ => Token::Secondary,
+    };
+    let label = class.map(|c| c.label()).unwrap_or("Note");
+    let more = if c.more { " …" } else { "" };
+    ViewNode::Line(vec![
+        ViewNode::styled(
+            format!("  ▸ [{label}] "),
+            TextStyle {
+                bold: true,
+                ..style(Some(token))
+            },
+        ),
+        ViewNode::styled(format!("{}{more}", c.text), style(Some(Token::Secondary))),
+    ])
+}
+
+/// The review-summary heading as a view tree.
+///
+/// The label is the kernel's rather than composed here, because it names a
+/// keystroke — see
+/// [`ReviewRowSnapshot::SummaryHeader`](crate::session::pane_context::ReviewRowSnapshot::SummaryHeader).
+pub fn summary_header_tree(label: &str, selected: bool) -> ViewNode {
+    ViewNode::styled(
+        label.to_string(),
+        TextStyle {
+            bold: true,
+            ..row_style(selected, None)(Some(Token::Accent))
+        },
+    )
+}
+
+/// An informational row as a view tree.
+///
+/// Never drawn selected: the native row applies no selection style because such a
+/// row is not selectable, so a cursor cannot rest on one.
+pub fn info_tree(text: &str) -> ViewNode {
+    ViewNode::token(text, Token::Muted)
+}
+
+/// The review's row stream as a view tree: one row per published row, with the
+/// row the cursor is on named so the **kernel** windows the list.
+///
+/// Reproduces the pane's whole *document* — every row kind this module's own
+/// `row_visual_lines` draws — and none of its behaviour. What is left out, and
+/// why each entry needs a host power or a resolved width, is
+/// `docs/PHASE4-PANE-READINESS.md` §11.
+///
+/// One divergence from the native rows, enumerated rather than hidden: a hunk
+/// header, a comment, an informational row and the summary header are truncated
+/// natively to the pane's width with a trailing `…`, while a tree carries the
+/// whole text and the renderer clips it. That is the same absent resolved width
+/// that blocks wrap, horizontal scroll and the side-by-side layout.
+pub fn review_stream_tree(
+    rows: &[pc::ReviewRowSnapshot],
     cursor: Option<usize>,
     num_w: usize,
 ) -> ViewNode {
-    if lines.is_empty() {
-        // The same line the native pane's `Info` row draws for a target with no
-        // changes, in the same muted role and with no selection.
-        return ViewNode::list(vec![ViewNode::token(
-            "No changes to show for this target.",
-            crate::session::view_tree::StyleToken::Muted,
-        )]);
+    if rows.is_empty() {
+        // A review that has not been opened publishes nothing, and the native
+        // pane's own empty state is an `Info` row with this text — so the pane a
+        // plugin draws before any publication is the one the review draws for a
+        // target with no changes.
+        return ViewNode::list(vec![info_tree("No changes to show for this target.")]);
     }
-    let rows = lines
+    let children = rows
         .iter()
         .enumerate()
-        .map(|(i, (path, line))| diff_row_tree(path, line, num_w, Some(i) == cursor))
+        .map(|(i, row)| {
+            let selected = Some(i) == cursor;
+            match row {
+                pc::ReviewRowSnapshot::File(f) => file_header_tree(f, selected),
+                pc::ReviewRowSnapshot::Hunk(h) => hunk_header_tree(h, selected),
+                pc::ReviewRowSnapshot::Line(l) => diff_row_tree(l, num_w, selected),
+                pc::ReviewRowSnapshot::Comment(c) => comment_tree(c, selected),
+                pc::ReviewRowSnapshot::SummaryHeader { label } => {
+                    summary_header_tree(label, selected)
+                }
+                pc::ReviewRowSnapshot::Info { text } => info_tree(text),
+            }
+        })
         .collect();
-    ViewNode::selectable_list(rows, cursor)
+    ViewNode::selectable_list(children, cursor)
 }
 
 /// A closure that applies the row tint under a style — unless the row is
@@ -707,8 +843,18 @@ fn row_bg_fn(row_bg: Option<Color>, selected: bool) -> impl Fn(Style) -> Style {
 
 /// The `{old} {new} {sign} ` line-number gutter for a unified diff line.
 fn diff_gutter(l: &DiffLine, num_w: usize, sign: char) -> String {
-    let old = l.old_no.map(|n| n.to_string()).unwrap_or_default();
-    let new = l.new_no.map(|n| n.to_string()).unwrap_or_default();
+    gutter_text(l.old_no, l.new_no, num_w, sign)
+}
+
+/// The gutter for a pair of line numbers, either of which may be absent.
+///
+/// Split from [`diff_gutter`] so the native renderer (which holds a [`DiffLine`])
+/// and the tree builder (which holds a published row) format one gutter rather
+/// than two that must agree. An absent number is an empty column, not a zero: a
+/// deletion has no new-side number.
+fn gutter_text(old_no: Option<u32>, new_no: Option<u32>, num_w: usize, sign: char) -> String {
+    let old = old_no.map(|n| n.to_string()).unwrap_or_default();
+    let new = new_no.map(|n| n.to_string()).unwrap_or_default();
     format!("{old:>num_w$} {new:>num_w$} {sign} ")
 }
 
@@ -2115,6 +2261,18 @@ mod tests {
         }
     }
 
+    /// The published form of a diff line, which is what a pane receives and what
+    /// the tree builder reads.
+    fn snap_line(path: &str, l: &DiffLine) -> pc::ReviewLineSnapshot {
+        pc::ReviewLineSnapshot {
+            path: path.to_string(),
+            old_no: l.old_no,
+            new_no: l.new_no,
+            kind: l.kind.as_str(),
+            text: l.text.clone(),
+        }
+    }
+
     fn file_at(path: &str) -> DiffFile {
         DiffFile {
             path: path.to_string(),
@@ -2221,7 +2379,10 @@ mod tests {
         for (name, line, selected) in cases {
             for num_w in [2usize, 4] {
                 assert_same_row(
-                    &paint_tree(&diff_row_tree(&f.path, &line, num_w, selected), WIDTH),
+                    &paint_tree(
+                        &diff_row_tree(&snap_line(&f.path, &line), num_w, selected),
+                        WIDTH,
+                    ),
                     &paint_native(&f, &line, WIDTH, num_w, selected),
                     &format!("{name} (gutter width {num_w})"),
                 );
@@ -2246,7 +2407,7 @@ mod tests {
             let f = file_at(path);
             let line = diff_line(DiffLineKind::Context, Some(1), Some(1), text);
             assert_same_row(
-                &paint_tree(&diff_row_tree(path, &line, 2, false), WIDTH),
+                &paint_tree(&diff_row_tree(&snap_line(path, &line), 2, false), WIDTH),
                 &paint_native(&f, &line, WIDTH, 2, false),
                 &format!("{path}: {text}"),
             );
@@ -2258,7 +2419,7 @@ mod tests {
     #[test]
     fn a_row_is_a_gutter_then_tokens_then_a_fill() {
         let line = diff_line(DiffLineKind::Add, None, Some(9), "let x = 1;");
-        let tree = diff_row_tree("src/a.rs", &line, 3, false);
+        let tree = diff_row_tree(&snap_line("src/a.rs", &line), 3, false);
         let runs = match &tree {
             ViewNode::Line(runs) => runs,
             other => panic!("expected a line, got {}", other.kind_name()),
@@ -2287,8 +2448,10 @@ mod tests {
         }
         // A context row carries no tint at all, rather than a third value.
         let plain = diff_row_tree(
-            "src/a.rs",
-            &diff_line(DiffLineKind::Context, Some(9), Some(9), "let x = 1;"),
+            &snap_line(
+                "src/a.rs",
+                &diff_line(DiffLineKind::Context, Some(9), Some(9), "let x = 1;"),
+            ),
             3,
             false,
         );
@@ -2307,7 +2470,7 @@ mod tests {
     #[test]
     fn the_tree_expands_a_tab_and_the_native_row_does_not() {
         let line = diff_line(DiffLineKind::Context, Some(1), Some(1), "\tindented");
-        let tree = diff_row_tree("src/a.rs", &line, 2, false);
+        let tree = diff_row_tree(&snap_line("src/a.rs", &line), 2, false);
         let text: String = tree
             .children()
             .iter()
@@ -2324,15 +2487,15 @@ mod tests {
     /// copy scroll — and an empty stream is the native pane's own `Info` line.
     #[test]
     fn the_stream_is_a_selectable_list() {
-        let lines: Vec<(String, DiffLine)> = (0..5)
+        let rows: Vec<pc::ReviewRowSnapshot> = (0..5)
             .map(|i| {
-                (
-                    "src/a.rs".to_string(),
-                    diff_line(DiffLineKind::Context, Some(i + 1), Some(i + 1), "x"),
-                )
+                pc::ReviewRowSnapshot::Line(snap_line(
+                    "src/a.rs",
+                    &diff_line(DiffLineKind::Context, Some(i + 1), Some(i + 1), "x"),
+                ))
             })
             .collect();
-        match diff_stream_tree(&lines, Some(3), 2) {
+        match review_stream_tree(&rows, Some(3), 2) {
             ViewNode::List {
                 children, selected, ..
             } => {
@@ -2342,7 +2505,7 @@ mod tests {
             other => panic!("expected a list, got {}", other.kind_name()),
         }
         // The empty state carries no cursor and one muted line.
-        match diff_stream_tree(&[], None, 2) {
+        match review_stream_tree(&[], None, 2) {
             ViewNode::List {
                 children, selected, ..
             } => {
@@ -2351,5 +2514,280 @@ mod tests {
             }
             other => panic!("expected a list, got {}", other.kind_name()),
         }
+    }
+
+    /// A review holding one of everything: two files with different statuses, a
+    /// reviewed (and therefore folded) file, a reviewed hunk, a comment of each
+    /// classification at each anchor level, and a multi-line body.
+    ///
+    /// Built once and walked row by row, so the document equality below covers
+    /// every row kind against the state that produces it rather than against
+    /// hand-built rows that might not occur together.
+    fn document_state() -> CodeReviewState {
+        let mut s = demo_state();
+        s.files[0].path = "src/build.rs".into();
+        s.files[0].hunks[0].header = "fn build".into();
+        s.files.push(DiffFile {
+            path: "src/gone.rs".into(),
+            old_path: None,
+            status: FileStatus::Deleted,
+            hunks: vec![DiffHunk {
+                old_start: 40,
+                new_start: 40,
+                header: "fn dropped".into(),
+                lines: vec![DiffLine {
+                    kind: DiffLineKind::Del,
+                    old_no: Some(41),
+                    new_no: None,
+                    text: "    let unused = 1;".into(),
+                }],
+            }],
+        });
+        s.files.push(DiffFile {
+            path: "src/added.rs".into(),
+            old_path: None,
+            status: FileStatus::Added,
+            hunks: vec![DiffHunk {
+                old_start: 0,
+                new_start: 1,
+                header: String::new(),
+                lines: vec![DiffLine {
+                    kind: DiffLineKind::Add,
+                    old_no: None,
+                    new_no: Some(1),
+                    text: "pub struct Row {}".into(),
+                }],
+            }],
+        });
+        // Reviewed, so it folds to its header alone — the row kind a pane cannot
+        // derive from `reviewed` on its own.
+        s.reviewed_files.insert("src/added.rs".to_string());
+        s.reviewed_hunks.insert(("src/build.rs".to_string(), 0));
+        let comment = |id: i64, anchor: CommentAnchor, class: Classification, body: &str| {
+            crate::session::review::ReviewComment {
+                id,
+                session_id: SessionId::default(),
+                anchor,
+                classification: class,
+                body: body.to_string(),
+                created_at: 0,
+                updated_at: 0,
+            }
+        };
+        s.comments = vec![
+            comment(
+                1,
+                CommentAnchor::File {
+                    file: "src/build.rs".into(),
+                },
+                Classification::Issue,
+                "this file does two things",
+            ),
+            comment(
+                2,
+                CommentAnchor::Line {
+                    file: "src/build.rs".into(),
+                    side: crate::session::review::Side::New,
+                    line: 2,
+                },
+                Classification::Suggestion,
+                "extract a helper",
+            ),
+            comment(
+                3,
+                CommentAnchor::Line {
+                    file: "src/gone.rs".into(),
+                    side: crate::session::review::Side::Old,
+                    line: 41,
+                },
+                Classification::Praise,
+                "good riddance",
+            ),
+            // A multi-line body, which the row marks with an ellipsis.
+            comment(
+                4,
+                CommentAnchor::Review,
+                Classification::Note,
+                "overall:\nthe shape is right\nbut the naming is not",
+            ),
+        ];
+        s.rebuild_rows();
+        s
+    }
+
+    /// **The document, row kind by row kind.** Every published row's tree paints
+    /// the same cells as the native pane's own row.
+    ///
+    /// This is the second link of the chain the bundled plugin's equality hangs
+    /// from, extended past the diff line: the native side is `row_visual_lines`,
+    /// the pane's real per-row dispatch, so a header or a comment is compared
+    /// against what the review draws rather than against a builder written here.
+    #[test]
+    fn every_published_row_paints_the_native_row() {
+        const WIDTH: u16 = 100;
+        let mut state = document_state();
+        let num_w = gutter_number_width(&state.files);
+        assert!(
+            state.rows.len() > 10,
+            "the fixture must cover every row kind: {:?}",
+            state.rows.len()
+        );
+
+        // Every kind occurs, so a passing run cannot be a run over lines alone.
+        let kinds: Vec<&str> = state
+            .snapshot_rows()
+            .0
+            .iter()
+            .map(|r| r.wire_name())
+            .collect();
+        for kind in ["file", "hunk", "line", "comment", "summaryHeader"] {
+            assert!(kinds.contains(&kind), "the fixture draws no {kind} row");
+        }
+
+        for i in 0..state.rows.len() {
+            // The cursor is moved onto each row in turn, so the selection
+            // appearance is compared on every kind rather than only on a line.
+            state.selected = i;
+            let (rows, cursor) = state.snapshot_rows();
+            assert_eq!(
+                cursor,
+                Some(i),
+                "row {i} is published with the cursor on it"
+            );
+            let tree = review_stream_tree(&rows, cursor, num_w);
+            let child = &tree.children()[i];
+
+            let native = row_visual_lines(&state, i, WIDTH as usize, num_w, None, 0, false)
+                .pop()
+                .expect("a row paints one visual line");
+            let area = Rect::new(0, 0, WIDTH, 1);
+            let mut buf = ratatui::buffer::Buffer::empty(area);
+            ratatui::widgets::Widget::render(Paragraph::new(native), area, &mut buf);
+            assert_same_row(
+                &paint_tree(child, WIDTH),
+                &buf,
+                &format!("row {i} ({})", rows[i].wire_name()),
+            );
+        }
+    }
+
+    /// The same walk with the cursor parked off the rows being compared, so an
+    /// unselected row of every kind is covered too.
+    #[test]
+    fn every_published_row_paints_the_native_row_unselected() {
+        const WIDTH: u16 = 100;
+        let mut state = document_state();
+        let num_w = gutter_number_width(&state.files);
+        state.selected = 0;
+        let (rows, cursor) = state.snapshot_rows();
+        let tree = review_stream_tree(&rows, cursor, num_w);
+        for (i, row) in rows.iter().enumerate().skip(1) {
+            let native = row_visual_lines(&state, i, WIDTH as usize, num_w, None, 0, false)
+                .pop()
+                .expect("a row paints one visual line");
+            let area = Rect::new(0, 0, WIDTH, 1);
+            let mut buf = ratatui::buffer::Buffer::empty(area);
+            ratatui::widgets::Widget::render(Paragraph::new(native), area, &mut buf);
+            assert_same_row(
+                &paint_tree(&tree.children()[i], WIDTH),
+                &buf,
+                &format!("unselected row {i} ({})", row.wire_name()),
+            );
+        }
+    }
+
+    /// **Enumerated divergence: truncation.** The native pane cuts a hunk header,
+    /// a comment, an informational row and the summary header to the pane's width
+    /// and writes a trailing `…`; a view tree carries the whole text and the
+    /// renderer clips it at the edge.
+    ///
+    /// Recorded here rather than closed, because the fact that would close it — the
+    /// pane's resolved width — is the same one the side-by-side, wrap and
+    /// horizontal-scroll layouts need, and handing a width to every published pane
+    /// is a decision about the whole view-tree model rather than about an ellipsis.
+    #[test]
+    fn a_row_that_overflows_clips_where_the_native_row_ellipsizes() {
+        let mut state = document_state();
+        state.files[0].hunks[0].header =
+            "a section heading long enough to overflow a narrow pane".to_string();
+        state.rebuild_rows();
+        let num_w = gutter_number_width(&state.files);
+        let hunk = state
+            .rows
+            .iter()
+            .position(|r| matches!(r, ReviewRow::HunkHeader(0, 0)))
+            .expect("the fixture has a hunk header");
+        state.selected = hunk;
+        let (rows, cursor) = state.snapshot_rows();
+        let tree = review_stream_tree(&rows, cursor, num_w);
+
+        // Wide enough for the whole heading: identical, which is the case the
+        // document equality above runs at.
+        const WIDE: u16 = 100;
+        let native_wide = row_visual_lines(&state, hunk, WIDE as usize, num_w, None, 0, false)
+            .pop()
+            .expect("one line");
+        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, WIDE, 1));
+        ratatui::widgets::Widget::render(
+            Paragraph::new(native_wide),
+            Rect::new(0, 0, WIDE, 1),
+            &mut buf,
+        );
+        assert_same_row(&paint_tree(&tree.children()[hunk], WIDE), &buf, "wide");
+
+        // Narrower than the heading: the native row's last cell is the ellipsis,
+        // the tree's is the heading's own character.
+        const NARROW: u16 = 30;
+        let native_narrow = row_visual_lines(&state, hunk, NARROW as usize, num_w, None, 0, false)
+            .pop()
+            .expect("one line");
+        let mut native = ratatui::buffer::Buffer::empty(Rect::new(0, 0, NARROW, 1));
+        ratatui::widgets::Widget::render(
+            Paragraph::new(native_narrow),
+            Rect::new(0, 0, NARROW, 1),
+            &mut native,
+        );
+        let plugin = paint_tree(&tree.children()[hunk], NARROW);
+        assert_eq!(
+            native[(NARROW - 1, 0)].symbol(),
+            "…",
+            "the native row ellipsizes"
+        );
+        assert_ne!(
+            plugin[(NARROW - 1, 0)].symbol(),
+            "…",
+            "the tree clips instead"
+        );
+        // And the divergence is confined to that last column — everything the two
+        // both had room for is identical, which is what makes it an enumerated
+        // divergence rather than a different row.
+        for x in 0..NARROW - 1 {
+            assert_eq!(
+                plugin[(x, 0)].symbol(),
+                native[(x, 0)].symbol(),
+                "column {x} must agree"
+            );
+        }
+    }
+
+    /// The summary header's label is the kernel's, so the two panes cannot drift
+    /// over a string that names a keystroke.
+    #[test]
+    fn the_summary_header_label_crosses_from_the_kernel() {
+        let state = document_state();
+        let (rows, _) = state.snapshot_rows();
+        let label = rows
+            .iter()
+            .find_map(|r| match r {
+                pc::ReviewRowSnapshot::SummaryHeader { label } => Some(label.clone()),
+                _ => None,
+            })
+            .expect("the summary header is published");
+        assert_eq!(label, crate::app::code_review::SUMMARY_HEADER_LABEL);
+        assert!(
+            label.contains("(s to add)"),
+            "the label names the keystroke a plugin pane never receives, which is \
+             why it crosses rather than being composed in the pane: {label}"
+        );
     }
 }

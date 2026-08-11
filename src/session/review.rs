@@ -172,6 +172,32 @@ pub enum DiffLineKind {
     Del,
 }
 
+impl DiffLineKind {
+    /// Stable wire name, for a published snapshot a pane reads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiffLineKind::Context => "context",
+            DiffLineKind::Add => "add",
+            DiffLineKind::Del => "del",
+        }
+    }
+
+    /// Parse a wire name back.
+    ///
+    /// The inverse exists because the geometry-free row builder reads the same
+    /// published rows a plugin does, and the sign-and-tint table it shares with
+    /// the native renderer is keyed on the enum. An unknown name is `Context`,
+    /// which draws no tint — a row is better untinted than refused, and the
+    /// publisher is the kernel, so an unknown name cannot arrive from a plugin.
+    pub fn parse(s: &str) -> DiffLineKind {
+        match s {
+            "add" => DiffLineKind::Add,
+            "del" => DiffLineKind::Del,
+            _ => DiffLineKind::Context,
+        }
+    }
+}
+
 /// A single line within a diff hunk, with its 1-based line numbers on each side
 /// (the side that doesn't contain the line is `None`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,6 +226,31 @@ pub enum FileStatus {
 }
 
 impl FileStatus {
+    /// Stable wire name, for a published snapshot a pane reads.
+    ///
+    /// Separate from [`Self::glyph`] on purpose: the glyph is a rendering two panes
+    /// can each derive, so what crosses to a pane is the name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FileStatus::Modified => "modified",
+            FileStatus::Added => "added",
+            FileStatus::Deleted => "deleted",
+            FileStatus::Renamed => "renamed",
+        }
+    }
+
+    /// Parse a wire name back, `None` when it is not one.
+    pub fn parse(s: &str) -> Option<FileStatus> {
+        [
+            FileStatus::Modified,
+            FileStatus::Added,
+            FileStatus::Deleted,
+            FileStatus::Renamed,
+        ]
+        .into_iter()
+        .find(|st| st.as_str() == s)
+    }
+
     pub fn glyph(self) -> &'static str {
         match self {
             FileStatus::Modified => "M",

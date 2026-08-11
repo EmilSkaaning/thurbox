@@ -46,6 +46,8 @@ pub fn token_color(token: StyleToken, palette: &ThemePalette) -> Color {
         // own panes draw an insertion count in, and the two are separate
         // palette fields a custom theme may set independently.
         StyleToken::Added => palette.tool_allowed,
+        StyleToken::DiffAdded => palette.diff_added,
+        StyleToken::DiffRemoved => palette.diff_removed,
         StyleToken::Border => palette.border_unfocused,
         StyleToken::StatusWorking => palette.status_working,
         StyleToken::StatusBlocked => palette.status_blocked,

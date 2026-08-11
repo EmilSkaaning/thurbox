@@ -805,7 +805,7 @@ mod tests {
             .unwrap()
             .call(())
             .unwrap();
-        assert_eq!(review.get::<Table>("lines").unwrap().raw_len(), 0);
+        assert_eq!(review.get::<Table>("rows").unwrap().raw_len(), 0);
     }
 
     /// The `review` capability sounds like access to a repository, so what it does

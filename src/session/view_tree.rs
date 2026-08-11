@@ -65,6 +65,16 @@ pub enum StyleToken {
     AccentBright,
     /// An addition — inserted lines, a positive delta.
     Added,
+    /// The colour a diff's inserted text is drawn in.
+    ///
+    /// Distinct from [`Self::Added`] because the palette's `diff_added` and
+    /// `tool_allowed` are separate fields a custom theme sets independently.
+    /// Reusing the other would paint a plausible colour on every preset that
+    /// happens to set them alike, and diverge only on the themes the token
+    /// vocabulary exists to serve.
+    DiffAdded,
+    /// The colour a diff's deleted text is drawn in.
+    DiffRemoved,
     /// The colour a pane's own borders and rules are drawn in.
     Border,
     /// A session actively running.
@@ -95,6 +105,8 @@ impl StyleToken {
             StyleToken::Branch => "branch",
             StyleToken::AccentBright => "accent_bright",
             StyleToken::Added => "added",
+            StyleToken::DiffAdded => "diff_added",
+            StyleToken::DiffRemoved => "diff_removed",
             StyleToken::Border => "border",
             StyleToken::StatusWorking => "status_working",
             StyleToken::StatusBlocked => "status_blocked",
@@ -118,6 +130,8 @@ impl StyleToken {
             StyleToken::Branch,
             StyleToken::AccentBright,
             StyleToken::Added,
+            StyleToken::DiffAdded,
+            StyleToken::DiffRemoved,
             StyleToken::Border,
             StyleToken::StatusWorking,
             StyleToken::StatusBlocked,

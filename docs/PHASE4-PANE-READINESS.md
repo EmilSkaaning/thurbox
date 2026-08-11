@@ -566,18 +566,24 @@ is enumerable:
 | the side-by-side layout | `paired_body_width` divides the pane's resolved width in two; no node carries a width |
 | the wrap toggle | `unified_diff_line_wrapped` chunks a body by the *available* width, and its chunk boundaries are its own arithmetic over a number the plugin is never told |
 | horizontal scroll | both window bounds are geometry |
-| file headers and hunk headers | expressible in shape (the new fill node is what a header's trailing rule wants), but the counts are drawn in `diff_added`/`diff_removed` — separate palette fields from the `added` token's `tool_allowed` — and the hunk header is `truncate`d with an ellipsis, which is §8's still-open clipping row |
-| comments, classification badges, the review summary | a second published shape and a second interaction; the stream is what is being measured |
-| reviewed marks and folding | they belong to the headers, above |
+| file headers and hunk headers | **closed in §19**: expressible in shape (the new fill node is what a header's trailing rule wants); the two missing palette fields became tokens, and the ellipsis is recorded as an enumerated divergence rather than a blocker |
+| comments, classification badges, the review summary | **closed in §19**: a second published *shape*, which is all it was — the interaction is separate and stays out |
+| reviewed marks and folding | **closed in §19** as rendering; toggling either is still a write no capability names |
 | the find sub-mode | its bar needs §9's three missing features (a frame node, a cursor appearance, a bottom-anchored region), and its in-row match highlight *replaces* the syntax colouring, which is a third styling mode |
 | the target picker, the footer, the compose box | chrome and sub-modes, each owning keys a plugin pane does not receive |
 | the scrollbar | chrome outside the rows. It was the file viewer's position too until §16 moved that pane's track into its list node; this pane's stays outside, because a review's track is drawn beside a *centre*-pane surface a plugin cannot be seated in |
 | the central-pane seat | `PaneSlot` seats a plugin pane only on the right; the native review owns the centre *and* a column in the right slot |
 
-`the_out_of_scope_surface_is_absent_rather_than_approximated` asserts the plugin's
-pane contains none of it — no `@@`, no rule, no chevron, no `✓`, no badge, no
+`the_out_of_scope_surface_is_absent_rather_than_approximated` asserted the plugin's
+pane contained none of it — no `@@`, no rule, no chevron, no `✓`, no badge, no
 `Search`. A port that had drawn a plausible-looking file header would have looked
 more complete and proved less.
+
+Four of those rows are now closed (§19), and the reason they were open is worth
+reading against what this table says about them: three of the four blame a *shape*
+or a token, and the table was right about the shapes — the fill and two new tokens
+are all they needed. What none of the four needed was a decision about the plugin
+surface, which is what separates them from every row still open.
 
 ### What had to be widened: three things, all of them roles or residue
 
@@ -1629,3 +1635,108 @@ paragraphs.
 3. **a pane whose module is its model** — now **three** panes (the file viewer, the
    automations pane, the session list), and the session list's case is the largest
    in the tree.
+
+## 19. The code review's document, closed (ADR-44)
+
+§11 left the largest pane in thurbox ported in part, with a ten-row table of what
+was not ported. Revisiting that table produced one finding, and it is about the
+table rather than about the pane: **the rows were two kinds of thing, and only one
+of them was ever about the plugin surface.**
+
+| Entry | Kind | What it needed |
+|---|---|---|
+| file headers (rule, chevron, status letter, counts, `✓`) | document | published facts + a fill + two tokens |
+| hunk headers (`@@` ranges, heading, `✓`) | document | published facts |
+| comments, classification badges | document | published facts |
+| the review summary's heading and comments | document | published facts, one of them a *label* |
+| informational rows | document | published text |
+| reviewed marks, folding — *toggling* them | behaviour | a write to records no capability names |
+| the find sub-mode | behaviour | keys, and a cursor the kernel owns |
+| the target picker | behaviour | running `git` on a worker |
+| side by side, wrap, horizontal scroll | behaviour | a resolved width |
+| the central seat, the changed-files column | behaviour | two seats a plugin pane cannot take |
+
+Five of the ten were **document**, and all five were blocked by one line:
+
+```rust
+let code_review::ReviewRow::Line(fi, hi, li) = row else { continue };
+```
+
+`App::build_review_snapshot` published the review's *lines* and skipped every other
+row. Nothing about a file header needs a width, a keystroke or a repository; the
+pane simply never received one. So the published section now carries the review's
+**rows** — a tagged list in the order the native pane lists them — and the plugin
+draws every kind.
+
+### Why this is not "more rows"
+
+A diff stream without its file headers is not a smaller reproduction of the review;
+it is a different document. The reader cannot tell which file a line belongs to,
+cannot see that a file is folded, cannot see that a hunk has been reviewed, and
+cannot read a comment at all. The row kinds are what make the stream legible, and
+they were the half of the pane a plugin could already hold.
+
+### Three things the closure had to decide
+
+**The order is the kernel's, so rows cross rather than lines.** A reviewed file
+collapses to its header alone (`is_file_folded` = reviewed XOR a transient
+override), a comment sits after the line it anchors to, the summary section follows
+every file. Publishing the lines and asking the pane to interleave the rest would
+have made a plugin recompute kernel view state from a projection of it — and get
+folding wrong the next time the fold rule moved.
+
+**Glyphs stayed in the pane; one label did not.** A file's status crosses as
+`"modified"`, not as `M`; `folded` and `reviewed` cross as booleans, not as `▸` and
+`✓`. That follows the precedent the diff **sign** already set — `+`/`-`/` ` is
+derived in the pane and nobody has argued the two might disagree. The exception is
+the summary heading, whose native text is `── Review summary (s to add) ──`: it
+names a **keystroke**. A plugin pane never receives `s`, so a pane composing that
+string would advertise an action it cannot perform, and a pane dropping the hint
+would draw a different row from the one it reproduces. Only the kernel can honestly
+author it, so the label crosses — narrowly, as a stated rule rather than as a
+precedent for publishing renderings.
+
+**A near-miss token was refused.** The file header's counts are drawn in the
+palette's `diff_added`/`diff_removed`, and the vocabulary's `added` token resolves
+`tool_allowed` — a *different* field a custom theme sets independently. Reusing it
+would have painted a plausible colour, passed every test on the presets that set
+the two alike, and diverged only on the themes the token vocabulary exists to
+serve. Two tokens were added instead.
+
+### One divergence, and it is not a new one
+
+Four row kinds — hunk headers, comments, informational rows and the summary heading
+— are `truncate`d natively to the pane's width with a trailing `…`, while a view
+tree carries the whole text and the renderer clips it. The two agree on every row
+that fits and differ in the last column on one that does not
+(`a_row_that_overflows_clips_where_the_native_row_ellipsizes` pins both halves).
+
+This is **the same missing fact** that blocks side-by-side, wrap and horizontal
+scroll: the pane's resolved width. Recording it as a fourth entry would have
+overstated how much is left. And the diff *line* rows already had it — the existing
+equality holds only for bodies that fit, because `unified_diff_line` windows the
+body to the columns available — so naming it is a correction to the record rather
+than a new cost.
+
+### What the oracle now proves
+
+The chain still has two links, and both got longer rather than looser:
+
+1. `tests/bundled_code_review.rs`: the plugin's tree equals
+   `ui::code_review::review_stream_tree` across 18 cases covering every row kind,
+   every file status, folded and reviewed states, every classification, a
+   multi-line body, and the whole-file ordering. `every_row_kind_is_compared`
+   fails if a kind stops being covered.
+2. `ui::code_review`'s own tests: the builder and the **untouched**
+   `row_visual_lines` — the pane's real per-row dispatch — paint the same cells,
+   walked over a fixture holding one of everything, with the cursor moved onto
+   each row in turn and again with it parked off them.
+
+`the_out_of_scope_surface_is_absent_rather_than_approximated` now asserts in both
+directions: the document rows **present** (so a regression that dropped them fails
+here), and the behaviour chrome still absent.
+
+### What is left, and it is one kind of thing
+
+Everything in the behaviour half. §20 is the attempt to hand the pane over and what
+it found, gated by `tests/code_review_pane_handover_gap.rs`.

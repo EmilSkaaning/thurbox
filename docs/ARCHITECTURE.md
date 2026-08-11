@@ -2428,3 +2428,74 @@ makes "the active session" a plugin-writable thing and is the widest grant in th
 host, or the pane keeps a kernel-owned cursor and a plugin supplies only its rows —
 the retreat the spike named, which is not a plugin pane at all. That choice is
 ADR-V1's, not a pane port's, so the gate states it rather than picking one.
+
+## ADR-44: A partial port's remainder is document or behaviour, and the document half is closable
+
+**Context.** ADR-31 ported the code-review view **in part** — the unified diff
+stream's lines — and itemised ten unported behaviours, which is what
+`migration/phase-4` requires of a partial port. The list sat unchanged for six
+sections, read as ten things each waiting on its own decision.
+
+Revisiting it produced a finding about the *list*, not the pane. Five of the ten
+entries — file headers, hunk headers, comments with their badges, the review
+summary, informational rows — are rows the native pane **lists**, drawable from
+facts the kernel already holds. They were absent because
+`App::build_review_snapshot` published `ReviewRow::Line` and skipped every other
+row. The other five need a host power the plugin surface does not have: a write, a
+`git` invocation, keys, or a resolved width.
+
+A diff stream without its file headers is not a smaller reproduction of the review.
+It is a different document: the reader cannot tell which file a line belongs to,
+that a file is folded, or that a hunk has been reviewed.
+
+**Decision.** A partial port's remainder is classified **document** or
+**behaviour**, and the document half is closed by publishing the facts its rows are
+drawn from rather than left on the list. For this pane:
+
+- the published review section carries the review's **rows** — a tagged, ordered
+  list of the six kinds — rather than its diff lines. The order is kernel view
+  state (folding, comment interleaving, the summary section's position), so it
+  crosses rather than being recomputed by a pane from a projection of it;
+- a row carries **facts, not glyphs**: a file's status as `"modified"`, `folded`
+  and `reviewed` as booleans. The pane derives `M`, `▸`/`▾` and `✓`, exactly as it
+  already derives a diff line's `+`/`-` sign;
+- **one exception**, stated as a rule: a row whose native text names a **kernel
+  keystroke** is published as text. The review summary's heading reads `── Review
+  summary (s to add) ──`; a plugin pane never receives `s`, so a pane composing
+  that string would advertise an action it cannot perform and a pane omitting the
+  hint would draw a different row. Only the kernel can honestly author it;
+- a **new style token** is added when the palette field a row needs has none, rather
+  than a near-miss token reused. The header's counts want `diff_added`/
+  `diff_removed`; the vocabulary's `added` resolves `tool_allowed`, a separate field
+  a custom theme sets independently;
+- the **clip-versus-ellipsis** divergence is enumerated and attributed to the
+  absent resolved width — the same fact side-by-side, wrap and horizontal scroll
+  need — rather than recorded as a fourth gap or closed by publishing a width.
+
+**Rejected alternatives.**
+
+- *Parallel sections (files, hunks, comments) with the pane interleaving them.* The
+  interleaving is the kernel's decision; a pane rebuilding it would get folding
+  wrong the next time `is_file_folded` moved.
+- *Publishing each row's composed text.* That is the general case the keybinding
+  exception is carved out of, and it would turn the review section into a rendering
+  channel — the thing the whole snapshot model exists not to be.
+- *Publishing a comment's whole body.* Bounded at 64 KiB for one rendered line, and
+  `str::lines` strips a trailing `\r` where a Luau split on `\n` does not, so a
+  comment written on Windows would render differently in the two panes.
+- *Publishing the pane's width to close the ellipsis.* The width is what wrap,
+  pairing and horizontal scroll need; spending that decision — every published pane
+  becomes a geometry problem — on an ellipsis pays the model's largest price for its
+  smallest symptom.
+- *Renaming a line row's `kind` so the row tag could be `kind`.* A published wire
+  name with a shipped reader. Two tag fields cost a line of documentation; renaming
+  one costs every reader.
+
+**Consequences.** The section's bound now counts headers and comments too, so a
+review of many small files publishes fewer diff lines at the same bound — the bound
+doing its job, since a header costs nodes. The cursor is the review's own row rather
+than the nearest published diff line, so the plugin's copy follows a cursor sitting
+on a header. The pane's capability list is unchanged at two: the closure is entirely
+read, which is what keeps it evidence about what a third party can build. What is
+left of the ten is exactly the behaviour half, and ADR-45 is the attempt to hand the
+pane over against it.

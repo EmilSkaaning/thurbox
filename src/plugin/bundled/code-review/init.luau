@@ -1,15 +1,20 @@
 --!strict
--- thurbox's unified diff stream, in Luau.
+-- thurbox's code review, in Luau: the whole document the native view lists.
 --
--- A faithful reproduction of `ui::code_review::diff_row_tree`: the same
--- `{old} {new} {sign} ` gutter, the same token-by-token colouring of the body,
--- the same insertion/deletion row tint carried to the pane's right edge, and the
--- same selection appearance on the cursor's row. `tests/bundled_code_review.rs`
--- asserts the two view trees are *equal*, and the kernel's builder is itself
--- painted against the untouched native renderer — so this is measured against
--- what thurbox draws today rather than against a refactor of it.
+-- A faithful reproduction of `ui::code_review::review_stream_tree`: file headers
+-- with their fold chevron, status letter, path, insertion and deletion counts,
+-- reviewed mark and the rule that carries the row to the pane's edge; hunk headers
+-- with their `@@` ranges and mark; the unified diff lines with their
+-- `{old} {new} {sign} ` gutter, token-by-token body colouring and
+-- insertion/deletion row tint; comments with their classification badges; the
+-- review summary's heading and its comments; and informational rows — each in the
+-- selection appearance when the review's cursor is on it.
+-- `tests/bundled_code_review.rs` asserts the two view trees are *equal*, and the
+-- kernel's builder is itself painted against the untouched native renderer — so
+-- this is measured against what thurbox draws today rather than against a refactor
+-- of it.
 --
--- Three things are worth reading for what they imply about writing a dense pane:
+-- Four things are worth reading for what they imply about writing a dense pane:
 --
 -- 1. **The highlighter is here, not in the host.** The host publishes a line's
 --    text and its file's path; which runs are keywords, strings, numbers,
@@ -18,18 +23,25 @@
 --    arrangement of the kernel's decisions. The cost is that this lexer and
 --    `ui::syntax` must agree token for token, which is what the equality test
 --    checks.
--- 2. **The tint reaches the edge without a width.** A row's background is what
---    distinguishes an insertion from a deletion — the sign is one character — so
---    the last run of every row is `ui.fill(" ")`, which the *kernel* expands to
---    whatever the line has left. Nothing here knows how wide the pane is.
--- 3. **It scrolls by naming its cursor**, like the file viewer: the list carries
+-- 2. **The glyphs are here too.** The host publishes a file's status as a *name*
+--    and whether it is folded and reviewed; `M`, `▸`/`▾` and `✓` are chosen below,
+--    exactly as a diff line's `+`/`-` sign is. The one string that crosses whole is
+--    the summary heading's, because it names a thurbox keystroke this pane never
+--    receives.
+-- 3. **Two things reach the pane's edge without a width.** A row's tint is what
+--    distinguishes an insertion from a deletion — the sign is one character — and a
+--    file header's rule is what separates one file from the next. Both are
+--    `ui.fill`, which the *host* expands to whatever the line has left. Nothing
+--    here knows how wide the pane is.
+-- 4. **It scrolls by naming its cursor**, like the file viewer: the list carries
 --    the row the review's cursor is on and the host windows it.
 --
--- What this pane deliberately does **not** draw: file headers, hunk headers,
--- comments and their classification badges, the review summary, reviewed marks,
--- folding, the find bar, the target picker, the footer and the compose box; and
--- it draws neither the side-by-side layout, the wrap mode nor the horizontal
--- scroll, all three of which need a resolved width. See `plugin.toml`.
+-- What this pane deliberately does **not** do is act. It draws the review's
+-- document and reaches none of its behaviour: no mark toggled, no comment composed,
+-- no target retargeted, no find, and neither the side-by-side layout, the wrap mode
+-- nor the horizontal scroll — those three need a resolved width, which is also why
+-- an over-long header clips here where thurbox writes an ellipsis. See
+-- `plugin.toml`.
 
 local thurbox = require("@thurbox")
 local ui = thurbox.ui
@@ -37,7 +49,7 @@ local ui = thurbox.ui
 type ViewNode = thurbox.ViewNode
 type StyleToken = thurbox.StyleToken
 type DiffTint = thurbox.DiffTint
-type ReviewLine = thurbox.ReviewLine
+type ReviewRow = thurbox.ReviewRow
 
 -- ── the syntax lexer ────────────────────────────────────────────────────────
 --
@@ -365,24 +377,29 @@ end
 
 -- `{old} {new} {sign} `, each number right-aligned in its own column. An absent
 -- number is an empty column, not a zero: a deletion has no new-side number.
-local function gutter(line: ReviewLine, numberWidth: number, sign: string): string
+local function gutter(row: ReviewRow, numberWidth: number, sign: string): string
     local pad = "%" .. tostring(numberWidth) .. "s"
-    local old = if line.oldNo then tostring(line.oldNo) else ""
-    local new = if line.newNo then tostring(line.newNo) else ""
+    local old = if row.oldNo then tostring(row.oldNo) else ""
+    local new = if row.newNo then tostring(row.newNo) else ""
     return string.format(pad .. " " .. pad .. " %s ", old, new, sign)
 end
 
-local function rowNode(line: ReviewLine, numberWidth: number, selected: boolean): ViewNode
-    local sign, tint = signAndTint(line.kind)
-    -- Both roles are declared on every run of the row: the host resolves the
-    -- selection first, so the cursor's row draws in one appearance rather than
-    -- two backgrounds — the precedence thurbox's own renderer applies.
-    local function style(token: StyleToken?): thurbox.TextStyle
+-- A style builder for one row: every run of the row declares the row's selection
+-- and tint, because the host resolves the selection first — the cursor's row draws
+-- in one appearance rather than two backgrounds, which is the precedence thurbox's
+-- own renderer applies.
+local function styler(selected: boolean, tint: DiffTint?): (StyleToken?) -> thurbox.TextStyle
+    return function(token: StyleToken?): thurbox.TextStyle
         return { token = token, selected = selected, tint = tint }
     end
+end
 
-    local runs: { ViewNode } = { ui.text(gutter(line, numberWidth, sign), style("muted")) }
-    for _, piece in highlight(line.text, line.path) do
+local function lineRow(row: ReviewRow, numberWidth: number, selected: boolean): ViewNode
+    local sign, tint = signAndTint(row.kind or "context")
+    local style = styler(selected, tint)
+
+    local runs: { ViewNode } = { ui.text(gutter(row, numberWidth, sign), style("muted")) }
+    for _, piece in highlight(row.text or "", row.path or "") do
         table.insert(runs, ui.text(piece.run, style(piece.token)))
     end
     -- The row's background has to reach the pane's edge or an insertion and a
@@ -391,30 +408,152 @@ local function rowNode(line: ReviewLine, numberWidth: number, selected: boolean)
     return ui.line(runs)
 end
 
+-- The letter and the colour role for a file's status. The host publishes the
+-- status as a *name*; which letter stands for it is this pane's decision, exactly
+-- as a diff line's `+`/`-` sign is.
+local function fileStatus(status: string?): (string, StyleToken)
+    if status == "added" then
+        return "A", "diff_added"
+    elseif status == "deleted" then
+        return "D", "diff_removed"
+    elseif status == "renamed" then
+        return "R", "accent"
+    elseif status == "modified" then
+        return "M", "status_working"
+    end
+    return "?", "status_working"
+end
+
+-- A file header: the fold chevron, the status letter, the path, the two counts,
+-- the reviewed mark, and a rule to the pane's edge.
+--
+-- The rule is the second `ui.fill` in this pane and the reason a file header is
+-- expressible at all: thurbox repeats `─` across whatever the row has left, and a
+-- fill is the host resolving that residue for a pane never told its width. The
+-- single space before it is a run of its own so both panes spend the same column
+-- on it.
+local function fileRow(row: ReviewRow, selected: boolean): ViewNode
+    local style = styler(selected, nil)
+    local function header(token: StyleToken?): thurbox.TextStyle
+        local s = style(token)
+        s.bold = true
+        return s
+    end
+    local letter, statusToken = fileStatus(row.status)
+    local chevron = if row.folded then "▸" else "▾"
+    local runs: { ViewNode } = {
+        ui.text(chevron .. " ", header("accent_bright")),
+        ui.text(letter, header(statusToken)),
+        ui.text(" " .. (row.path or "") .. "  ", header("accent_bright")),
+        ui.text("+" .. tostring(row.added or 0), style("diff_added")),
+        ui.text(" -" .. tostring(row.removed or 0), style("diff_removed")),
+    }
+    if row.reviewed then
+        table.insert(runs, ui.text(" ✓", style("status_done")))
+    end
+    table.insert(runs, ui.text(" ", header("accent_bright")))
+    table.insert(runs, ui.fill("─", header("accent_bright")))
+    return ui.line(runs)
+end
+
+-- A hunk header: the `@@` ranges, the section heading, and the reviewed mark.
+local function hunkRow(row: ReviewRow, selected: boolean): ViewNode
+    local mark = if row.reviewed then " ✓" else ""
+    local text = string.format(
+        "  @@ -%d,%d +%d,%d @@ %s%s",
+        row.oldStart or 0,
+        row.oldSpan or 0,
+        row.newStart or 0,
+        row.newSpan or 0,
+        row.heading or "",
+        mark
+    )
+    local style = styler(selected, nil)("accent")
+    style.dim = true
+    return ui.text(text, style)
+end
+
+-- A comment's badge label and colour role, by classification.
+local function commentClass(classification: string?): (string, StyleToken)
+    if classification == "issue" then
+        return "Issue", "danger"
+    elseif classification == "suggestion" then
+        return "Suggestion", "accent"
+    elseif classification == "praise" then
+        return "Praise", "status_done"
+    end
+    return "Note", "secondary"
+end
+
+-- A comment: its classification badge, then the first line of its body. No fill —
+-- thurbox does not pad this row either, so the columns past the body keep the
+-- terminal's own style.
+local function commentRow(row: ReviewRow, selected: boolean): ViewNode
+    local style = styler(selected, nil)
+    local label, token = commentClass(row.classification)
+    local badge = style(token)
+    badge.bold = true
+    local more = if row.more then " …" else ""
+    return ui.line({
+        ui.text("  ▸ [" .. label .. "] ", badge),
+        ui.text((row.text or "") .. more, style("secondary")),
+    })
+end
+
+-- The summary heading. Its text is the host's, verbatim: it names a thurbox
+-- keystroke this pane never receives, so composing it here would advertise an
+-- action the pane cannot perform.
+local function summaryRow(row: ReviewRow, selected: boolean): ViewNode
+    local style = styler(selected, nil)("accent")
+    style.bold = true
+    return ui.text(row.label or "", style)
+end
+
+-- An informational row, never drawn selected: thurbox applies no selection style
+-- to one, because a cursor cannot rest on a row that is not selectable.
+local function infoRow(row: ReviewRow): ViewNode
+    return ui.text(row.text or "", "muted")
+end
+
+local function rowNode(row: ReviewRow, numberWidth: number, selected: boolean): ViewNode
+    if row.row == "file" then
+        return fileRow(row, selected)
+    elseif row.row == "hunk" then
+        return hunkRow(row, selected)
+    elseif row.row == "comment" then
+        return commentRow(row, selected)
+    elseif row.row == "summaryHeader" then
+        return summaryRow(row, selected)
+    elseif row.row == "info" then
+        return infoRow(row)
+    end
+    return lineRow(row, numberWidth, selected)
+end
+
 -- ── the pane ────────────────────────────────────────────────────────────────
 
 return {
     render = function(_paneId: string): ViewNode
         local readReview = thurbox.review
         local review = if readReview then readReview() else nil
-        local lines = if review then review.lines else {}
+        local rows = if review then review.rows else {}
 
-        if #lines == 0 then
+        if #rows == 0 then
             -- The same line the native pane draws for a target with nothing in
             -- it — and what a plugin sees before a review has been opened at
-            -- all, since the host publishes the diff the pane has open.
+            -- all, since the host publishes the review the pane has open.
             return ui.list({ ui.text("No changes to show for this target.", "muted") })
         end
 
         local numberWidth = if review then review.numberWidth else 2
         local cursor = if review then review.cursor else nil
 
-        local rows: { ViewNode } = {}
-        for i, line in ipairs(lines) do
-            table.insert(rows, rowNode(line, numberWidth, i == cursor))
+        local nodes: { ViewNode } = {}
+        for i, row in ipairs(rows) do
+            table.insert(nodes, rowNode(row, numberWidth, i == cursor))
         end
         -- The cursor's row goes back to the host, which is what makes this list
         -- scroll: nothing here is told how many rows it got.
-        return ui.list(rows, cursor)
+        return ui.list(nodes, cursor)
     end,
 }

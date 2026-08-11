@@ -19,8 +19,8 @@
 use mlua::{Lua, Table};
 
 use crate::session::pane_context::{
-    AutomationRowSnapshot, FileNodeSnapshot, PaneContext, ReviewLineSnapshot, SessionRowSnapshot,
-    SessionSnapshot, SystemSnapshot, TaskSnapshot, UpcomingAutomationSnapshot,
+    AutomationRowSnapshot, FileNodeSnapshot, PaneContext, ReviewLineSnapshot, ReviewRowSnapshot,
+    SessionRowSnapshot, SessionSnapshot, SystemSnapshot, TaskSnapshot, UpcomingAutomationSnapshot,
 };
 
 /// Set `key` to `value` only when there is one.
@@ -299,8 +299,8 @@ fn build_file_node(lua: &Lua, node: &FileNodeSnapshot) -> mlua::Result<Table> {
     Ok(t)
 }
 
-/// The open review's diff stream:
-/// `{ lines = { … }, cursor = n?, numberWidth = n }`.
+/// The open review's row stream:
+/// `{ rows = { … }, cursor = n?, numberWidth = n }`.
 ///
 /// Always a table, for the file tree's reason — "no review is open" is knowledge
 /// the kernel has, and a pane draws its empty state from an empty list rather
@@ -312,13 +312,66 @@ fn build_file_node(lua: &Lua, node: &FileNodeSnapshot) -> mlua::Result<Table> {
 /// [`ReviewSnapshot::number_width`](crate::session::pane_context::ReviewSnapshot::number_width).
 pub fn review_table(lua: &Lua, context: &PaneContext) -> mlua::Result<Table> {
     let t = lua.create_table()?;
-    let lines = lua.create_table()?;
-    for (i, line) in context.review.lines.iter().enumerate() {
-        lines.set(i + 1, build_review_line(lua, line)?)?;
+    let rows = lua.create_table()?;
+    for (i, row) in context.review.rows.iter().enumerate() {
+        rows.set(i + 1, build_review_row(lua, row)?)?;
     }
-    t.set("lines", lines)?;
+    t.set("rows", rows)?;
     set_opt(&t, "cursor", context.review.cursor.map(|i| i as u64 + 1))?;
     t.set("numberWidth", context.review.number_width as u64)?;
+    Ok(t)
+}
+
+/// One published row, tagged `row` with its kind.
+///
+/// The tag is `row` rather than `kind` because a line row's `kind` already names
+/// which side of the change it is on, and that spelling has a shipped reader.
+fn build_review_row(lua: &Lua, row: &ReviewRowSnapshot) -> mlua::Result<Table> {
+    let t = match row {
+        ReviewRowSnapshot::File(f) => {
+            let t = lua.create_table()?;
+            t.set("path", f.path.clone())?;
+            // The wire name, not the glyph: a pane derives `M`/`A`/`D`/`R` from it,
+            // as it already derives a diff line's `+`/`-` sign.
+            t.set("status", f.status)?;
+            t.set("added", f.added as u64)?;
+            t.set("removed", f.removed as u64)?;
+            t.set("folded", f.folded)?;
+            t.set("reviewed", f.reviewed)?;
+            t
+        }
+        ReviewRowSnapshot::Hunk(h) => {
+            let t = lua.create_table()?;
+            t.set("oldStart", u64::from(h.old_start))?;
+            t.set("oldSpan", h.old_span as u64)?;
+            t.set("newStart", u64::from(h.new_start))?;
+            t.set("newSpan", h.new_span as u64)?;
+            t.set("heading", h.heading.clone())?;
+            t.set("reviewed", h.reviewed)?;
+            t
+        }
+        ReviewRowSnapshot::Line(line) => build_review_line(lua, line)?,
+        ReviewRowSnapshot::Comment(c) => {
+            let t = lua.create_table()?;
+            t.set("classification", c.classification)?;
+            t.set("text", c.text.clone())?;
+            t.set("more", c.more)?;
+            t
+        }
+        ReviewRowSnapshot::SummaryHeader { label } => {
+            let t = lua.create_table()?;
+            // The one row whose text crosses, because it names a kernel keystroke
+            // a plugin pane never receives.
+            t.set("label", label.clone())?;
+            t
+        }
+        ReviewRowSnapshot::Info { text } => {
+            let t = lua.create_table()?;
+            t.set("text", text.clone())?;
+            t
+        }
+    };
+    t.set("row", row.wire_name())?;
     Ok(t)
 }
 
@@ -951,10 +1004,10 @@ mod tests {
         assert_eq!(window.get::<u64>("resetsInSecs").unwrap(), 3_600);
     }
 
-    fn review_context(lines: Vec<ReviewLineSnapshot>, cursor: Option<usize>) -> PaneContext {
+    fn review_context(rows: Vec<ReviewRowSnapshot>, cursor: Option<usize>) -> PaneContext {
         PaneContext {
             review: ReviewSnapshot {
-                lines,
+                rows,
                 cursor,
                 number_width: 4,
             },
@@ -966,14 +1019,14 @@ mod tests {
         kind: &'static str,
         old_no: Option<u32>,
         new_no: Option<u32>,
-    ) -> ReviewLineSnapshot {
-        ReviewLineSnapshot {
+    ) -> ReviewRowSnapshot {
+        ReviewRowSnapshot::Line(ReviewLineSnapshot {
             path: "src/a.rs".to_string(),
             old_no,
             new_no,
             kind,
             text: "let x = 1;".to_string(),
-        }
+        })
     }
 
     /// A published diff crosses as a one-based array whose entries carry both
@@ -990,10 +1043,13 @@ mod tests {
             Some(1),
         );
         let review = review_table(&lua, &context).unwrap();
-        let lines: Table = review.get("lines").unwrap();
+        let lines: Table = review.get("rows").unwrap();
         assert_eq!(lines.raw_len(), 3);
 
         let added: Table = lines.get(1).unwrap();
+        // Two tags, and the row's is `row`: `kind` already names which side of the
+        // change a line is on, and renaming it would break every shipped reader.
+        assert_eq!(added.get::<String>("row").unwrap(), "line");
         assert_eq!(added.get::<String>("kind").unwrap(), "add");
         assert_eq!(added.get::<u64>("newNo").unwrap(), 12);
         assert_eq!(
@@ -1022,11 +1078,87 @@ mod tests {
     fn an_empty_review_is_still_a_table() {
         let lua = Lua::new();
         let review = review_table(&lua, &PaneContext::default()).unwrap();
-        assert_eq!(review.get::<Table>("lines").unwrap().raw_len(), 0);
+        assert_eq!(review.get::<Table>("rows").unwrap().raw_len(), 0);
         assert_eq!(
             review.get::<mlua::Value>("cursor").unwrap(),
             mlua::Value::Nil
         );
         assert_eq!(review.get::<u64>("numberWidth").unwrap(), 0);
+    }
+
+    /// Every other row kind crosses with its own facts and no glyphs, so a pane
+    /// draws the chevron, the status letter, the mark and the badge itself.
+    #[test]
+    fn each_row_kind_crosses_with_its_facts() {
+        let lua = Lua::new();
+        let context = review_context(
+            vec![
+                ReviewRowSnapshot::File(crate::session::pane_context::ReviewFileSnapshot {
+                    path: "src/a.rs".to_string(),
+                    status: "modified",
+                    added: 3,
+                    removed: 1,
+                    folded: true,
+                    reviewed: true,
+                }),
+                ReviewRowSnapshot::Hunk(crate::session::pane_context::ReviewHunkSnapshot {
+                    old_start: 11,
+                    old_span: 4,
+                    new_start: 11,
+                    new_span: 5,
+                    heading: "fn build".to_string(),
+                    reviewed: false,
+                }),
+                ReviewRowSnapshot::Comment(crate::session::pane_context::ReviewCommentSnapshot {
+                    classification: "issue",
+                    text: "this is wrong".to_string(),
+                    more: true,
+                }),
+                ReviewRowSnapshot::SummaryHeader {
+                    label: "── Review summary ──".to_string(),
+                },
+                ReviewRowSnapshot::Info {
+                    text: "No changes".to_string(),
+                },
+            ],
+            None,
+        );
+        let rows: Table = review_table(&lua, &context).unwrap().get("rows").unwrap();
+
+        let file: Table = rows.get(1).unwrap();
+        assert_eq!(file.get::<String>("row").unwrap(), "file");
+        assert_eq!(file.get::<String>("status").unwrap(), "modified");
+        assert_eq!(file.get::<u64>("added").unwrap(), 3);
+        assert!(file.get::<bool>("folded").unwrap());
+        assert!(file.get::<bool>("reviewed").unwrap());
+        // The facts, not the rendering: no glyph, no chevron, no mark.
+        for absent in ["glyph", "chevron", "mark"] {
+            assert!(
+                !file.contains_key(absent).unwrap(),
+                "a file row must not carry `{absent}`"
+            );
+        }
+
+        let hunk: Table = rows.get(2).unwrap();
+        assert_eq!(hunk.get::<String>("row").unwrap(), "hunk");
+        assert_eq!(hunk.get::<u64>("oldSpan").unwrap(), 4);
+        assert_eq!(hunk.get::<u64>("newSpan").unwrap(), 5);
+        assert_eq!(hunk.get::<String>("heading").unwrap(), "fn build");
+
+        let comment: Table = rows.get(3).unwrap();
+        assert_eq!(comment.get::<String>("row").unwrap(), "comment");
+        assert_eq!(comment.get::<String>("classification").unwrap(), "issue");
+        assert!(comment.get::<bool>("more").unwrap());
+
+        let summary: Table = rows.get(4).unwrap();
+        assert_eq!(summary.get::<String>("row").unwrap(), "summaryHeader");
+        assert_eq!(
+            summary.get::<String>("label").unwrap(),
+            "── Review summary ──"
+        );
+
+        let info: Table = rows.get(5).unwrap();
+        assert_eq!(info.get::<String>("row").unwrap(), "info");
+        assert_eq!(info.get::<String>("text").unwrap(), "No changes");
     }
 }
