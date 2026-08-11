@@ -1639,3 +1639,79 @@ plugins are installed.
 key fired, and what a plugin may change is the capability question. No bundled
 plugin declares `input` or a keybinding in this change, so every insta snapshot is
 byte-identical and no native pane moved.
+
+## ADR-35: A plugin may change five things, and the kernel still fires automations
+
+**Context.** Every host power a plugin held was a read. The published snapshot
+carries sessions, metrics, automations, tasks, files and the open review, and the
+only writable thing in a plugin's environment was its own key/value namespace. So
+the five panes reproduced in Phase 4 can *draw* thurbox's panes and none of them
+can *be* one: the tasks pane cycles a status and deletes with two keys, the
+automations pane toggles, runs and deletes with three, and a plugin had no binding
+for any of it — not a refusing one, none at all.
+
+This is the widest grant the host has added, so the shape matters more than the
+mechanism.
+
+**Decision.**
+
+- **A closed list of five operations**, chosen by one rule: *one operation per key
+  a native pane performs with a single keystroke.* Set a task's status, delete a
+  task, set an automation's enabled flag, run an automation, delete an automation.
+  Each addresses one existing record by the id its reader already published and
+  reports whether that record was there.
+- **The three keys with no binding are the ones that open a kernel surface.**
+  `n`/`e` open the central-pane editor, and tasks' `r` opens the trigger-time
+  picker that spawns a session. A `createTask(title)` binding would let a plugin do
+  something the key does not do while still not reproducing the key, so it waits
+  for whatever ports the editor. Recorded here rather than discovered at port time.
+- **Two capabilities, per record kind** (`tasks-write`, `automations-write`), for
+  the reason the readers are split: the declared set is what an install prompt is
+  written from. Neither implies the matching read, or the reverse — a pane that
+  only draws the task list must not hold the power to delete.
+- **A plugin asks the kernel to run an automation; it never runs one.**
+  `runAutomation` marks it due and returns, exactly as the native pane's `r` does,
+  and the kernel's scheduler fires it under the claim-CAS that already
+  de-duplicates a TUI and a headless tick. So the plugin thread spawns no process,
+  and parity is by construction rather than by imitation. Marking a pending run
+  again is idempotent, because the write is `next_run_at = now` and not a queue.
+- **The residual reach is stated, not glossed.** An `Exec` automation runs a shell
+  command **the user wrote**, and this capability can cause one to run. The bound
+  is that a plugin can neither author nor edit an automation, so the set of
+  programs it can trigger is exactly the set already scheduled — a real mitigation,
+  but not "this cannot run code". One asymmetry survives: a user presses `r` once
+  and a plugin may call at its render cadence; the ceiling is one fire per kernel
+  pass. A rate limit was rejected for now — it would put a clock and per-plugin
+  state into a seam that has neither, and if one is added it belongs with the
+  host's other execution bounds.
+- **The seam mirrors the plugin store**, because the same two constraints apply:
+  `plugin` may not import `storage`, and a connection cannot cross threads. A
+  trait in `session::plugin_mutations`, one implementor in `storage::plugins`, a
+  factory each VM invokes on its own thread. **One trait for both capabilities**:
+  the trait is host-side plumbing and the grant surface is which *bindings* are
+  inserted, so two traits would double the factory threaded through five call
+  sites to express a distinction the capability check already makes.
+- **Rejected: routing a mutation to the UI thread** as a request/reply, the way a
+  key is routed. It would make a write depend on a frame happening, for an answer
+  the UI does not need. **Rejected: `thurbox-cli` as the mutation surface** — it
+  would grant process execution to get a status change.
+- **Enabling shares one implementation with the native pane.**
+  `Database::set_automation_enabled` deliberately leaves `next_run_at` to its
+  caller, so a plugin calling it directly would leave an *enabled* automation with
+  no occurrence: subtly dead. The recompute moved into
+  `set_automation_enabled_rescheduled`, which the pane now calls too — otherwise "a
+  user toggled it" and "a plugin toggled it" are two behaviours with one name.
+- **A pane's VM holds a host power for the first time.** `PluginThread::spawn`
+  passed `None` for the store, so a view half had readers and nothing else; the
+  writer factory is threaded into `PluginHost` as well. Worth noticing rather than
+  doing quietly: the review question for a bundled pane changes, even though the
+  grant is still per manifest and still absent by default.
+
+**Consequences.** A plugin's write is recorded exactly where the kernel's own is —
+a task's audit entry, an automation's run history — with no plugin-specific trail
+to drift, and it reaches the panes through the `data_version` poll that already
+carries every external change. No bundled plugin declares either capability, so
+snapshots do not move and the teardown gate is untouched. A pane replacement can
+now reproduce `Space` and `d` (and automations' `r`); `n`, `e`, tasks' `r` and `o`
+are still open, and `docs/PHASE4-PANE-READINESS.md` §10's wall — a plugin cannot
+move the cursor, take focus or switch sessions — is unchanged.

@@ -192,6 +192,12 @@ pub struct SystemSnapshot {
 /// One scheduled automation that has not fired yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomationSnapshot {
+    /// Its row id.
+    ///
+    /// Published because a pane granted the automation-write capability addresses
+    /// an automation by id (ADR-35), and the row it drew is the one it acts on. A
+    /// pane that only draws simply ignores it.
+    pub id: i64,
     /// Its name, already truncated to the width a pane shows.
     pub label: String,
     /// Whole seconds until it is due, resolved at publication.
@@ -217,6 +223,12 @@ pub struct AutomationSnapshot {
 /// pane the presentation it exists to own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskSnapshot {
+    /// The task's row id.
+    ///
+    /// Published for [`AutomationSnapshot::id`]'s reason: a pane granted the
+    /// task-write capability addresses a task by id, and the row it drew is the
+    /// one it acts on.
+    pub id: i64,
     /// The task's title, as the model knows it.
     ///
     /// Not fitted to any column: a pane's width is resolved during a frame and
@@ -700,6 +712,7 @@ mod tests {
             crate::session::TaskStatus::Done,
         ] {
             let row = TaskSnapshot {
+                id: 1,
                 title: "t".to_string(),
                 status: status.as_str(),
                 selected: false,
@@ -717,6 +730,7 @@ mod tests {
     #[test]
     fn equal_task_sections_compare_equal() {
         let row = |selected: bool| TaskSnapshot {
+            id: 1,
             title: "ship it".to_string(),
             status: "todo",
             selected,

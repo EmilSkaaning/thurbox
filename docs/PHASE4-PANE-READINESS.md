@@ -456,7 +456,7 @@ row below is one form of that asymmetry.
 | a full-width band above the footer | `PaneSlot` is a closed set whose only member is `Right`; a plugin pane is seated only by `LayoutParams::right_regions`, while the strip's band is `RegionId::GlobalSearch` | a band slot **and** a declared height, which is the geometry the model has refused a plugin three times (ADR-26, ADR-29, ADR-30) |
 | the query and the results | no capability publishes either | either the plugin reads every session's screen — the widest read in the application, 500 lines per session of raw agent output — or the kernel does the search and publishes the strip's *rendering*, which §8's rule forbids |
 | **producing** the restyling of rows in other panes | the verdict already crosses *outward* (a published task row carries `dimmed` + `match_positions`, a file row `matched`), which is how the bundled tasks and file-viewer panes reproduce it — but each pane applies it to *its own* rows, and nothing carries a query the other way | a channel by which plugin state changes a *native* pane's appearance — so a plugin whose own pane is hidden could restyle the visible ones, which is the reach `pane_visibility` exists to bound |
-| move a cursor, take focus, restore a snapshot | the kernel-state channel is read-only by construction: every binding under `Sessions`/`Metrics`/`Automations`/`Tasks`/`Files` reads a published snapshot | a write channel — i.e. any installed plugin may move the user's cursor and take focus |
+| move a cursor, take focus, restore a snapshot | no binding writes **view** state. A plugin may now change *records* it was granted (ADR-35: a task's status, an automation's enabled flag), and nothing it holds moves a cursor, takes focus, shows a panel or switches the active session | a write channel over view state — i.e. any installed plugin may move the user's cursor and take focus |
 
 **Vocabulary — cheap, and left open on purpose:**
 
@@ -466,6 +466,16 @@ row below is one form of that asymmetry.
 | a hint row pinned to the last line under a `Min(0)` list | `Column` stacks children at their natural height from the top; §9's "bottom-anchored fixed-height region" again |
 | the search accent (`Theme::search_bar`) | `StyleToken` names no such role, and a plugin may name no colour |
 | the italic snippet line under a content match | `TextStyle` carries bold, dim, underline and the selection role |
+
+One correction that ADR-35 forced, recorded because a gate caught it: the row above
+was probed by asking whether *any* write-shaped binding existed, and
+`tasks-write`/`automations-write` added `setTaskStatus`, so the probe reported the
+row closed. It is not — changing a record is not moving a cursor — and
+`tests/global_search_pane_gap.rs` now distinguishes a view write from a record
+write, with `a_record_write_is_not_the_write_the_strip_needs` pinning the reason.
+This is the second time a probe has had to be tightened rather than a verdict
+flipped (§11 records the first, a node named `Fill`), which is the argument for the
+gates existing at all.
 
 **What a plugin *can* build here today**, said so the record is not read as "the
 API is empty": with `input` plus the state capabilities, a plugin can collect its

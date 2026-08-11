@@ -447,16 +447,19 @@ fn tick_plugin_services() -> Vec<String> {
 
     // Each VM builds its own store on its own thread — a connection cannot be
     // shared, and the service half is where durable state actually gets used.
-    let store: crate::session::plugin_store::PluginStoreFactory = std::sync::Arc::new(|| {
-        crate::storage::plugins::DbPluginStore::open()
-            .map(|s| Box::new(s) as Box<dyn crate::session::plugin_store::PluginStore>)
-    });
+    let store = super::plugins::store_factory();
+    let writer = super::plugins::writer_factory();
 
     let mut host = crate::plugin::ServiceHost::new(crate::plugin::ExecutionBounds::default());
     let mut messages = Vec::new();
 
     for plugin in with_service {
-        match host.start(plugin, &lock, Some(std::sync::Arc::clone(&store))) {
+        match host.start(
+            plugin,
+            &lock,
+            Some(std::sync::Arc::clone(&store)),
+            Some(std::sync::Arc::clone(&writer)),
+        ) {
             Ok(true) => match host.tick(plugin.name()) {
                 Ok(true) => messages.push(format!("plugin service ticked: {}", plugin.name())),
                 Ok(false) => {}

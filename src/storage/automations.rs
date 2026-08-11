@@ -147,6 +147,34 @@ impl Database {
         Ok(updated > 0)
     }
 
+    /// Enable or disable an automation **and** bring its next occurrence into
+    /// line: enabling recomputes it from the schedule, disabling clears it.
+    ///
+    /// The rule the automations pane's toggle key follows, in one place, because
+    /// two callers now need it — the pane and a plugin holding the write
+    /// capability. [`set_automation_enabled`](Self::set_automation_enabled)
+    /// deliberately leaves `next_run_at` to its caller (the firing path sets it
+    /// itself), so a caller that only flips the flag leaves an *enabled*
+    /// automation with no occurrence: subtly dead rather than obviously broken.
+    pub fn set_automation_enabled_rescheduled(
+        &self,
+        id: i64,
+        enabled: bool,
+    ) -> rusqlite::Result<bool> {
+        let Some(mut auto) = self.get_automation(id)? else {
+            return Ok(false);
+        };
+        auto.enabled = enabled;
+        auto.next_run_at = if enabled {
+            auto.schedule
+                .next_after(crate::sync::current_time_millis(), auto.timezone.as_deref())
+        } else {
+            None
+        };
+        self.update_automation(&auto)?;
+        Ok(true)
+    }
+
     /// Record that an automation fired: advance `last_run_at` and store the
     /// freshly computed `next_run_at` (`None` disables a spent one-shot).
     pub fn set_automation_next_run(
@@ -361,6 +389,45 @@ mod tests {
             prompt: "run tests".to_string(),
             next_run_at: next,
         }
+    }
+
+    #[test]
+    fn enabling_reschedules_and_disabling_clears() {
+        let db = Database::open_in_memory().unwrap();
+        let id = db
+            .create_automation(&NewAutomation {
+                name: "hourly".to_string(),
+                enabled: false,
+                schedule: AutomationSchedule::Cron {
+                    expr: "0 * * * *".to_string(),
+                },
+                timezone: None,
+                action: AutomationAction::Exec {
+                    command: "true".to_string(),
+                },
+                prompt: String::new(),
+                next_run_at: None,
+            })
+            .unwrap();
+
+        assert!(db.set_automation_enabled_rescheduled(id, true).unwrap());
+        let on = db.get_automation(id).unwrap().unwrap();
+        assert!(on.enabled);
+        assert!(
+            on.next_run_at.is_some(),
+            "an enabled automation with no occurrence would be silently dead"
+        );
+
+        assert!(db.set_automation_enabled_rescheduled(id, false).unwrap());
+        let off = db.get_automation(id).unwrap().unwrap();
+        assert!(!off.enabled);
+        assert_eq!(off.next_run_at, None, "the due scan must skip it");
+    }
+
+    #[test]
+    fn enabling_an_absent_automation_reports_nothing_changed() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(!db.set_automation_enabled_rescheduled(404, true).unwrap());
     }
 
     #[test]

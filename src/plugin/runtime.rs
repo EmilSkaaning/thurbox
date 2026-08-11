@@ -177,6 +177,7 @@ impl PluginVm {
         granted: &GrantedCapabilities,
         bounds: ExecutionBounds,
         store: Option<Box<dyn crate::session::plugin_store::PluginStore>>,
+        writer: Option<Box<dyn crate::session::plugin_mutations::KernelWriter>>,
     ) -> Result<Self, RuntimeError> {
         // Only the pure-computation libraries. `io`, `os`, `package` and
         // `debug` are the ambient filesystem, process, clock and introspection
@@ -208,7 +209,7 @@ impl PluginVm {
             .map_err(|e| classify(&e))?;
 
         let host_module =
-            build_module_table(&lua, name, granted, store).map_err(|e| classify(&e))?;
+            build_module_table(&lua, name, granted, store, writer).map_err(|e| classify(&e))?;
 
         // Our own `require`, replacing Luau's filesystem requirer: it answers
         // the host namespace and otherwise resolves strictly inside the
@@ -613,13 +614,14 @@ impl PluginThread {
         granted: GrantedCapabilities,
         bounds: ExecutionBounds,
     ) -> Result<Self, RuntimeError> {
-        Self::spawn_half(name, dir, ENTRY_FILE_NAME, granted, bounds, None)
+        Self::spawn_half(name, dir, ENTRY_FILE_NAME, granted, bounds, None, None)
     }
 
     /// Start a thread for one half of a plugin.
     ///
-    /// The store is built by the factory **on the new thread**, because a
-    /// database connection cannot cross threads and each VM has its own.
+    /// The store and the writer are built by their factories **on the new
+    /// thread**, because a database connection cannot cross threads and each VM
+    /// has its own.
     pub fn spawn_half(
         name: &str,
         dir: &Path,
@@ -627,6 +629,7 @@ impl PluginThread {
         granted: GrantedCapabilities,
         bounds: ExecutionBounds,
         store: Option<crate::session::plugin_store::PluginStoreFactory>,
+        writer: Option<crate::session::plugin_mutations::KernelWriterFactory>,
     ) -> Result<Self, RuntimeError> {
         let (req_tx, req_rx) = mpsc::channel::<Request>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), RuntimeError>>();
@@ -638,17 +641,25 @@ impl PluginThread {
             .name(format!("thurbox-plugin-{name}"))
             .spawn(move || {
                 let store = store.and_then(|factory| factory());
-                let vm =
-                    match PluginVm::new(&name_owned, &dir_owned, entry, &granted, bounds, store) {
-                        Ok(vm) => {
-                            let _ = ready_tx.send(Ok(()));
-                            vm
-                        }
-                        Err(e) => {
-                            let _ = ready_tx.send(Err(e));
-                            return;
-                        }
-                    };
+                let writer = writer.and_then(|factory| factory());
+                let vm = match PluginVm::new(
+                    &name_owned,
+                    &dir_owned,
+                    entry,
+                    &granted,
+                    bounds,
+                    store,
+                    writer,
+                ) {
+                    Ok(vm) => {
+                        let _ = ready_tx.send(Ok(()));
+                        vm
+                    }
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e));
+                        return;
+                    }
+                };
                 serve(vm, req_rx);
             })
             .map_err(|e| RuntimeError::Runtime(format!("cannot spawn plugin thread: {e}")))?;

@@ -7449,6 +7449,7 @@ impl App {
             .filter(|_| self.features.automations)
             .filter(|a| a.enabled && a.next_run_at.is_some())
             .map(|a| pc::AutomationSnapshot {
+                id: a.id,
                 label: view::truncate_str(&a.name, 30),
                 due_in_secs: a.next_run_at.unwrap_or(now_ms).saturating_sub(now_ms) / 1_000,
             })
@@ -7682,6 +7683,7 @@ impl App {
                 let title = view::truncate_str(&t.title, 40);
                 let m = search.and_then(|q| crate::fuzzy::fuzzy_match(q, &title));
                 crate::ui::tasks_panel::TaskPaneEntry {
+                    id: t.id,
                     title,
                     status: t.status,
                     match_positions: m.as_ref().map(|m| m.positions.clone()).unwrap_or_default(),
@@ -7718,6 +7720,7 @@ impl App {
             .take(pc::MAX_TASK_ROWS)
             .enumerate()
             .map(|(i, e)| pc::TaskSnapshot {
+                id: e.id,
                 title: e.title,
                 status: e.status.as_str(),
                 selected: cursor_visible && i == selected,

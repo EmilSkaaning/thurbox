@@ -236,6 +236,10 @@ export type SystemMetrics = {
 
 -- `dueInSecs` is whole seconds, the granularity a countdown is displayed at.
 export type UpcomingAutomation = {
+    -- The row's id, which is what `setAutomationEnabled`, `runAutomation` and
+    -- `deleteAutomation` take. Present whether or not you hold a write capability;
+    -- a pane that only draws ignores it.
+    id: number,
     label: string,
     dueInSecs: number,
 }
@@ -254,6 +258,9 @@ export type UpcomingAutomation = {
 -- skipped, because a title may have been shortened after the offsets were
 -- computed.
 export type TaskEntry = {
+    -- The row's id, which is what `setTaskStatus` and `deleteTask` take. Address
+    -- the row you drew rather than matching on a title you fitted yourself.
+    id: number,
     title: string,
     status: string,
     selected: boolean,
@@ -419,6 +426,41 @@ export type Thurbox = {
     -- large diff arrives truncated with no cursor rather than as a tree the host
     -- would refuse for exceeding its node budget.
     review: (() -> ReviewDiff)?,
+
+    -- ── changing records ────────────────────────────────────────────────────
+    --
+    -- The only bindings here that do not read. Each takes the row id the matching
+    -- reader published, changes exactly that one record, and returns whether it
+    -- was there — `false` is "no such record", not a failure. An error is raised
+    -- only when the argument is not one the kernel accepts, or when storage cannot
+    -- be reached.
+    --
+    -- What is deliberately absent, under either write capability: creating a task
+    -- or an automation, editing a title, description, schedule, action or command,
+    -- naming a program, running one, touching a session, or reaching the
+    -- filesystem. A pane reproduces a native pane's *keys*; authoring happens in
+    -- thurbox's own editor.
+
+    -- Present only with `tasks-write`. `status` is one of "todo", "in_progress" or
+    -- "done" — any other string is an error rather than a silent default, because
+    -- writing a status you did not ask for is worse than failing.
+    setTaskStatus: ((id: number, status: string) -> boolean)?,
+    -- Present only with `tasks-write`. Soft-deletes, exactly as the tasks pane's
+    -- delete key does.
+    deleteTask: ((id: number) -> boolean)?,
+    -- Present only with `automations-write`. Enabling recomputes the automation's
+    -- next occurrence from its schedule; disabling clears it — the same rule the
+    -- native pane's toggle follows, so the two cannot leave different state.
+    setAutomationEnabled: ((id: number, enabled: boolean) -> boolean)?,
+    -- Present only with `automations-write`. Marks the automation due; the
+    -- **kernel** fires it on its next pass, under the claim that de-duplicates a
+    -- running TUI and a headless tick. Your VM runs nothing, spawns nothing, and
+    -- cannot choose what the automation does. Marking a pending run again is the
+    -- same request, not a second run.
+    runAutomation: ((id: number) -> boolean)?,
+    -- Present only with `automations-write`. Removes the automation and its run
+    -- history; unlike a task's delete this is not recoverable.
+    deleteAutomation: ((id: number) -> boolean)?,
 }
 
 -- What a plugin's `init.luau` returns.

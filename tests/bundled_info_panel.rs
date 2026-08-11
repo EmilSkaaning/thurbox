@@ -168,6 +168,10 @@ impl Case {
                 .automations
                 .iter()
                 .map(|a| AutomationSnapshot {
+                    // The id is not drawn by either pane; a fixed value keeps the
+                    // two trees comparable while the field exists for a pane that
+                    // may *change* an automation.
+                    id: 0,
                     label: a.label.clone(),
                     // The native pane is handed a pre-rendered countdown string;
                     // the plugin composes its own from the seconds, so the case

@@ -1239,6 +1239,25 @@ carries no *colouring*, because `src/ui/code_review.rs` is `ui::syntax`'s only
 reader and by the publish-a-rendering-only-when-two-panes-must-agree rule the
 highlighting stays the pane's (the bundled plugin ports the lexer to Luau).
 
+Two capabilities let a plugin **change** records rather than only read them
+(ADR-35), which is what a pane needs to reproduce a native pane's mutating keys:
+**`tasks-write`** inserts `setTaskStatus`/`deleteTask`, **`automations-write`**
+inserts `setAutomationEnabled`/`runAutomation`/`deleteAutomation`. That is the
+whole list — one operation per key a native pane performs with one keystroke, each
+addressing one existing record by the id its reader published. Nothing creates a
+record, edits its text, names a program or runs one: `runAutomation` marks an
+automation **due** and the kernel fires it on its own pass (the native `r` does
+exactly this), so no plugin thread ever executes an action. `automations-write` is
+the widest grant in the host and its sentence says so — an automation the *user*
+authored may run a shell command, and this capability can cause one to run; what
+bounds it is that a plugin can neither author nor edit one. The reads and writes are
+separate grants in both directions: a pane that only draws the task list never holds
+the power to delete. The database seam mirrors the plugin store —
+`session::plugin_mutations::KernelWriter` declared in the pure-data layer,
+implemented by `storage::plugins::DbKernelWriter`, built per VM **on its own
+thread**; a write reaches the panes through the `PRAGMA data_version` poll that
+already carries every external change, and marks nothing dirty itself.
+
 A plugin may add **environment to every agent session thurbox spawns** — v2's
 bounded replacement for v1's `[[agent_patches]]`. It is **manifest data**
 (`[spawn.env]`, requiring the `spawn` capability; declaring one without the

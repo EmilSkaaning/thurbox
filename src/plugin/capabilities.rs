@@ -75,6 +75,7 @@ pub fn build_module_table(
     plugin_name: &str,
     granted: &GrantedCapabilities,
     store: Option<Box<dyn crate::session::plugin_store::PluginStore>>,
+    writer: Option<Box<dyn crate::session::plugin_mutations::KernelWriter>>,
 ) -> mlua::Result<Table> {
     let module = lua.create_table()?;
 
@@ -213,6 +214,75 @@ pub fn build_module_table(
             super::kernel_state::review_table(lua, &context)
         })?;
         module.set("review", read)?;
+    }
+
+    // Mutating bindings — the one part of this table that changes the user's own
+    // records rather than reading them. Two capabilities, inserted per kind for the
+    // reason the readers are split, and the *only* five operations there are: each
+    // addresses one existing record by id and reports whether it was there. There
+    // is deliberately nothing that creates a record, edits its text, names a
+    // program or executes anything, because a general mechanism would make a
+    // plugin's reach unreviewable from its manifest.
+    //
+    // `Rc` for the store's reason: one writer, several bindings, one thread.
+    let writer = writer.map(std::rc::Rc::new);
+
+    if granted.has(Capability::TasksWrite) {
+        let w = writer.clone();
+        let set_status = lua.create_function(move |_, (id, status): (i64, String)| {
+            let Some(writer) = w.as_ref() else {
+                return Err(mlua::Error::runtime("plugin storage is unavailable"));
+            };
+            // Parsed against the kernel's own statuses rather than defaulted: a
+            // silent fallback would write a status the plugin did not ask for.
+            let status = crate::session::plugin_mutations::parse_task_status(&status)
+                .map_err(mlua::Error::runtime)?;
+            writer
+                .set_task_status(id, status)
+                .map_err(mlua::Error::runtime)
+        })?;
+        module.set("setTaskStatus", set_status)?;
+
+        let w = writer.clone();
+        let delete = lua.create_function(move |_, id: i64| {
+            let Some(writer) = w.as_ref() else {
+                return Err(mlua::Error::runtime("plugin storage is unavailable"));
+            };
+            writer.delete_task(id).map_err(mlua::Error::runtime)
+        })?;
+        module.set("deleteTask", delete)?;
+    }
+
+    if granted.has(Capability::AutomationsWrite) {
+        let w = writer.clone();
+        let set_enabled = lua.create_function(move |_, (id, enabled): (i64, bool)| {
+            let Some(writer) = w.as_ref() else {
+                return Err(mlua::Error::runtime("plugin storage is unavailable"));
+            };
+            writer
+                .set_automation_enabled(id, enabled)
+                .map_err(mlua::Error::runtime)
+        })?;
+        module.set("setAutomationEnabled", set_enabled)?;
+
+        let w = writer.clone();
+        let run = lua.create_function(move |_, id: i64| {
+            let Some(writer) = w.as_ref() else {
+                return Err(mlua::Error::runtime("plugin storage is unavailable"));
+            };
+            // Marks it due. The kernel fires it; this thread runs nothing.
+            writer.run_automation(id).map_err(mlua::Error::runtime)
+        })?;
+        module.set("runAutomation", run)?;
+
+        let w = writer.clone();
+        let delete = lua.create_function(move |_, id: i64| {
+            let Some(writer) = w.as_ref() else {
+                return Err(mlua::Error::runtime("plugin storage is unavailable"));
+            };
+            writer.delete_automation(id).map_err(mlua::Error::runtime)
+        })?;
+        module.set("deleteAutomation", delete)?;
     }
 
     // View-node constructors. Ungated on purpose: they build plain tables and
@@ -480,7 +550,7 @@ mod tests {
         lua.set_named_registry_value("thurbox_plugin_state", lua.create_table().unwrap())
             .unwrap();
         let granted = GrantedCapabilities::from_manifest(&set(&[Capability::Log]));
-        let module = build_module_table(&lua, "demo", &granted, None).unwrap();
+        let module = build_module_table(&lua, "demo", &granted, None, None).unwrap();
 
         assert!(module.contains_key("log").unwrap());
         assert!(module.get::<mlua::Function>("log").is_ok());
@@ -490,7 +560,7 @@ mod tests {
     fn undeclared_binding_is_absent_not_refusing() {
         let lua = Lua::new();
         let granted = GrantedCapabilities::none();
-        let module = build_module_table(&lua, "demo", &granted, None).unwrap();
+        let module = build_module_table(&lua, "demo", &granted, None, None).unwrap();
 
         assert!(!module.contains_key("log").unwrap());
         assert!(!module.contains_key("stateRead").unwrap());
@@ -513,10 +583,11 @@ mod tests {
             "with",
             &GrantedCapabilities::from_manifest(&set(&[Capability::Log])),
             None,
+            None,
         )
         .unwrap();
         let without =
-            build_module_table(&lua, "without", &GrantedCapabilities::none(), None).unwrap();
+            build_module_table(&lua, "without", &GrantedCapabilities::none(), None, None).unwrap();
 
         assert!(with.contains_key("log").unwrap());
         assert!(!without.contains_key("log").unwrap());
@@ -532,6 +603,7 @@ mod tests {
             "reader",
             &GrantedCapabilities::from_manifest(&set(&[Capability::StateRead])),
             None,
+            None,
         )
         .unwrap();
 
@@ -542,7 +614,8 @@ mod tests {
     #[test]
     fn the_module_table_is_frozen() {
         let lua = Lua::new();
-        let module = build_module_table(&lua, "demo", &GrantedCapabilities::none(), None).unwrap();
+        let module =
+            build_module_table(&lua, "demo", &GrantedCapabilities::none(), None, None).unwrap();
         assert!(module.is_readonly());
         assert!(
             module.set("log", true).is_err(),
@@ -553,7 +626,8 @@ mod tests {
     #[test]
     fn ui_constructors_are_present_without_any_capability() {
         let lua = Lua::new();
-        let module = build_module_table(&lua, "demo", &GrantedCapabilities::none(), None).unwrap();
+        let module =
+            build_module_table(&lua, "demo", &GrantedCapabilities::none(), None, None).unwrap();
         let ui: Table = module.get("ui").expect("ui table present");
         for name in [
             "text",
@@ -575,7 +649,8 @@ mod tests {
     #[test]
     fn the_ui_table_is_frozen_too() {
         let lua = Lua::new();
-        let module = build_module_table(&lua, "demo", &GrantedCapabilities::none(), None).unwrap();
+        let module =
+            build_module_table(&lua, "demo", &GrantedCapabilities::none(), None, None).unwrap();
         let ui: Table = module.get("ui").unwrap();
         assert!(ui.is_readonly());
     }
@@ -637,6 +712,7 @@ mod tests {
                 "demo",
                 &GrantedCapabilities::from_manifest(&set(&[capability])),
                 None,
+                None,
             )
             .unwrap();
             assert!(
@@ -655,7 +731,8 @@ mod tests {
     #[test]
     fn no_state_capability_means_no_state_reader() {
         let lua = Lua::new();
-        let module = build_module_table(&lua, "demo", &GrantedCapabilities::none(), None).unwrap();
+        let module =
+            build_module_table(&lua, "demo", &GrantedCapabilities::none(), None, None).unwrap();
         for name in [
             "activeSession",
             "systemMetrics",
@@ -686,6 +763,7 @@ mod tests {
                 Capability::Files,
                 Capability::Review,
             ])),
+            None,
             None,
         )
         .unwrap();
@@ -736,6 +814,7 @@ mod tests {
             "demo",
             &GrantedCapabilities::from_manifest(&set(&[Capability::Review])),
             None,
+            None,
         )
         .unwrap();
         for name in [
@@ -763,6 +842,7 @@ mod tests {
             "demo",
             &GrantedCapabilities::from_manifest(&set(&[Capability::Files])),
             None,
+            None,
         )
         .unwrap();
         for name in [
@@ -788,10 +868,167 @@ mod tests {
         );
     }
 
+    /// A write is granted per record kind, so one grant cannot smuggle in the
+    /// other's power — the rule the readers already follow.
+    #[test]
+    fn each_write_capability_grants_only_its_own_bindings() {
+        let lua = Lua::new();
+        for (capability, present, absent) in [
+            (
+                Capability::TasksWrite,
+                ["setTaskStatus", "deleteTask"],
+                ["setAutomationEnabled", "runAutomation", "deleteAutomation"],
+            ),
+            (
+                Capability::AutomationsWrite,
+                ["setAutomationEnabled", "runAutomation"],
+                ["setTaskStatus", "deleteTask", "createAutomation"],
+            ),
+        ] {
+            let module = build_module_table(
+                &lua,
+                "demo",
+                &GrantedCapabilities::from_manifest(&set(&[capability])),
+                None,
+                None,
+            )
+            .unwrap();
+            for name in present {
+                assert!(
+                    module.contains_key(name).unwrap(),
+                    "{capability} should grant {name}"
+                );
+            }
+            for name in absent {
+                assert!(
+                    !module.contains_key(name).unwrap(),
+                    "{capability} must not grant {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_write_capability_means_no_mutating_binding() {
+        let lua = Lua::new();
+        let module =
+            build_module_table(&lua, "demo", &GrantedCapabilities::none(), None, None).unwrap();
+        for name in [
+            "setTaskStatus",
+            "deleteTask",
+            "setAutomationEnabled",
+            "runAutomation",
+            "deleteAutomation",
+        ] {
+            assert!(!module.contains_key(name).unwrap(), "{name} leaked");
+        }
+    }
+
+    /// Reading a list and changing it are different disclosures, in both
+    /// directions: a pane that only draws must not hold the power to delete, and a
+    /// plugin that closes a task need not be shown every task.
+    #[test]
+    fn a_read_grant_and_a_write_grant_do_not_imply_each_other() {
+        let lua = Lua::new();
+        let reader = build_module_table(
+            &lua,
+            "reader",
+            &GrantedCapabilities::from_manifest(&set(&[Capability::Tasks])),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(reader.contains_key("tasks").unwrap());
+        assert!(!reader.contains_key("setTaskStatus").unwrap());
+
+        let writer = build_module_table(
+            &lua,
+            "writer",
+            &GrantedCapabilities::from_manifest(&set(&[Capability::TasksWrite])),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(writer.contains_key("setTaskStatus").unwrap());
+        assert!(!writer.contains_key("tasks").unwrap());
+    }
+
+    /// The mutating surface is a closed list, so what it does *not* contain is
+    /// asserted directly: nothing a plugin holding both write capabilities can call
+    /// authors a record, edits its text, or names a program.
+    #[test]
+    fn the_write_capabilities_insert_no_authoring_or_execution_binding() {
+        let lua = Lua::new();
+        let module = build_module_table(
+            &lua,
+            "demo",
+            &GrantedCapabilities::from_manifest(&set(&[
+                Capability::TasksWrite,
+                Capability::AutomationsWrite,
+            ])),
+            None,
+            None,
+        )
+        .unwrap();
+        for name in [
+            "createTask",
+            "newTask",
+            "updateTask",
+            "setTaskTitle",
+            "createAutomation",
+            "updateAutomation",
+            "setAutomationCommand",
+            "exec",
+            "sql",
+            "query",
+            "spawnSession",
+            "sendToSession",
+        ] {
+            assert!(
+                !module.contains_key(name).unwrap(),
+                "a write capability must not insert `{name}`"
+            );
+        }
+    }
+
+    /// A write addresses a record by id, so granting one must not put the snapshot
+    /// publisher back to work every tick.
+    #[test]
+    fn a_write_capability_does_not_demand_kernel_state() {
+        assert!(!Capability::TasksWrite.reads_kernel_state());
+        assert!(!Capability::AutomationsWrite.reads_kernel_state());
+        assert!(Capability::Tasks.reads_kernel_state());
+    }
+
+    /// Storage being unavailable is a failing call, not a missing binding: the
+    /// binding's presence is the capability's answer and must not depend on whether
+    /// a database could be opened.
+    #[test]
+    fn a_granted_write_without_a_writer_fails_the_call() {
+        let lua = Lua::new();
+        let module = build_module_table(
+            &lua,
+            "demo",
+            &GrantedCapabilities::from_manifest(&set(&[Capability::TasksWrite])),
+            None,
+            None,
+        )
+        .unwrap();
+        let call: mlua::Result<bool> = module
+            .get::<mlua::Function>("deleteTask")
+            .unwrap()
+            .call(1i64);
+        assert!(
+            call.is_err(),
+            "the call must fail rather than report success"
+        );
+    }
+
     #[test]
     fn plugin_always_knows_its_own_name() {
         let lua = Lua::new();
-        let module = build_module_table(&lua, "demo", &GrantedCapabilities::none(), None).unwrap();
+        let module =
+            build_module_table(&lua, "demo", &GrantedCapabilities::none(), None, None).unwrap();
         assert_eq!(module.get::<String>("name").unwrap(), "demo");
     }
 }

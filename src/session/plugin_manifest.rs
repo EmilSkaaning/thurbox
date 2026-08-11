@@ -93,6 +93,30 @@ pub enum Capability {
     /// reached the filesystem itself would be a different capability, asked for
     /// in a different sentence.
     Files,
+    /// **Change** thurbox's task list: set a task's status, or delete a task.
+    ///
+    /// The first capability in the vocabulary that is not a read, which is why its
+    /// sentence says so plainly: a plugin holding it changes the user's own
+    /// records. It is separate from [`Capability::Tasks`] in **both** directions —
+    /// drawing the task list and changing what is in it are different disclosures,
+    /// and a pane that only draws must not have to ask for the power to delete.
+    ///
+    /// It grants no creation and no editing: a task's title and description are
+    /// authored in thurbox's own editor, so there is no binding by which a plugin
+    /// writes text into the list.
+    TasksWrite,
+    /// **Change** thurbox's automations: enable or disable one, mark one to run
+    /// now, or delete one.
+    ///
+    /// The widest grant the host defines, and the sentence has to be honest about
+    /// why: an automation the *user* authored may run a shell command, and this
+    /// capability can cause one to run. What bounds it is that a plugin cannot
+    /// author or edit an automation — there is no create and no update binding —
+    /// so the set of programs it can trigger is exactly the set already scheduled.
+    ///
+    /// Running is a *request*: the binding marks the automation due and the kernel
+    /// fires it on its own pass. No plugin thread ever executes an action.
+    AutomationsWrite,
     /// Read the diff the code-review view currently has open — one entry per
     /// line, with its path, its line numbers on each side, whether it is an
     /// addition, a deletion or context, and its text.
@@ -121,6 +145,8 @@ impl Capability {
             Capability::Automations => "automations",
             Capability::Tasks => "tasks",
             Capability::Files => "files",
+            Capability::TasksWrite => "tasks-write",
+            Capability::AutomationsWrite => "automations-write",
             Capability::Review => "review",
         }
     }
@@ -139,6 +165,8 @@ impl Capability {
             Capability::Automations,
             Capability::Tasks,
             Capability::Files,
+            Capability::TasksWrite,
+            Capability::AutomationsWrite,
             Capability::Review,
         ]
     }
@@ -148,6 +176,10 @@ impl Capability {
     /// The plugin host uses it to answer one question for the publisher — does
     /// *anything* running want a snapshot — so a new state capability cannot be
     /// added without the publisher noticing it.
+    ///
+    /// A **write** capability is deliberately not one: a plugin that may change a
+    /// task addresses it by id and needs no snapshot built for it, so granting a
+    /// write must not put the publisher back to work every tick.
     pub fn reads_kernel_state(self) -> bool {
         matches!(
             self,

@@ -168,6 +168,14 @@ pub struct PluginHost {
     /// one rendered and discarded. Counted inside [`PluginHost::render_pane`], so
     /// no caller can satisfy the rule by skipping in one path and not another.
     render_calls: std::sync::atomic::AtomicU64,
+    /// How a plugin's VM reaches the records its capabilities permit it to change.
+    ///
+    /// `None` means no plugin can write — the host is then read-only whatever a
+    /// manifest asked for, which is what a test host and every pre-existing caller
+    /// get. A factory rather than a writer because a database connection cannot
+    /// cross threads and each VM has its own
+    /// ([`crate::session::plugin_mutations::KernelWriterFactory`]).
+    writer: Option<crate::session::plugin_mutations::KernelWriterFactory>,
 }
 
 impl fmt::Debug for PluginHost {
@@ -202,7 +210,20 @@ impl PluginHost {
             problems: outcome.problems.iter().map(|p| p.to_string()).collect(),
             bounds,
             render_calls: std::sync::atomic::AtomicU64::new(0),
+            writer: None,
         }
+    }
+
+    /// Let this host's plugins reach the records their capabilities permit.
+    ///
+    /// A builder rather than a constructor argument, so every existing caller —
+    /// including every test — keeps a host whose plugins cannot write at all.
+    pub fn with_kernel_writer(
+        mut self,
+        writer: crate::session::plugin_mutations::KernelWriterFactory,
+    ) -> Self {
+        self.writer = Some(writer);
+        self
     }
 
     /// Discover from the standard sources and build a host.
@@ -322,7 +343,10 @@ impl PluginHost {
     /// `init` may run for its whole interrupt budget — so it must never happen
     /// on the thread that draws frames. Moving it off makes "plugins do not
     /// delay the first frame" structural rather than a rule to remember.
-    pub fn start_detached(bounds: ExecutionBounds) -> Receiver<PluginHost> {
+    pub fn start_detached(
+        bounds: ExecutionBounds,
+        writer: Option<crate::session::plugin_mutations::KernelWriterFactory>,
+    ) -> Receiver<PluginHost> {
         let (tx, rx) = mpsc::channel();
         // Detached deliberately: nothing waits on this handle, and a plugin
         // wedged in `init` must not keep the process from exiting.
@@ -330,6 +354,9 @@ impl PluginHost {
             .name("thurbox-plugin-startup".to_string())
             .spawn(move || {
                 let mut host = PluginHost::discover(bounds);
+                if let Some(writer) = writer {
+                    host = host.with_kernel_writer(writer);
+                }
                 host.start_all();
                 // A closed channel means the process is already shutting down;
                 // dropping the host here still stops its plugins.
@@ -343,6 +370,7 @@ impl PluginHost {
     /// Drive one plugin from `Discovered` to `Running`.
     fn start_one(&mut self, index: usize) {
         let bounds = self.bounds;
+        let writer = self.writer.clone();
         let slot = &mut self.slots[index];
 
         // The state machine has no skipping: a plugin that did not load is
@@ -351,11 +379,17 @@ impl PluginHost {
             return;
         }
 
-        let thread = match PluginThread::spawn(
+        let thread = match PluginThread::spawn_half(
             slot.plugin.name(),
             &slot.plugin.dir,
+            crate::plugin::runtime::ENTRY_FILE_NAME,
             slot.granted.clone(),
             bounds,
+            // A pane's VM gets no key/value store: the durable half of a plugin is
+            // its service, and a pane that needed storage would be reaching past
+            // what it draws.
+            None,
+            writer.clone(),
         ) {
             Ok(t) => t,
             Err(e) => {

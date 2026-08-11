@@ -18,6 +18,7 @@ pub mod pane_visibility;
 pub mod plugin_command;
 pub mod plugin_manifest;
 #[cfg(feature = "plugins")]
+pub mod plugin_mutations;
 pub mod plugin_store;
 pub mod review;
 pub mod settings;

@@ -1477,6 +1477,7 @@ mod tests {
                 &std::collections::BTreeSet::new(),
             ),
             None,
+            None,
         )
         .expect("module builds");
         lua.globals().set("thurbox", module).unwrap();

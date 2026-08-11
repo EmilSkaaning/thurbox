@@ -354,6 +354,29 @@ struct KeybindingReport {
     unbound_because: Option<String>,
 }
 
+/// The store factory a plugin VM builds its own connection from.
+///
+/// Shared by every `thurbox-cli` path that hosts a plugin, so "each VM gets its
+/// own connection, built on its own thread" is stated once.
+pub(crate) fn store_factory() -> crate::session::plugin_store::PluginStoreFactory {
+    std::sync::Arc::new(|| {
+        crate::storage::plugins::DbPluginStore::open()
+            .map(|s| Box::new(s) as Box<dyn crate::session::plugin_store::PluginStore>)
+    })
+}
+
+/// The write factory, beside [`store_factory`] and for the same reason.
+///
+/// Handed to every hosted plugin: *which* of its bindings exist is decided by the
+/// capability check, so a plugin that declared no write capability gets a factory
+/// it has no binding to reach.
+pub(crate) fn writer_factory() -> crate::session::plugin_mutations::KernelWriterFactory {
+    std::sync::Arc::new(|| {
+        crate::storage::plugins::DbKernelWriter::open()
+            .map(|w| Box::new(w) as Box<dyn crate::session::plugin_mutations::KernelWriter>)
+    })
+}
+
 /// The user's keymap, or the defaults when there is no override file.
 fn user_keybindings() -> crate::session::KeyBindings {
     match crate::storage::keybindings::load_keybindings_json() {
@@ -449,13 +472,10 @@ fn run_plugin_verb(
     let path = crate::paths::database_file().ok_or("cannot resolve the database path")?;
     let lock_db = crate::storage::Database::open(&path).map_err(|e| e.to_string())?;
     let lock = crate::storage::plugins::DbServiceLock::new(lock_db, "cli");
-    let store: crate::session::plugin_store::PluginStoreFactory = std::sync::Arc::new(|| {
-        crate::storage::plugins::DbPluginStore::open()
-            .map(|s| Box::new(s) as Box<dyn crate::session::plugin_store::PluginStore>)
-    });
+    let store = store_factory();
 
     let mut host = crate::plugin::ServiceHost::new(crate::plugin::ExecutionBounds::default());
-    host.start(plugin, &lock, Some(store))
+    host.start(plugin, &lock, Some(store), Some(writer_factory()))
         .map_err(|e| e.to_string())?;
     let result = host.run_verb(plugin.name(), verb, args);
     host.stop_all(&lock);

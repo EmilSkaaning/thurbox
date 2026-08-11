@@ -101,6 +101,7 @@ impl ServiceHost {
         plugin: &DiscoveredPlugin,
         lock: &dyn ServiceLock,
         store: Option<PluginStoreFactory>,
+        writer: Option<crate::session::plugin_mutations::KernelWriterFactory>,
     ) -> Result<bool, ServiceError> {
         if !plugin.manifest.has_service() {
             return Ok(false);
@@ -128,6 +129,7 @@ impl ServiceHost {
             granted,
             self.bounds,
             store,
+            writer,
         )
         .and_then(|thread| {
             thread.load_entry()?;
@@ -331,7 +333,7 @@ mod tests {
         let mut host = ServiceHost::new(bounds());
         let lock = FakeLock::named("tui");
         assert_eq!(
-            host.start(&discovered(tmp.path(), "viewonly"), &lock, None),
+            host.start(&discovered(tmp.path(), "viewonly"), &lock, None, None),
             Ok(false)
         );
         assert!(host.running().is_empty());
@@ -351,7 +353,7 @@ mod tests {
         let mut host = ServiceHost::new(bounds());
         let lock = FakeLock::named("keeper");
         assert_eq!(
-            host.start(&discovered(tmp.path(), "syncer"), &lock, None),
+            host.start(&discovered(tmp.path(), "syncer"), &lock, None, None),
             Ok(true)
         );
         assert_eq!(host.running(), vec!["syncer"]);
@@ -371,7 +373,7 @@ mod tests {
 
         let mut host = ServiceHost::new(bounds());
         let lock = FakeLock::named("tui");
-        host.start(&discovered(tmp.path(), "initd"), &lock, None)
+        host.start(&discovered(tmp.path(), "initd"), &lock, None, None)
             .unwrap();
         assert_eq!(host.eval("initd", "return RAN").unwrap(), "true");
     }
@@ -388,9 +390,9 @@ mod tests {
         let mut tui = ServiceHost::new(bounds());
         let mut keeper = ServiceHost::new(bounds());
 
-        assert_eq!(tui.start(&plugin, &tui_lock, None), Ok(true));
+        assert_eq!(tui.start(&plugin, &tui_lock, None, None), Ok(true));
         assert_eq!(
-            keeper.start(&plugin, &keeper_lock, None),
+            keeper.start(&plugin, &keeper_lock, None, None),
             Err(ServiceError::AlreadyHosted {
                 holder: "tui".to_string()
             })
@@ -409,9 +411,9 @@ mod tests {
         let mut tui = ServiceHost::new(bounds());
         let mut keeper = ServiceHost::new(bounds());
 
-        tui.start(&plugin, &tui_lock, None).unwrap();
+        tui.start(&plugin, &tui_lock, None, None).unwrap();
         tui.stop("solo", &tui_lock);
-        assert_eq!(keeper.start(&plugin, &keeper_lock, None), Ok(true));
+        assert_eq!(keeper.start(&plugin, &keeper_lock, None, None), Ok(true));
     }
 
     #[test]
@@ -424,7 +426,7 @@ mod tests {
 
         let tui_lock = FakeLock::named("tui");
         let mut tui = ServiceHost::new(bounds());
-        assert!(tui.start(&plugin, &tui_lock, None).is_err());
+        assert!(tui.start(&plugin, &tui_lock, None, None).is_err());
         assert!(!tui.is_running("broken"));
 
         // The lock is free again.
@@ -445,7 +447,7 @@ mod tests {
 
         let lock = FakeLock::named("tui");
         let mut services = ServiceHost::new(bounds());
-        services.start(&plugin, &lock, None).unwrap();
+        services.start(&plugin, &lock, None, None).unwrap();
 
         let mut views =
             crate::plugin::PluginHost::from_discovery(discover_in(&[], Some(tmp.path())), bounds());
@@ -472,7 +474,7 @@ mod tests {
 
         let lock = FakeLock::named("tui");
         let mut services = ServiceHost::new(bounds());
-        assert_eq!(services.start(&plugin, &lock, None), Ok(true));
+        assert_eq!(services.start(&plugin, &lock, None, None), Ok(true));
 
         let mut views =
             crate::plugin::PluginHost::from_discovery(discover_in(&[], Some(tmp.path())), bounds());
@@ -498,7 +500,7 @@ mod tests {
 
         let lock = FakeLock::named("tui");
         let mut services = ServiceHost::new(bounds());
-        services.start(&plugin, &lock, None).unwrap();
+        services.start(&plugin, &lock, None, None).unwrap();
 
         let mut views =
             crate::plugin::PluginHost::from_discovery(discover_in(&[], Some(tmp.path())), bounds());
@@ -528,7 +530,7 @@ mod tests {
     ) -> Result<serde_json::Value, RuntimeError> {
         let lock = FakeLock::named("cli");
         let mut host = ServiceHost::new(bounds());
-        host.start(&discovered(root, name), &lock, None)
+        host.start(&discovered(root, name), &lock, None, None)
             .expect("service starts");
         let result = host.run_command(name, entry, args);
         host.stop_all(&lock);
@@ -673,8 +675,8 @@ mod tests {
 
         let lock = FakeLock::named("tui");
         let mut host = ServiceHost::new(bounds());
-        assert_eq!(host.start(&plugin, &lock, None), Ok(true));
-        assert_eq!(host.start(&plugin, &lock, None), Ok(true));
+        assert_eq!(host.start(&plugin, &lock, None, None), Ok(true));
+        assert_eq!(host.start(&plugin, &lock, None, None), Ok(true));
         assert_eq!(host.running().len(), 1);
     }
 }

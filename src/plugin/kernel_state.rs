@@ -159,6 +159,9 @@ pub fn automations_table(lua: &Lua, context: &PaneContext) -> mlua::Result<Table
 
 fn build_automation(lua: &Lua, a: &AutomationSnapshot) -> mlua::Result<Table> {
     let t = lua.create_table()?;
+    // The row's identity, which is what a pane granted `automations-write` passes
+    // back when it enables, runs or deletes the automation it drew.
+    t.set("id", a.id)?;
     t.set("label", a.label.clone())?;
     t.set("dueInSecs", a.due_in_secs)?;
     Ok(t)
@@ -182,6 +185,9 @@ pub fn tasks_table(lua: &Lua, context: &PaneContext) -> mlua::Result<Table> {
 
 fn build_task(lua: &Lua, task: &TaskSnapshot) -> mlua::Result<Table> {
     let t = lua.create_table()?;
+    // As for an automation: the id is how a pane granted `tasks-write` names the
+    // row it drew, rather than matching on a title it fitted itself.
+    t.set("id", task.id)?;
     t.set("title", task.title.clone())?;
     t.set("status", task.status)?;
     // Booleans cross as booleans even when false: unlike an optional value,
@@ -477,6 +483,7 @@ mod tests {
         let lua = Lua::new();
         let ctx = PaneContext {
             automations: vec![AutomationSnapshot {
+                id: 7,
                 label: "nightly".to_string(),
                 due_in_secs: 90,
             }],
@@ -484,6 +491,7 @@ mod tests {
         };
         let t = automations_table(&lua, &ctx).unwrap();
         let first: Table = t.get(1).unwrap();
+        assert_eq!(first.get::<i64>("id").unwrap(), 7);
         assert_eq!(first.get::<String>("label").unwrap(), "nightly");
         assert_eq!(first.get::<u64>("dueInSecs").unwrap(), 90);
     }
@@ -496,6 +504,7 @@ mod tests {
         let ctx = PaneContext {
             tasks: TasksSnapshot {
                 entries: vec![TaskSnapshot {
+                    id: 12,
                     title: "ship the pane".to_string(),
                     status: "in_progress",
                     selected: true,
@@ -512,6 +521,8 @@ mod tests {
         let entries: Table = t.get("entries").unwrap();
         assert_eq!(entries.raw_len(), 1);
         let row: Table = entries.get(1).unwrap();
+        // The id is the row's identity, which a pane that may change a task needs.
+        assert_eq!(row.get::<i64>("id").unwrap(), 12);
         assert_eq!(row.get::<String>("title").unwrap(), "ship the pane");
         assert_eq!(row.get::<String>("status").unwrap(), "in_progress");
         assert!(row.get::<bool>("selected").unwrap());
@@ -537,6 +548,7 @@ mod tests {
         let ctx = PaneContext {
             tasks: TasksSnapshot {
                 entries: vec![TaskSnapshot {
+                    id: 1,
                     title: "t".to_string(),
                     status: "todo",
                     selected: false,

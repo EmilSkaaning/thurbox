@@ -37,6 +37,14 @@ use super::{focus_block, truncate_ellipsis, FocusLevel};
 
 /// One row in the tasks panel (view data built by the app layer).
 pub struct TaskPaneEntry {
+    /// The task's row id.
+    ///
+    /// Nothing in the rendering uses it: it is here because the entry list is
+    /// what the published snapshot is built from, and a pane that may *change* a
+    /// task addresses it by id (ADR-35). Resolving it a second time from the
+    /// cached tasks would be the same lookup with a second chance to disagree
+    /// about which row is which.
+    pub id: i64,
     pub title: String,
     pub status: TaskStatus,
     /// Byte offsets in `title` matched by the active global-search query. Empty
@@ -333,6 +341,7 @@ mod tests {
 
     fn entry(title: &str) -> TaskPaneEntry {
         TaskPaneEntry {
+            id: 1,
             title: title.into(),
             status: TaskStatus::Todo,
             match_positions: vec![],

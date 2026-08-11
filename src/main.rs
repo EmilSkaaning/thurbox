@@ -353,8 +353,17 @@ async fn main() -> Result<()> {
     // reference — nothing renders a plugin yet, so the host stays out of the
     // model until there is a surface that reads it.
     #[cfg(feature = "plugins")]
-    let plugin_host =
-        thurbox::plugin::PluginHost::start_detached(thurbox::plugin::ExecutionBounds::default());
+    let plugin_host = thurbox::plugin::PluginHost::start_detached(
+        thurbox::plugin::ExecutionBounds::default(),
+        // How a plugin granted a write capability reaches the records it may
+        // change. Each VM builds its own connection on its own thread; a plugin
+        // that declared no such capability gets a factory it has no binding to
+        // reach, since which bindings exist is the capability check's answer.
+        Some(std::sync::Arc::new(|| {
+            thurbox::storage::plugins::DbKernelWriter::open()
+                .map(|w| Box::new(w) as Box<dyn thurbox::session::plugin_mutations::KernelWriter>)
+        })),
+    );
 
     // Hand the phase breakdown to the app so the published perf snapshot
     // (`thurbox-cli perf`) can show boot cost alongside the runtime stats.

@@ -147,24 +147,58 @@ const BLOCKERS: &[Blocker] = &[
     Blocker {
         id: "read-only-state-channel",
         needs: "moving another pane's cursor, taking focus, and restoring both on cancel",
-        stands: "the kernel-state channel is read-only by construction — every granted binding \
-                 reads a published snapshot",
+        stands: "no binding writes *view* state — a plugin may change records it was granted \
+                 (ADR-35), and nothing it holds moves a cursor, takes focus, or shows a panel",
         gap: Gap::Structural,
         blocked: true,
         probe: |root| {
-            // Matched as a *verb* in the host's camelCase binding names, so
-            // `setFocus` is caught while a reader that merely begins with the
-            // same letters (`settings`) is not. A plugin's own `stateWrite` and
-            // `stateDelete` need no exception: neither begins with a verb.
-            const WRITES: [&str; 8] = [
-                "set", "select", "focus", "move", "open", "write", "jump", "goto",
+            // Two verb classes, because ADR-35 made the coarse question wrong.
+            //
+            // The probe used to fail on *any* write-shaped binding name, and
+            // `tasks-write`/`automations-write` added `setTaskStatus` and
+            // `setAutomationEnabled` — so it reported this row closed. It is not:
+            // those change *records*, and what the strip needs is a write to
+            // **view** state (a cursor, focus, a panel's visibility, the active
+            // session), which nothing grants. Correcting the probe rather than the
+            // verdict is the point of having one — the same correction the
+            // code-review port had to make when a node named `Fill` satisfied a
+            // probe about a *vertical* anchor.
+            //
+            // A **view verb** is a view write whatever it is applied to: there is
+            // no record you `focus` or `jump` to. A **generic mutator** counts only
+            // when it names a view noun, so `setTaskStatus` passes and a future
+            // `setActiveSession` does not.
+            const VIEW_VERBS: [&str; 6] = ["focus", "jump", "goto", "reveal", "scroll", "select"];
+            const MUTATORS: [&str; 4] = ["set", "move", "open", "write"];
+            const VIEW_NOUNS: [&str; 8] = [
+                "Focus",
+                "Cursor",
+                "Selection",
+                "Selected",
+                "Row",
+                "Pane",
+                "Panel",
+                "Active",
             ];
+            // Matched as a *verb* in the host's camelCase names, so a reader that
+            // merely begins with the same letters (`settings`) is not caught. A
+            // plugin's own `stateWrite`/`stateDelete` need no exception: neither
+            // begins with a verb.
+            let verb_applies = |binding: &str, verb: &str| -> Option<String> {
+                binding
+                    .strip_prefix(verb)
+                    .filter(|rest| rest.is_empty() || rest.starts_with(char::is_uppercase))
+                    .map(str::to_string)
+            };
             module_bindings(root).iter().all(|binding| {
-                !WRITES.iter().any(|verb| {
-                    binding
-                        .strip_prefix(verb)
-                        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_uppercase))
-                })
+                let view_verb = VIEW_VERBS
+                    .iter()
+                    .any(|verb| verb_applies(binding, verb).is_some());
+                let view_write = MUTATORS.iter().any(|verb| {
+                    verb_applies(binding, verb)
+                        .is_some_and(|rest| VIEW_NOUNS.iter().any(|noun| rest.starts_with(noun)))
+                });
+                !view_verb && !view_write
             })
         },
     },
@@ -408,6 +442,40 @@ fn the_verdict_is_derived_from_the_blockers() {
 /// Without this the gate would pass while a bundled `global-search` plugin sat
 /// in the tree contradicting it — and `tests/teardown_gate.rs` would then read
 /// that plugin as one step toward deleting the native strip.
+/// The half of the read-only row that is easy to get wrong, asserted directly: a
+/// plugin **can** change records, and that does not give it the write the strip
+/// needs.
+///
+/// This is not a restatement of the probe. It pins the *reason* the row stays
+/// blocked after ADR-35 — a record write is not a view write — so that
+/// "simplifying" the probe back to "is there any write-shaped binding" fails here
+/// with the argument attached rather than quietly declaring global search
+/// portable.
+#[test]
+fn a_record_write_is_not_the_write_the_strip_needs() {
+    let root = repo_root();
+    let bindings = module_bindings(&root);
+    assert!(
+        bindings.iter().any(|b| b == "setTaskStatus"),
+        "a record-writing binding should exist — if it was removed, this test no longer proves          anything and should be revisited with it"
+    );
+    let row = BLOCKERS
+        .iter()
+        .find(|b| b.id == "read-only-state-channel")
+        .expect("the row exists");
+    assert!(
+        (row.probe)(&root),
+        "changing a task is not moving a cursor, taking focus, or showing a panel: the strip's          write is still missing"
+    );
+    // And nothing grants the view write itself.
+    for forbidden in ["focusPane", "setActiveSession", "selectRow", "moveCursor"] {
+        assert!(
+            !bindings.iter().any(|b| b == forbidden),
+            "`{forbidden}` would close this row"
+        );
+    }
+}
+
 #[test]
 fn no_bundled_plugin_claims_global_search() {
     let root = repo_root();

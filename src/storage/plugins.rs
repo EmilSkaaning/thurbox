@@ -248,6 +248,68 @@ impl crate::session::plugin_store::PluginStore for DbPluginStore {
     }
 }
 
+/// A [`KernelWriter`](crate::session::plugin_mutations::KernelWriter) backed by
+/// its own connection, like [`DbPluginStore`].
+///
+/// The only implementor of the write seam, and it does nothing but forward to the
+/// storage operation the kernel's own surface uses — so whatever that operation
+/// records (a task's audit entry, an automation's run history) is recorded for a
+/// plugin's write too, with no separate plugin trail to drift.
+#[cfg(feature = "plugins")]
+pub struct DbKernelWriter {
+    db: Database,
+}
+
+#[cfg(feature = "plugins")]
+impl DbKernelWriter {
+    /// Open a writer against the standard database path.
+    pub fn open() -> Option<Self> {
+        let path = crate::paths::database_file()?;
+        Database::open(&path).ok().map(|db| Self { db })
+    }
+
+    /// Wrap an already-open database (tests).
+    pub fn from_db(db: Database) -> Self {
+        Self { db }
+    }
+}
+
+#[cfg(feature = "plugins")]
+impl crate::session::plugin_mutations::KernelWriter for DbKernelWriter {
+    fn set_task_status(
+        &self,
+        id: i64,
+        status: crate::session::task::TaskStatus,
+    ) -> Result<bool, String> {
+        self.db
+            .set_task_status(id, status)
+            .map_err(|e| e.to_string())
+    }
+
+    fn delete_task(&self, id: i64) -> Result<bool, String> {
+        self.db.soft_delete_task(id).map_err(|e| e.to_string())
+    }
+
+    fn set_automation_enabled(&self, id: i64, enabled: bool) -> Result<bool, String> {
+        self.db
+            .set_automation_enabled_rescheduled(id, enabled)
+            .map_err(|e| e.to_string())
+    }
+
+    fn run_automation(&self, id: i64) -> Result<bool, String> {
+        // Marks it due; the kernel's scheduler fires it under the claim that
+        // already de-duplicates a running TUI and a headless tick. Nothing here
+        // executes an action.
+        self.db
+            .trigger_automation_now(id)
+            .map_err(|e| e.to_string())
+    }
+
+    fn delete_automation(&self, id: i64) -> Result<bool, String> {
+        self.db.delete_automation(id).map_err(|e| e.to_string())
+    }
+}
+
 /// A [`ServiceLock`](crate::session::plugin_store::ServiceLock) backed by the
 /// `plugin_service_locks` table.
 ///

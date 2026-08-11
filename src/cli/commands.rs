@@ -384,14 +384,16 @@ fn run_plugin_command(
     let path = crate::paths::database_file().ok_or("cannot resolve the database path")?;
     let lock_db = crate::storage::Database::open(&path).map_err(|e| e.to_string())?;
     let lock = crate::storage::plugins::DbServiceLock::new(lock_db, "cli");
-    let store: crate::session::plugin_store::PluginStoreFactory = std::sync::Arc::new(|| {
-        crate::storage::plugins::DbPluginStore::open()
-            .map(|s| Box::new(s) as Box<dyn crate::session::plugin_store::PluginStore>)
-    });
+    let store = super::plugins::store_factory();
 
     let mut host = crate::plugin::ServiceHost::new(crate::plugin::ExecutionBounds::default());
-    host.start(discovered, &lock, Some(store))
-        .map_err(|e| e.to_string())?;
+    host.start(
+        discovered,
+        &lock,
+        Some(store),
+        Some(super::plugins::writer_factory()),
+    )
+    .map_err(|e| e.to_string())?;
     let result = host.run_command(plugin, entry, args);
     host.stop_all(&lock);
     result.map_err(|e| e.to_string())

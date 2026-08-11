@@ -646,18 +646,19 @@ impl App {
     }
 
     /// Toggle an automation's enabled state, recomputing `next_run_at` on enable.
+    ///
+    /// The recompute lives in `Database::set_automation_enabled_rescheduled` rather
+    /// than here, because a plugin granted the automation-write capability performs
+    /// the same operation — and "a user toggled it" and "a plugin toggled it" must
+    /// not be two behaviours with one name.
     fn toggle_automation_by_id(&mut self, id: i64) {
-        let Ok(Some(mut auto)) = self.db.get_automation(id) else {
+        let Ok(Some(auto)) = self.db.get_automation(id) else {
             return;
         };
-        auto.enabled = !auto.enabled;
-        auto.next_run_at = if auto.enabled {
-            auto.schedule
-                .next_after(crate::sync::current_time_millis(), auto.timezone.as_deref())
-        } else {
-            None
-        };
-        if let Err(e) = self.db.update_automation(&auto) {
+        if let Err(e) = self
+            .db
+            .set_automation_enabled_rescheduled(id, !auto.enabled)
+        {
             error!("Failed to toggle automation {id}: {e}");
         }
         self.refresh_automations();

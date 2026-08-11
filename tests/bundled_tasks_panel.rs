@@ -79,6 +79,8 @@ impl Case {
         self.rows
             .iter()
             .map(|r| TaskPaneEntry {
+                // Not drawn by either pane; fixed so the trees stay comparable.
+                id: 0,
                 title: r.title.to_string(),
                 status: r.status,
                 match_positions: r.matches.clone(),
@@ -125,6 +127,7 @@ impl Case {
                     .native_rows(width, height)
                     .into_iter()
                     .map(|r| TaskSnapshot {
+                        id: 0,
                         title: r.title,
                         status: r.status.as_str(),
                         selected: r.selected,
