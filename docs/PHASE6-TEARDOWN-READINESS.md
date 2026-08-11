@@ -75,7 +75,7 @@ it, not a refactor done in pieces.
 | Tasks | `src/ui/tasks_panel.rs` | `tasks` | the native pane |
 | Automations | `src/ui/automations_panel.rs` | absent | the native pane |
 | File viewer | `src/ui/file_viewer.rs` | `file-viewer` | the native pane |
-| Global search | `src/ui/global_search.rs` | absent | the native pane |
+| Global search | `src/ui/global_search.rs` | none possible yet (PHASE4 §10) | the native pane |
 | Code review | `src/ui/code_review.rs` | absent | the native pane |
 | Session list | `src/ui/project_list.rs` | absent | the native pane |
 
@@ -83,6 +83,13 @@ it, not a refactor done in pieces.
 express for the *first* of those panes; all five of its gaps are now closed
 (ADR-26, ADR-27, ADR-28), and §8 and §9 record what the second and third ports
 needed on top of them (ADR-29, ADR-30).
+
+One row in the table above will not fill in by porting harder. §10 of the same
+document records **global search as structurally unportable** — it is a mode, not
+a pane: it owns the interface's input, restyles rows in three panes it does not
+own, and writes their cursors and the focus, none of which a plugin pane may do.
+`tests/global_search_pane_gap.rs` holds that verdict as probes, so whoever closes
+one of its blockers is told to revisit it.
 
 **A pane's row is ready only on handover, not on existence.** Three panes now show
 why the distinction is load-bearing rather than pedantic: each plugin exists and

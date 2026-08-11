@@ -15,8 +15,10 @@ Status of the audit: **all five gaps closed** (inline lines, commit `6e0c7cc`;
 style tokens and gauges, ADR-26; kernel state, ADR-27; the layout and the
 keyboard, ADR-28). §8 records what the **second** port — the tasks pane, ADR-29 —
 needed on top of them, and §9 the **third** — the file viewer, ADR-30, which
-closed §8's scrolling row. Those two sections are the only part of this document
-still a worklist.
+closed §8's scrolling row. §10 records the first surface on the phase's list that
+was **not ported at all**: global search is not a pane, and no widening of the
+pane API would have made it one. Those three sections are the only part of this
+document still a worklist.
 
 The info panel has now been ported twice — first to the view tree in every
 build (ADR-26), then reproduced as the **bundled `info-panel` plugin** (ADR-27) —
@@ -406,3 +408,120 @@ token-less primary foreground drew every row). No formatter, so §7's
 which is now strong evidence that it should stay undesigned. No new architecture
 edge, and no change to the demand or change gates: the snapshot took a fifth
 section the way it took its fourth.
+
+## 10. Global search: the first surface that is not a pane
+
+The three ports above answered "did the API suffice" with a widening. Global
+search answers it differently: **no widening of the pane API would have
+sufficed, because the surface is not a pane.** It is recorded here rather than
+ported, and no bundled plugin was shipped. The blockers below are re-derived from
+the source by `tests/global_search_pane_gap.rs`, so closing one fails that test
+and names it — a verdict in prose expires without telling anyone.
+
+**What the surface does**, from `src/app/search.rs`, where only the first item is
+a rectangle:
+
+1. draws a strip — query, per-scope counts, a grouped result list, key hints;
+2. **computes** the search: fuzzy metadata over sessions, tasks and automations,
+   a substring scan of the active session's file tree, and a debounced scan of
+   **every session's live vt100 screen** (`App::session_content_match`);
+3. **restyles rows in three panes it does not own** — matched characters accent +
+   bold + underlined, unmatched rows muted + dim (`ui::highlight`, applied inside
+   `project_list`, `tasks_panel` and `automations_panel` from the query the view
+   hands each of them);
+4. **moves those panes' cursors** as a live preview, and forces a hidden panel
+   visible to do it;
+5. **takes focus** on `Enter`, or restores focus, three selections and two panel
+   toggles from `SearchSnapshot` on `Esc`.
+
+Items 3–5 are the definition of a mode: a surface that owns the whole interface's
+input and appearance while it is up. A plugin pane is a rect plus its own keys,
+and each of the four walls it hits is a decision with a reason attached, not an
+oversight.
+
+**The precise claim, because the loose one would be wrong.** The search's
+*verdict* already crosses the boundary: `TaskSnapshot` publishes `dimmed` and
+`match_positions`, `FileNodeSnapshot` publishes `matched`, and that is how the
+bundled tasks and file-viewer panes reproduce v1's dim-and-underline appearance
+exactly. A plugin pane is therefore a pane the search *affects*. What has no path
+is the other direction — being the surface that *produces* the effect — and every
+row below is one form of that asymmetry.
+
+**Structural — no node closes these:**
+
+| Blocked | Where the host stands | What it would take |
+|---|---|---|
+| a full-width band above the footer | `PaneSlot` is a closed set whose only member is `Right`; a plugin pane is seated only by `LayoutParams::right_regions`, while the strip's band is `RegionId::GlobalSearch` | a band slot **and** a declared height, which is the geometry the model has refused a plugin three times (ADR-26, ADR-29, ADR-30) |
+| the query and the results | no capability publishes either | either the plugin reads every session's screen — the widest read in the application, 500 lines per session of raw agent output — or the kernel does the search and publishes the strip's *rendering*, which §8's rule forbids |
+| **producing** the restyling of rows in other panes | the verdict already crosses *outward* (a published task row carries `dimmed` + `match_positions`, a file row `matched`), which is how the bundled tasks and file-viewer panes reproduce it — but each pane applies it to *its own* rows, and nothing carries a query the other way | a channel by which plugin state changes a *native* pane's appearance — so a plugin whose own pane is hidden could restyle the visible ones, which is the reach `pane_visibility` exists to bound |
+| move a cursor, take focus, restore a snapshot | the kernel-state channel is read-only by construction: every binding under `Sessions`/`Metrics`/`Automations`/`Tasks`/`Files` reads a published snapshot | a write channel — i.e. any installed plugin may move the user's cursor and take focus |
+
+**Vocabulary — cheap, and left open on purpose:**
+
+| Blocked | Where the host stands |
+|---|---|
+| the strip's bordered block, titled ` Search ` | no frame node, and a pane's frame is the host's (`focus_block` in `App::render_plugin_panes`); §9 recorded the same gap for the file viewer's search bar, so this is its **second** consumer |
+| a hint row pinned to the last line under a `Min(0)` list | `Column` stacks children at their natural height from the top; §9's "bottom-anchored fixed-height region" again |
+| the search accent (`Theme::search_bar`) | `StyleToken` names no such role, and a plugin may name no colour |
+| the italic snippet line under a content match | `TextStyle` carries bold, dim, underline and the selection role |
+
+**What a plugin *can* build here today**, said so the record is not read as "the
+API is empty": with `input` plus the state capabilities, a plugin can collect its
+own query and render its own filtered list, in its own pane, over the published
+sections — task titles, automation labels, the open file tree's basenames, and the
+active session's name, agent and repo. What it cannot do is search the *other*
+sessions, scan any terminal, restyle a native pane, or go to what was chosen. That
+is a fuzzy picker, and a useful one; it is not global search.
+
+They are not closed here because closing them would put a fourth emphasis and a
+frame node in the catalogue for a pane that is not being shipped. A vocabulary
+gap is worth closing when a pane needs it to *ship*; none of these does.
+
+**The port that was available, and why it was refused.** Add a `search`
+capability, publish `{query, results, selected}`, refactor the strip into a
+`search_tree`, and ship a bundled pane that reproduces it. Tree equality was
+reachable. It was refused because the pane would sit in the right column beside
+the real strip — searching nothing, highlighting nothing, previewing nothing and
+jumping nowhere — while the kernel kept doing all five behaviours and handed it
+the pixels. It could not even own the query: a pane declaring `input` collects
+keystrokes while *it* is focused, but nothing carries a query it collected into
+`GlobalSearchState`, so what it typed would search nothing. Phase 4's own
+rule is that *a gap worked around by a shortcut a third party could not take must
+be recorded as still open*; here the shortcut is the feature. The same objection
+that stopped ADR-27 from publishing `"8.0/16.0 GB"` stops this: a result's
+`label` and `snippet` are the strip's output — ordered, capped at
+`MAX_PER_GROUP`, truncated to 120 chars, for the strip — not kernel state a pane
+interprets.
+
+**The useful half of the finding: the shape is a provider, not a pane.** Global
+search's *surface* is kernel-owned by nature — docked chrome, owning input,
+editing other panes — and none of that is work a third party wants. What a third
+party plausibly wants is to contribute a **scope**: search my notes, my open PRs,
+my shell history. That asks for three things, each *narrower* than its pane-model
+equivalent: a hook called with the query returning results as data (instead of
+reading every session's screen); a result carrying an opaque target token the
+kernel resolves (instead of a write channel into focus); and nothing at all about
+the strip (instead of a band slot, a frame node, a token and an emphasis). It is
+closer to the command registry — host-invoked, manifest-declared — than to a
+pane. It is deliberately **not designed here**: two of the remaining surfaces in
+this phase are also not plain panes, and a non-pane extension point designed from
+one consumer is the mistake §7 warned about for `thurbox.format.*`.
+
+**What this does not claim.** Not that the strip's *rendering* is inexpressible —
+the four vocabulary rows are the whole distance, and the record says so. Not that
+a tree-equality oracle was attempted and failed: none was written, because
+refactoring `render_global_search` into a `search_tree` is the first step of the
+port that is not happening. The vocabulary rows come from reading the renderer's
+ratatui calls, which §6 named as the method that finds what reading the node
+catalogue misses. And no ADR was added, deliberately: nothing about the host
+changed, and the rejected alternatives live in the change's `design.md`.
+
+**What it means for the two surfaces left.** The phase's remaining order is code
+review and the session list, and neither is a plain pane either: the code-review
+view owns the central pane, a compose sub-mode and a column in another slot,
+while selecting a row in the session list *is* switching the application's active
+session (a write, blocked by the same wall as row four above). So the honest
+reading of §6's "ordering" finding is stronger than it was: the phase's list is
+not sorted by difficulty but by *kind*, and the panes are done. What is left needs
+the non-pane extension point, which is the next thing to design rather than the
+next thing to port.
