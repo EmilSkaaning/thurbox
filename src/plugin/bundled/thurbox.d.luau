@@ -272,8 +272,16 @@ export type TaskEntry = {
 -- `focused` is whether the task pane holds focus, which changes what an empty
 -- list should say: naming the key that adds a task is only honest when the pane
 -- can receive it.
+--
+-- `cursor` is the 1-based row the cursor is on — hand it straight to `ui.list`'s
+-- second argument and your pane scrolls. It is **not** the same fact as a row's
+-- `selected`: this one says which row, that one says the row is drawn as the
+-- cursor's, and only the second waits for the pane to be focused. Anchoring on
+-- `selected` instead would make your copy jump back to its first row whenever
+-- thurbox's own pane loses focus.
 export type TaskList = {
     entries: { TaskEntry },
+    cursor: number?,
     focused: boolean,
 }
 

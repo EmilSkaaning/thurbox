@@ -256,6 +256,22 @@ pub struct TaskSnapshot {
 pub struct TasksSnapshot {
     /// One entry per row, in the order the kernel lists them.
     pub entries: Vec<TaskSnapshot>,
+    /// Which row the pane's cursor is on — the **scroll anchor**, zero-based
+    /// into `entries`.
+    ///
+    /// Deliberately separate from [`TaskSnapshot::selected`], and the split is
+    /// the one [`FilesSnapshot::selected`] established: this says *which row*,
+    /// that says *this row is drawn as the cursor's*. Only the second is gated
+    /// on the cursor being visible, because a list has to scroll to its cursor
+    /// whether or not thurbox is currently drawing one — a pane that anchored
+    /// on the appearance would jump back to its first row the moment the native
+    /// pane lost focus.
+    ///
+    /// `None` when there is no row to name, and never an index past the
+    /// published rows: an anchor into rows a pane never received would make the
+    /// kernel's own windowing meaningless (the rule [`FilesSnapshot`] states
+    /// for its own bound).
+    pub cursor: Option<usize>,
     /// Whether the task pane holds focus, which is the one thing besides the
     /// rows that changes what is drawn: the empty-state line names the key that
     /// adds a task only when the pane can receive it.
@@ -738,25 +754,25 @@ mod tests {
             linked: true,
             match_positions: vec![0, 5],
         };
+        let snap = |entries: Vec<TaskSnapshot>, cursor| TasksSnapshot {
+            entries,
+            cursor,
+            focused: true,
+        };
         assert_eq!(
-            TasksSnapshot {
-                entries: vec![row(false)],
-                focused: true
-            },
-            TasksSnapshot {
-                entries: vec![row(false)],
-                focused: true
-            }
+            snap(vec![row(false)], Some(0)),
+            snap(vec![row(false)], Some(0))
         );
         assert_ne!(
-            TasksSnapshot {
-                entries: vec![row(false)],
-                focused: true
-            },
-            TasksSnapshot {
-                entries: vec![row(true)],
-                focused: true
-            }
+            snap(vec![row(false)], Some(0)),
+            snap(vec![row(true)], Some(0))
+        );
+        // The anchor is part of the section's identity too: a cursor that moved
+        // while every row's appearance stayed put must still republish, or a pane
+        // would keep windowing to the row the user left.
+        assert_ne!(
+            snap(vec![row(false)], Some(0)),
+            snap(vec![row(false)], Some(1))
         );
     }
 

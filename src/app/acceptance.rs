@@ -5041,6 +5041,41 @@ fn pane_context_describes_the_task_list() {
     assert!(!focused.entries[1].selected);
 }
 
+/// The **anchor** is not the appearance: a pane windows to its cursor even while
+/// the cursor is not being drawn, so the index crosses whatever holds focus.
+///
+/// Asserted next to `pane_context_describes_the_task_list`'s focus-gated
+/// `selected` because the pair *is* the rule (ADR-38): publishing one and deriving
+/// the other in either direction is what this pins against.
+#[test]
+fn pane_context_publishes_the_task_cursor_whatever_holds_focus() {
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(1);
+    for title in ["write it", "ship it", "land it"] {
+        h.app
+            .db
+            .create_task(&crate::storage::tasks::NewTask::local(title))
+            .unwrap();
+    }
+    h.app.refresh_tasks();
+
+    // Unfocused: no row is drawn as the cursor's, and the anchor is still there.
+    let bare = h.app.build_pane_context().tasks;
+    assert!(bare.entries.iter().all(|t| !t.selected));
+    assert_eq!(bare.cursor, Some(0));
+
+    // Focused and moved: both move together.
+    h.key(KeyCode::F(5), KeyModifiers::NONE);
+    h.key(KeyCode::Char('j'), KeyModifiers::NONE);
+    let moved = h.app.build_pane_context().tasks;
+    assert_eq!(moved.cursor, Some(1));
+    assert!(moved.entries[1].selected);
+
+    // An empty list has no row to anchor on.
+    h.app.features.tasks = false;
+    assert_eq!(h.app.build_pane_context().tasks.cursor, None);
+}
+
 /// With the feature off thurbox draws no task list at all, so a pane advertising
 /// one would surface something the user switched off.
 #[test]
@@ -5075,10 +5110,17 @@ fn pane_context_bounds_how_many_task_rows_it_publishes() {
             .unwrap();
     }
     h.app.refresh_tasks();
+    let published = h.app.build_pane_context().tasks;
     assert_eq!(
-        h.app.build_pane_context().tasks.entries.len(),
+        published.entries.len(),
         crate::session::pane_context::MAX_TASK_ROWS
     );
+
+    // And a cursor past the bound is not published: an anchor into rows the pane
+    // never received would window it to nothing, which is the rule the file
+    // section states for its own bound.
+    h.app.task_ui.task_panel_index = crate::session::pane_context::MAX_TASK_ROWS + 3;
+    assert_eq!(h.app.build_pane_context().tasks.cursor, None);
 }
 
 /// A changed task list is a changed snapshot; an unchanged one still publishes

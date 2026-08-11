@@ -9,12 +9,16 @@
 //!
 //! What is different here, and is the finding this pane produced: the tasks pane
 //! is the first ported pane whose rows depend on its **resolved size**. It fits
-//! each title to the column and windows the list around the selection, and a
-//! plugin has neither a width nor a height. So the comparison is run at a size
-//! where geometry adjusts nothing — asserted, not assumed, by
-//! [`the_comparison_size_adjusts_nothing`] — and the two cases where geometry
-//! *does* bite are pinned as enumerated divergences rather than absorbed by
-//! weakening the equality.
+//! each title to the column, and a plugin has no width. So the comparison is run
+//! at a size where that adjusts nothing — asserted, not assumed, by
+//! [`the_comparison_size_adjusts_nothing`] — and the one case where it bites is
+//! pinned as an enumerated divergence rather than absorbed by weakening the
+//! equality.
+//!
+//! **Height is no longer one of them.** The plugin declares the row its cursor is
+//! on and the kernel windows the list, so the claim here is the file viewer's
+//! stronger one: not only equal trees but the same painted **frame** at a size
+//! where the pane scrolls ([`the_plugin_paints_the_native_frame_when_the_pane_scrolls`]).
 //!
 //! It lives in `tests/` for the same reason as the info panel's: this is the one
 //! place that must see both `ui::tasks_panel` and `plugin::PluginHost`, and an
@@ -25,17 +29,20 @@
 
 use std::path::PathBuf;
 
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+
 use thurbox::plugin::{discovery, ExecutionBounds, PluginHost};
+use thurbox::session::motion::FrameTable;
 use thurbox::session::pane_context::{PaneContext, TaskSnapshot, TasksSnapshot};
 use thurbox::session::view_tree::ViewNode;
 use thurbox::session::TaskStatus;
-use thurbox::ui::tasks_panel::{tasks_tree, visible_rows, TaskPaneEntry, TaskPaneState, TaskRow};
+use thurbox::ui::tasks_panel::{task_rows, tasks_tree, TaskPaneEntry, TaskPaneState, TaskRow};
 use thurbox::ui::FocusLevel;
 
-/// A column and a height with room to spare, so `visible_rows` fits no title and
-/// windows no row. Both are checked rather than trusted.
+/// A column with room to spare, so `task_rows` fits no title. Checked rather than
+/// trusted by [`the_comparison_size_adjusts_nothing`].
 const WIDE: u16 = 60;
-const TALL: u16 = 40;
 
 /// The process-wide snapshot slot is global, so every case here runs one at a
 /// time — otherwise one case's publication would answer another's reader.
@@ -90,10 +97,11 @@ impl Case {
             .collect()
     }
 
-    /// The rows the native pane resolves at `width` × `height`.
-    fn native_rows(&self, width: u16, height: u16) -> Vec<TaskRow> {
+    /// The rows the native pane resolves at `width`. Every row, in the model's
+    /// order: the window is the renderer's, resolved from the cursor below.
+    fn native_rows(&self, width: u16) -> Vec<TaskRow> {
         let entries = self.entries();
-        visible_rows(
+        task_rows(
             &TaskPaneState {
                 entries: &entries,
                 selected: self.selected,
@@ -101,13 +109,16 @@ impl Case {
                 preview_selected: self.preview,
             },
             width,
-            height,
         )
-        .rows
     }
 
-    fn native_tree(&self, width: u16, height: u16) -> ViewNode {
-        tasks_tree(&self.native_rows(width, height), self.is_focused())
+    /// The cursor's row, clamped the way both panes clamp it.
+    fn cursor(&self) -> Option<usize> {
+        (!self.rows.is_empty()).then(|| self.selected.min(self.rows.len() - 1))
+    }
+
+    fn native_tree(&self, width: u16) -> ViewNode {
+        tasks_tree(&self.native_rows(width), self.cursor(), self.is_focused())
     }
 
     fn is_focused(&self) -> bool {
@@ -120,11 +131,11 @@ impl Case {
     /// the kernel is what knows which row the cursor is visibly on, so publishing
     /// that per row is what stops the plugin having to reconstruct a rule it
     /// cannot see the inputs to.
-    fn context(&self, width: u16, height: u16) -> PaneContext {
+    fn context(&self, width: u16) -> PaneContext {
         PaneContext {
             tasks: TasksSnapshot {
                 entries: self
-                    .native_rows(width, height)
+                    .native_rows(width)
                     .into_iter()
                     .map(|r| TaskSnapshot {
                         id: 0,
@@ -136,6 +147,7 @@ impl Case {
                         match_positions: r.match_positions,
                     })
                     .collect(),
+                cursor: self.cursor(),
                 focused: self.is_focused(),
             },
             ..PaneContext::default()
@@ -338,6 +350,23 @@ fn render(host: &PluginHost) -> ViewNode {
         .expect("the pane renders")
 }
 
+/// Paint a tree into a bare buffer of the given size.
+///
+/// The renderer both panes use, so a frame comparison is a statement about the
+/// trees rather than about two painters.
+fn paint(tree: &ViewNode, width: u16, height: u16) -> Buffer {
+    let area = Rect::new(0, 0, width, height);
+    let mut buf = Buffer::empty(area);
+    thurbox::ui::plugin_pane::render_tree(
+        tree,
+        area,
+        &thurbox::ui::theme::current(),
+        &FrameTable::default(),
+        &mut buf,
+    );
+    buf
+}
+
 /// The headline claim: for every case, the plugin's tree equals the native
 /// pane's. Equal trees paint identically, so this is byte-identity of the pane.
 #[test]
@@ -346,9 +375,9 @@ fn the_plugin_builds_the_native_panes_view_tree() {
     let host = host();
 
     for case in cases() {
-        thurbox::session::pane_context::publish(case.context(WIDE, TALL));
+        thurbox::session::pane_context::publish(case.context(WIDE));
         let plugin = render(&host);
-        let native = case.native_tree(WIDE, TALL);
+        let native = case.native_tree(WIDE);
         assert_eq!(
             plugin, native,
             "the plugin's tree diverges from the native pane for `{}`",
@@ -357,17 +386,18 @@ fn the_plugin_builds_the_native_panes_view_tree() {
     }
 }
 
-/// The equality above is only meaningful at a size where the kernel's geometry
-/// step is a no-op, so that is asserted rather than assumed: no title fitted, no
-/// row windowed away.
+/// The equality above is only meaningful at a width where the kernel's fitting
+/// step is a no-op, so that is asserted rather than assumed: no title fitted. No
+/// row is windowed away at any width — the tree carries every one — which the row
+/// count here also pins.
 #[test]
 fn the_comparison_size_adjusts_nothing() {
     for case in cases() {
-        let rows = case.native_rows(WIDE, TALL);
+        let rows = case.native_rows(WIDE);
         assert_eq!(
             rows.len(),
             case.rows.len(),
-            "`{}` lost rows to windowing at the comparison size",
+            "`{}` lost rows before the tree, which windows nothing",
             case.name
         );
         for (resolved, original) in rows.iter().zip(&case.rows) {
@@ -388,12 +418,13 @@ fn the_compared_tree_is_a_whole_pane() {
         .into_iter()
         .find(|c| c.name == "a running search")
         .expect("the search case");
-    let tree = case.native_tree(WIDE, TALL);
-    let rows = match &tree {
-        ViewNode::List { children: rows, .. } => rows,
+    let tree = case.native_tree(WIDE);
+    let (rows, selected) = match &tree {
+        ViewNode::List { children, selected } => (children, selected),
         other => panic!("expected a list, got {}", other.kind_name()),
     };
     assert_eq!(rows.len(), 3);
+    assert_eq!(*selected, Some(2), "the list carries its cursor");
     // Every row is a line of several styled runs — the shape a single text node
     // could not carry, which is why a row is a `line` at all.
     let runs: usize = rows.iter().map(|r| r.children().len()).sum();
@@ -426,9 +457,9 @@ fn a_title_wider_than_the_column_is_fitted_by_the_kernel_only() {
     const NARROW: u16 = 18;
 
     // The plugin reads what the kernel publishes, which is not fitted to a width.
-    thurbox::session::pane_context::publish(case.context(WIDE, TALL));
+    thurbox::session::pane_context::publish(case.context(WIDE));
     let plugin = render(&host);
-    let native = case.native_tree(NARROW, TALL);
+    let native = case.native_tree(NARROW);
     assert_ne!(
         plugin, native,
         "if these ever agree, the pane stopped fitting titles and this \
@@ -461,53 +492,68 @@ fn a_title_wider_than_the_column_is_fitted_by_the_kernel_only() {
     assert!(text_of(&plugin).contains('⇄'));
 }
 
-/// **Enumerated divergence 2: more rows than the pane has lines.** The kernel
-/// windows them around the selection; the plugin's copy draws every published row
-/// from the first and the renderer clips the overflow, so a selection below the
-/// fold is not visible in the plugin's pane.
+/// **The gap that closed: a list longer than the pane.** The previous port left
+/// this as an enumerated divergence — the kernel windowed its rows around the
+/// selection while the plugin's copy drew from the first row, so a cursor below
+/// the fold was invisible in the plugin's pane. The plugin now names the row its
+/// cursor is on and the *renderer* resolves the window, so both panes scroll
+/// through one implementation.
 ///
-/// Closing it needs a list node carrying a selected index, windowed by the kernel
-/// from the height it has — the same shape the gauge node took for width. It is
-/// the gap the session-list port will have to close, since a session list that
-/// cannot scroll to its selection is not one.
+/// The claim is therefore the file viewer's stronger one: not equal trees but the
+/// same painted frame at a height where the pane has to scroll. Tree equality
+/// alone could not say it — the two trees are equal at *every* height, which is
+/// the point of moving the window into the renderer, so only a paint can show the
+/// window was resolved the same way.
 #[test]
-fn a_list_longer_than_the_pane_is_windowed_by_the_kernel_only() {
+fn the_plugin_paints_the_native_frame_when_the_pane_scrolls() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
     let host = host();
-    let titles: Vec<&'static str> = vec!["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7"];
+    // Static titles because a fixture row borrows its title for the test's life,
+    // and long enough that a scrolled frame is unmistakable in the assertion below.
+    const TITLES: [&str; 12] = [
+        "task number 00",
+        "task number 01",
+        "task number 02",
+        "task number 03",
+        "task number 04",
+        "task number 05",
+        "task number 06",
+        "task number 07",
+        "task number 08",
+        "task number 09",
+        "task number 10",
+        "task number 11",
+    ];
+    // The cursor at the bottom of a list four times the pane's height: the case
+    // where a copy that could not scroll shows none of what matters.
     let case = Case {
         name: "tall",
-        rows: titles.iter().map(|t| row(t, TaskStatus::Todo)).collect(),
-        selected: 7,
+        rows: TITLES.iter().map(|t| row(t, TaskStatus::Todo)).collect(),
+        selected: TITLES.len() - 1,
         focus: FocusLevel::Focused,
         preview: false,
     };
-    const SHORT: u16 = 3;
+    thurbox::session::pane_context::publish(case.context(WIDE));
 
-    thurbox::session::pane_context::publish(case.context(WIDE, TALL));
-    let plugin_rows = match render(&host) {
-        ViewNode::List { children: rows, .. } => rows.len(),
-        other => panic!("expected a list, got {}", other.kind_name()),
-    };
-    let native = case.native_rows(WIDE, SHORT);
+    const WIDTH: u16 = 30;
+    const HEIGHT: u16 = 3;
+    let plugin = paint(&render(&host), WIDTH, HEIGHT);
+    let native = paint(&case.native_tree(WIDE), WIDTH, HEIGHT);
+    assert_eq!(plugin, native, "the plugin's frame is not the native frame");
 
-    assert_eq!(native.len(), SHORT as usize, "the kernel windows");
-    assert_eq!(plugin_rows, titles.len(), "the plugin draws them all");
+    // And that frame is the *scrolled* one — otherwise the two could agree by
+    // both being wrong.
+    let text: String = (0..HEIGHT)
+        .flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
+        .map(|(x, y)| plugin[(x, y)].symbol().to_string())
+        .collect();
     assert!(
-        native.last().expect("a windowed row").selected,
-        "the kernel's window keeps the cursor in view"
+        text.contains("task number 11"),
+        "the cursor's row is drawn: {text:?}"
     );
-    // The plugin's pane would show rows 0..2 and not the selected row 7 — which
-    // is exactly the cost this divergence names.
     assert!(
-        !case
-            .context(WIDE, TALL)
-            .tasks
-            .entries
-            .iter()
-            .take(SHORT as usize)
-            .any(|e| e.selected),
-        "the selected row is below the fold of the plugin's copy"
+        !text.contains("task number 00"),
+        "the top scrolled off: {text:?}"
     );
 }
 
@@ -546,7 +592,7 @@ fn the_first_render_before_any_publication_succeeds() {
     thurbox::session::pane_context::publish(PaneContext::default());
     assert_eq!(
         render(&host),
-        tasks_tree(&[], false),
+        tasks_tree(&[], None, false),
         "an empty publication draws the same pane an empty task list does"
     );
 }

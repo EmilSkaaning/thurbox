@@ -957,3 +957,118 @@ The oracle that *can* fail already exists and is what the port relies on:
 against the retained pre-port renderer. The lesson is §6's, one level up: the
 audit method there was *read the pane's calls, not the node catalogue*; here it
 is *check that the proof could have failed, not that it passed*.
+
+## 15. The first handover attempted on a pane with keys: the tasks pane
+
+§14 attempted the handover on the info panel because it takes no input, and hit a
+blocker about the *build*. This section is the attempt on the first pane that
+does take input — the tasks pane — and it produces a second, independent blocker
+that has nothing to do with the release. Half of the parity work landed; the half
+that did not is the half everyone assumed would be easy.
+
+### What landed: the pane's copy scrolls, and it is proved by a frame
+
+§8's table left this pane two geometry divergences. §9 closed the second one's
+mechanism for every remaining pane — a list names the row its cursor is on and
+the kernel windows it — and this pane never took it up, because the published
+task section carried **no cursor index**. Its per-row `selected` flag could not
+serve as one: that flag is gated on the cursor being *visible*, so a copy
+anchored on it would jump back to row 0 the moment thurbox's own pane lost focus.
+
+Closed by publishing the anchor separately from the appearance (ADR-38), which is
+§9's own rule with its second consumer. The consequences worth carrying:
+
+- the claim for this pane is now the file viewer's stronger one — the plugin
+  paints the **native frame** at a height where the pane scrolls, not merely an
+  equal tree. Tree equality alone could not have said it, because the two trees
+  are equal at *every* height once the window moved into the renderer;
+- `ui::tasks_panel` consults a width and never a height. The window is resolved
+  once, by the renderer, for both panes — two implementations would be two panes
+  disagreeing about which rows sit beside the cursor;
+- out-of-range split into two cases that are not the same: a cursor past the end
+  of a *shortened* list clamps (what the native pane always did), a cursor past
+  the *published bound* is not published (what the file section already ruled).
+
+§8's **first** divergence is unchanged and is now the pane's only rendering one: a
+title too wide for the column keeps its ellipsis in the native pane and loses it
+in the plugin's. That is the ellipsizing-clip row, and it now has three recorded
+consumers (§8, §11's hunk header, §13's fitting) without a shipping pane that
+needs it.
+
+### What did not land: every key, and the reason is not the editor
+
+Parity was defined as the pane's ten `KeyContext::Tasks` actions. Two are
+expressible, eight are not, and the pane is **not** replaced.
+
+| Action | What the native pane does | What a plugin would need |
+|---|---|---|
+| `TasksNext` / `TasksPrev` (`j`/`k`) | move `task_ui.task_panel_index` | a **view write** — nothing writes a cursor |
+| `TasksPreviewDown` / `TasksPreviewUp` | scroll the **central pane's** preview | a view write, plus a surface a right-column pane does not own |
+| `TasksNew` (`n`) | create a task, then focus the editor | a create binding, a central seat, a text write |
+| `TasksOpen` (`e`/`Enter`) | focus `InputFocus::TaskEditor` | a focus write, plus that seat |
+| `TasksRun` (`r`) | a modal whose outcomes are *type a prompt into a running session* or *spawn one* | a modal, plus two powers no capability names |
+| `TasksOpenRelated` (`o`) | switch the active session | a view write |
+| `TasksCycleStatus` (`Space`) | set the task's status | **nothing new** (ADR-35) |
+| `TasksDelete` (`d`) | soft-delete the task | **nothing new** (ADR-35) |
+
+**The finding: the last two do not survive either.** `Capability::TasksWrite`
+addresses a task by id and the ids arrive on the published rows, so `Space` and
+`d` look portable. They are not, because of *which* row they would act on. A
+plugin receives a key only while one of its own panes holds focus
+(`InputFocus::PluginPane`); `App::build_tasks_snapshot` marks a row as the
+cursor's only while the **native** pane holds focus or a search preview moves it.
+Those conditions are disjoint. While the plugin can be pressed at, the kernel
+publishes no cursor's row; while it publishes one, the plugin receives nothing.
+
+So the port fails at `j`, not at the editor, and the one-sentence form is worth
+memorising: **a plugin pane's keys and the kernel's cursor cannot be live at the
+same time.** `tests/tasks_pane_input_gap.rs` keeps that sentence true — one probe
+per missing power, in §10's shape, with the record-versus-view-write distinction
+ADR-35 forced on the global-search gate written in from the start rather than
+retrofitted.
+
+Nothing here was worked around. Declaring `input` plus the two record-write keys
+was available and was refused: the pane would answer `Space` against a row it
+draws no cursor on, which is a worse pane than one that takes no keys — and
+`plugin::keymap` already refuses to publish a binding the host could not deliver,
+for exactly that reason.
+
+### The editor and the picker: answered with evidence, and they stay kernel
+
+The brief asked whether a plugin could own the central-pane editor and the
+trigger-time picker, or whether they stay kernel like the F1 editor under ADR-V21.
+They stay kernel, and each wall is a fact rather than a preference:
+
+| Surface | Walls |
+|---|---|
+| the central-pane editor | **seat** (`PaneSlot`'s only member is `Right`; the editor is drawn into the centre), **focus** (`InputFocus::TaskEditor` is a view write), **text** (`Capability::TasksWrite` states it grants no creation and no editing, because a task's title and description are authored in thurbox's own editor — so handing the editor over is the write the capability was defined to exclude) |
+| the trigger-time picker | **modal** (a manifest declares panes, commands, keys, a service, CLI verbs and spawn env — nothing that owns the interface's input), **reach** (its outcomes are typing into a running session's PTY and spawning a session; the vocabulary names neither, and `AutomationsWrite` — the widest grant defined — is careful to make even *running* a request the kernel fulfils) |
+
+`Capability::Spawn` is not a counter-example: it contributes environment to spawns
+thurbox already makes, which is not the power to start one.
+
+### What this means for the phase
+
+Two independent blockers now stand between a reproduction and a handover, and
+they are different kinds:
+
+1. **the build** (§14, ADR-37) — no released binary can draw a bundled pane. It
+   blocks all seven panes and is one release decision;
+2. **input** (this section, ADR-38) — a pane whose keys move a cursor cannot be
+   handed to a plugin at all, whatever the build does. It blocks the panes that
+   *have* keys, which is five of the seven: tasks, automations, the file viewer,
+   the session list, and the code review.
+
+The second is the more interesting one, because §14's three pane-level
+requirements (a seat, a toggle binding, event-driven render) are all closable
+without changing what a plugin *is*. This is not: a plugin that may move the
+user's cursor and take focus is a different security story, and it is the same
+wall global search hit from the other side (§10's fourth structural row). So the
+honest reading of the phase is now:
+
+- the **read-only** panes (the info panel) are blocked only by the build;
+- every pane whose keys do more than draw needs a view-write channel designed
+  first — with its own change, its own bounds and its own argument about what an
+  installed plugin may do to the interface;
+- and `docs/PHASE6-TEARDOWN-READINESS.md`'s handover worklist should be read in
+  that order: the release flip, then the view-write design, then the panes.

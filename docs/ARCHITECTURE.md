@@ -1856,3 +1856,83 @@ cannot witness this pane, because all seven were captured with no active session
 and the pane renders nothing without one. The oracle that can fail is
 `tests/bundled_info_panel.rs`'s tree equality, which is what the port already
 relies on.
+
+## ADR-38: A list's cursor is an anchor, not an appearance — and a pane's keys need both
+
+**Context.** The tasks pane was to be the first native pane *replaced*: bring the
+bundled `tasks` plugin to parity with all ten of its `KeyContext::Tasks` actions,
+then delete `src/ui/tasks_panel.rs`. Two things came out of attempting it.
+
+The first is a rendering gap that could be closed. `docs/PHASE4-PANE-READINESS.md`
+§8 left this pane two geometry divergences; ADR-30 closed the second one's
+*mechanism* for every pane — a list node names the row its cursor is on and the
+kernel windows it — and the tasks pane never took it up, because the published
+task section carries no cursor index. Its per-row `selected` flag cannot serve as
+one: that flag is gated on the cursor being *visible* (the pane focused, or a
+search preview moving it), so a pane anchored on it would jump back to its first
+row whenever thurbox's own pane lost focus.
+
+The second is that the pane's **keys** cannot be ported, and not for the reason
+the attempt expected. The hard cases were assumed to be the two separate surfaces
+its keys open — the central-pane editor (`n`, `e`/`Enter`) and the trigger-time
+action picker (`r`). Those are unportable, for three walls each. But the port
+fails on the *first* key: `j`/`k` move `App::task_ui.task_panel_index`, which is
+view state, and the kernel-state channel is read-only by construction. And the two
+keys that need no new host power — `Space` and `d`, both already expressible as
+the record writes ADR-35 granted — cannot name the row they would act on: a plugin
+receives keys only while one of its own panes holds focus, and
+`App::build_tasks_snapshot` marks a row as the cursor's only while the **native**
+pane holds focus. The input path and the cursor path are disjoint.
+
+**Decision.**
+
+- **The task section publishes a cursor index, separate from the per-row selected
+  flag.** The index is the *anchor* — which row a list scrolls to — and is
+  published whatever holds focus. The flag is the *appearance* — this row is drawn
+  as the cursor's — and stays focus-gated. This is ADR-30's rule (the anchor is
+  the list's, the appearance is the run's) with its second consumer, so it is a
+  reuse rather than a design.
+- **The native pane's tree carries every row plus that cursor**, and the
+  *renderer* resolves the window through `ui::file_viewer::visible_window`. Both
+  panes therefore scroll through one implementation; the pane calls the same
+  helper again for its click hitboxes, which need the window as numbers rather
+  than as a paint. Mirrors `ui::file_viewer::render`.
+- **Out-of-range is two cases, resolved differently.** A cursor past the end of a
+  *shortened list* clamps, because that is what the native pane has always done
+  and the two must window alike. A cursor past the *published bound*
+  (`MAX_TASK_ROWS`) is not published at all, because an anchor into rows a pane
+  never received would window it to nothing — the rule the file section already
+  states.
+- **No key is declared and the native pane is not replaced.** The bundled plugin
+  keeps `capabilities = ["render", "tasks"]` and `default_visible = false`.
+- **The input verdict is a gate, not a paragraph**
+  (`tests/tasks_pane_input_gap.rs`), one probe per missing host power, each tagged
+  structural or vocabulary, in the shape `tests/global_search_pane_gap.rs`
+  established.
+
+**Rejected.** *Declare `input` plus the two record-write keys anyway* — the pane
+would answer `Space` against a row it draws no cursor on, and a key that acts on
+an invisible row is worse than a pane that takes none; `plugin::keymap` already
+refuses to publish a binding the host could not deliver, for the same reason.
+*Publish the row as selected while a plugin pane holds focus* — it would mark a
+cursor no key can move, and the rule would apply to every plugin pane reading
+tasks, which is designing an appearance rule from one blocked consumer. *Let the
+plugin own its own cursor in its own state* — its cursor and the kernel's would
+disagree, so `o`/`r`/`e` would act on a different row than the one highlighted,
+and the tree equality that is a Phase 4 port's deliverable could not be written.
+*Publish rows already windowed* — refused for the fourth time (ADR-26, ADR-29,
+ADR-30): the publisher has no height, and the plugin's pane is a different rect in
+the same layout. *Report the resolved rect into the plugin* — the same request, and
+the same answer: rendering would become width-dependent, so a resize must re-enter
+the VM before the frame that needs it.
+
+**Consequences.** The plugin's copy of the pane now scrolls where the native one
+does, so its claim is the file viewer's stronger one — the same painted **frame**
+at a height where the pane scrolls, not only an equal tree. `ui::tasks_panel`
+consults a width and never a height. One rendering divergence is left, and it is
+the same one three ports have now recorded: no node clips with an ellipsis, so a
+title too wide for the column loses its `…` in the plugin's copy. And the pane's
+keys stay the kernel's, with the reason checked rather than remembered: the
+tasks-plugin teardown row stays blocked — for a second, independent reason on top
+of ADR-37's — and the next person to try a handover meets the finding here rather
+than rediscovering it at `j`.

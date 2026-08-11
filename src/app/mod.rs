@@ -7779,7 +7779,7 @@ impl App {
         let cursor_visible = matches!(self.focus, InputFocus::TaskList)
             || self.global_search_preview_kind() == Some(crate::app::search::SearchKind::Task);
         let selected = self.task_ui.task_panel_index;
-        let entries = self
+        let entries: Vec<pc::TaskSnapshot> = self
             .task_pane_entries()
             .into_iter()
             .take(pc::MAX_TASK_ROWS)
@@ -7794,8 +7794,23 @@ impl App {
                 match_positions: e.match_positions,
             })
             .collect();
+        // The scroll anchor, published whatever holds focus — a pane windows to
+        // its cursor even while the cursor is not being drawn.
+        //
+        // Two out-of-range cases, and they are not the same. A cursor past the
+        // *end of a shortened list* is what the native pane clamps to the last
+        // row, so the anchor clamps with it or the two panes would window
+        // differently. A cursor past the *published bound* names a row the pane
+        // never received, so there is nothing honest to anchor on and it is
+        // absent — the rule the file section already states.
+        let cursor = if entries.is_empty() || selected >= pc::MAX_TASK_ROWS {
+            None
+        } else {
+            Some(selected.min(entries.len() - 1))
+        };
         pc::TasksSnapshot {
             entries,
+            cursor,
             focused: matches!(self.focus, InputFocus::TaskList),
         }
     }

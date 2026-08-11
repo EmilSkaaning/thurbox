@@ -18,10 +18,13 @@
 --    UTF-8 walk that turns them into runs is the plugin's — and it has to be
 --    exactly the host's walk, including its two edge rules, or a title with a
 --    multi-byte character in it would highlight the wrong bytes.
--- 3. **Nothing here knows the pane's size.** No title is truncated and no window
---    is chosen: the host resolves both, and this pane draws what it is given and
---    lets the renderer clip. The two consequences of that are enumerated in
---    `tests/bundled_tasks_panel.rs` rather than hidden.
+-- 3. **Nothing here knows the pane's size**, and it still scrolls. It names the
+--    row its cursor is on and the host windows the list to it from a height this
+--    plugin is never told, which is the same trade the gauge node made for width.
+--    What is *not* reproduced is title fitting — a title wider than the column is
+--    clipped by the renderer rather than ellipsized — and that one remaining
+--    divergence is enumerated in `tests/bundled_tasks_panel.rs` rather than
+--    hidden.
 
 local thurbox = require("@thurbox")
 local ui = thurbox.ui
@@ -189,6 +192,11 @@ return {
         for _, entry in ipairs(entries) do
             table.insert(rows, rowNode(entry))
         end
-        return ui.list(rows)
+        -- Declaring the cursor is what makes the pane scroll: the host keeps that
+        -- row in view from a height this plugin is never told. Note it is
+        -- `tasks.cursor` and not the row's own `selected` — see `TaskList` in
+        -- `thurbox.d.luau` for why anchoring on the appearance would stop
+        -- scrolling as soon as thurbox's pane lost focus.
+        return ui.list(rows, if tasks then tasks.cursor else nil)
     end,
 }

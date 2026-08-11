@@ -167,11 +167,13 @@ fn build_automation(lua: &Lua, a: &AutomationSnapshot) -> mlua::Result<Table> {
     Ok(t)
 }
 
-/// The task list: `{ entries = { … }, focused = bool }`.
+/// The task list: `{ entries = { … }, cursor = n?, focused = bool }`.
 ///
 /// A table rather than a `Nil`, for the automations reason — "there are no tasks"
 /// is knowledge the kernel has, so a pane iterates without a nil check. `entries`
-/// is a one-based array so `for _, entry in ipairs(tasks.entries)` works.
+/// is a one-based array so `for _, entry in ipairs(tasks.entries)` works, and
+/// `cursor` is a **one-based** index into it for the same reason
+/// [`files_table`]'s `selected` is: it is handed straight to `ui.list`.
 pub fn tasks_table(lua: &Lua, context: &PaneContext) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     let entries = lua.create_table()?;
@@ -179,6 +181,12 @@ pub fn tasks_table(lua: &Lua, context: &PaneContext) -> mlua::Result<Table> {
         entries.set(i + 1, build_task(lua, task)?)?;
     }
     t.set("entries", entries)?;
+    // One-based, because it is handed straight to `ui.list`'s selected argument
+    // and Lua's arrays are one-based. Spelled `cursor` rather than `selected`:
+    // a *row* already carries `selected`, and one table using the name for two
+    // different things (which row, versus this row is drawn as it) is how the
+    // two would get conflated.
+    set_opt(&t, "cursor", context.tasks.cursor.map(|i| i as u64 + 1))?;
     t.set("focused", context.tasks.focused)?;
     Ok(t)
 }
@@ -512,12 +520,15 @@ mod tests {
                     linked: true,
                     match_positions: vec![0, 5],
                 }],
+                cursor: Some(0),
                 focused: true,
             },
             ..PaneContext::default()
         };
         let t = tasks_table(&lua, &ctx).unwrap();
         assert!(t.get::<bool>("focused").unwrap());
+        // The scroll anchor, one-based: it is handed straight to `ui.list`.
+        assert_eq!(t.get::<u64>("cursor").unwrap(), 1);
         let entries: Table = t.get("entries").unwrap();
         assert_eq!(entries.raw_len(), 1);
         let row: Table = entries.get(1).unwrap();
@@ -556,6 +567,7 @@ mod tests {
                     linked: false,
                     match_positions: Vec::new(),
                 }],
+                cursor: None,
                 focused: false,
             },
             ..PaneContext::default()
@@ -579,6 +591,9 @@ mod tests {
         let entries: Table = t.get("entries").unwrap();
         assert_eq!(entries.raw_len(), 0);
         assert!(!t.get::<bool>("focused").unwrap());
+        // An empty list has no row to anchor on, and "absent means absent": a `0`
+        // would be an index `ui.list` refuses.
+        assert!(!t.contains_key("cursor").unwrap());
     }
 
     // ── the session list ──

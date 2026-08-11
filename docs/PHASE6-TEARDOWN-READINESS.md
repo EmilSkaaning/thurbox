@@ -92,6 +92,14 @@ own, and writes their cursors and the focus, none of which a plugin pane may do.
 `tests/global_search_pane_gap.rs` holds that verdict as probes, so whoever closes
 one of its blockers is told to revisit it.
 
+The tasks row is the first on which a **handover** was attempted with keys in the
+way, and PHASE4 §15 is the record: its rendering is now reproduced to the frame
+(the plugin's copy scrolls with the cursor, ADR-38), and eight of its ten keys
+need a power a plugin pane is not given. That is a second blocker beside ADR-37's,
+and a different kind — the build blocker is one release decision, this one is a
+question about what an installed plugin may do to the interface. It is step 8 of
+§4's worklist.
+
 The code-review row is the first that is **partly** filled: the bundled plugin
 reproduces the unified diff stream's lines and nothing else, and §11 of the same
 document itemises the rest of the view — the paired layout, the headers, the
@@ -161,10 +169,20 @@ above makes checkable. Phase 6 is two milestones downstream of where the tree is
    handovers, which is where it sat until ADR-37: no pane can be handed over
    before it, because a Luau pane in a build with no Luau VM is a pane the user
    does not have. Then the remaining flips: runtime default, `2.0.0`.
-8. **The seven handovers** — `App::view` drawing each plugin in its native pane's
-   place, which on top of step 7 needs the pane seatable in the native one's
-   region, answering its action and `[features]` flag, and rendering on events
-   rather than on a 1 s poll (PHASE4 §14). Only then may a native renderer go.
+8. **A view-write channel, or the panes with keys stay kernel.** New, and it is
+   not a pane's own work: five of the seven panes answer keys that move a cursor,
+   take focus, scroll another pane, create a record or start a session, and
+   nothing a plugin holds writes view state. PHASE4 §15 records the measurement on
+   the tasks pane — where the two keys that *are* expressible still cannot name a
+   row, because a plugin holds the keys only while the kernel publishes no cursor
+   — and `tests/tasks_pane_input_gap.rs` holds the verdict as probes. Designing
+   this is deciding what an installed plugin may do to the user's interface, so it
+   belongs before the handovers rather than inside one.
+9. **The seven handovers** — `App::view` drawing each plugin in its native pane's
+   place, which on top of steps 7 and 8 needs the pane seatable in the native
+   one's region, answering its action and `[features]` flag, and rendering on
+   events rather than on a 1 s poll (PHASE4 §14). Only then may a native renderer
+   go.
 
 Nothing on this list is unblocked by deleting something first, which is the
 whole finding: the teardown has no safe first step yet.
