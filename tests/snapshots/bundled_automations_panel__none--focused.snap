@@ -1,0 +1,6 @@
+---
+source: tests/bundled_automations_panel.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=none scrollbar=false
+  text "none — Ctrl+N to add" muted

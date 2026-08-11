@@ -1,0 +1,42 @@
+---
+source: tests/bundled_session_list.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=3 scrollbar=false
+  line
+    text "── thurbox " muted
+    fill '─' muted
+  line
+    text " ○ " status_idle
+    text "h" accent bold underline
+    text "ost "
+    text "t" accent bold underline
+    text "ests"
+  line
+    motion cycle key="spinner" keyed_by_id=true fps=8 repeat=true
+      text " ⠋ " muted
+      text " ⠙ " muted
+      text " ⠹ " muted
+      text " ⠸ " muted
+      text " ⠼ " muted
+      text " ⠴ " muted
+      text " ⠦ " muted
+      text " ⠧ " muted
+      text " ⠇ " muted
+      text " ⠏ " muted
+    text "⇅ " muted
+    text "⑂ " muted
+    text "nothing matched here" muted
+    text "  "
+    text "Compacting" muted
+  line
+    text " ◆ " bold selected
+    text "s" bold underline selected
+    text "el" bold selected
+    text "e" bold underline selected
+    text "cted " bold selected
+    text "a" bold underline selected
+    text "nd matched" bold selected
+    text "  " bold selected
+    text "needs you" bold selected
+    fill ' ' bold selected

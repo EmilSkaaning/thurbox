@@ -1,0 +1,9 @@
+---
+source: tests/bundled_automations_panel.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=0 scrollbar=false
+  line
+    text " ● " accent bold
+    text "only" accent bold
+    text " — daily 09:00 · spawn · in 2m " accent bold

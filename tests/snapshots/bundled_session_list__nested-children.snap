@@ -1,0 +1,30 @@
+---
+source: tests/bundled_session_list.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=2 scrollbar=false
+  line
+    text "── thurbox " muted
+    fill '─' muted
+  line
+    motion cycle key="spinner" keyed_by_id=true fps=8 repeat=true
+      text " ⠋ " status_working
+      text " ⠙ " status_working
+      text " ⠹ " status_working
+      text " ⠸ " status_working
+      text " ⠼ " status_working
+      text " ⠴ " status_working
+      text " ⠦ " status_working
+      text " ⠧ " status_working
+      text " ⠇ " status_working
+      text " ⠏ " status_working
+    text "lead"
+  line
+    text " ○ " bold selected
+    text "└ " bold selected
+    text "worker" bold selected
+    fill ' ' bold selected
+  line
+    text " ○ " status_idle
+    text "  └ " muted
+    text "grandchild"

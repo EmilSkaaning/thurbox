@@ -32,6 +32,21 @@
 //! must see both `ui::automations_panel` and `plugin::PluginHost`, and an
 //! integration test is not part of the library's module graph, so
 //! `tests/architecture_rules.rs` stays untouched.
+//!
+//! ## Two edges, because a handover deletes one of them
+//!
+//! The tree equality is **differential** — it names `automations_tree`, which
+//! lives in `src/ui/automations_panel.rs`, the module a handover removes. On that
+//! day the comparison has nothing on its right-hand side, and the repair that
+//! compiles is to drop it: what survives is a test that the plugin renders without
+//! erroring, satisfied equally by a pane drawing one wrong row and by one drawing
+//! twenty. So each case asserts **both** edges while both sides exist (ADR-42):
+//! the recording in `tests/snapshots/` equals the *native* tree — the edge that
+//! gives it provenance, establishable only now — and the plugin equals the native
+//! tree, the port's original proof. Their conjunction is what a handover inherits.
+//!
+//! The keys are not recorded this way and cannot be: their oracle is the database
+//! a native key writes, which no handover deletes.
 
 #![cfg(feature = "plugins")]
 
@@ -61,6 +76,11 @@ use thurbox::ui::FocusLevel;
 /// A column with room to spare, so `resolve_rows` fits no name. Checked rather
 /// than trusted by [`the_comparison_size_adjusts_nothing`].
 const WIDE: u16 = 80;
+
+/// The recorder that turns a view tree into the checked-in expectation, shared
+/// with the other panes that record one (see its module note for why this is
+/// shared while the input gates' source-reading helpers are copied).
+mod view_tree_record;
 
 /// The bound the UI thread waits on plugin input, so a wedged plugin costs a
 /// dropped key rather than a hang. Generous here: a test machine under load is not
@@ -150,6 +170,14 @@ impl Case {
         automations_tree(&self.native_rows(width), self.cursor(), self.is_focused())
     }
 
+    /// The recording's name: the case name, slugified.
+    ///
+    /// Derived from the name rather than written twice, so a renamed case cannot
+    /// keep asserting against another case's recording.
+    fn snapshot_name(&self) -> String {
+        self.name.replace([' ', ',', '\''], "-")
+    }
+
     fn is_focused(&self) -> bool {
         matches!(self.focus, FocusLevel::Focused)
     }
@@ -225,7 +253,8 @@ fn cases() -> Vec<Case> {
                 },
                 Row {
                     // Disabled *and* still carrying a next run: the precedence
-                    // decides, and a plugin reading `dueInSecs` first would差 here.
+                    // decides, and a plugin reading `dueInSecs` first would differ
+                    // here.
                     enabled: false,
                     due: Some(30),
                     ..row("disabled but scheduled")
@@ -507,6 +536,10 @@ fn text_of(tree: &ViewNode) -> String {
 
 /// The headline claim: for every case, the plugin's tree equals the native pane's.
 /// Equal trees paint identically, so this is byte-identity of the pane's rows.
+///
+/// The recorded edge is asserted **first**, so a run in which both edges break
+/// reports the recording — the fact about the pane — rather than only that two
+/// implementations disagree.
 #[test]
 fn the_plugin_builds_the_native_panes_view_tree() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
@@ -516,6 +549,15 @@ fn the_plugin_builds_the_native_panes_view_tree() {
         thurbox::session::pane_context::publish(case.context());
         let plugin = render(&host);
         let native = case.native_tree(WIDE);
+        // Edge one: the checked-in expectation is the native pane's tree — the
+        // edge that outlives `automations_tree`, and one only establishable while
+        // that builder is here to generate it.
+        insta::assert_snapshot!(case.snapshot_name(), view_tree_record::tree(&native));
+        // Edge two: the plugin reproduces that recording — asserted through the
+        // records, so a failure names the line that moved instead of printing two
+        // structural dumps to diff by eye.
+        view_tree_record::assert_matches(case.name, &plugin, &native);
+        // Edge three: the port's original claim, exact rather than legible.
         assert_eq!(
             plugin, native,
             "the plugin's tree diverges from the native pane for `{}`",

@@ -1,0 +1,42 @@
+---
+source: tests/bundled_session_list.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=2 scrollbar=false
+  line
+    text "── thurbox " muted
+    fill '─' muted
+  line
+    motion cycle key="spinner" keyed_by_id=true fps=8 repeat=true
+      text " ⠋ " status_working
+      text " ⠙ " status_working
+      text " ⠹ " status_working
+      text " ⠸ " status_working
+      text " ⠼ " status_working
+      text " ⠴ " status_working
+      text " ⠦ " status_working
+      text " ⠧ " status_working
+      text " ⠇ " status_working
+      text " ⠏ " status_working
+    text "streaming"
+    text "  "
+    text "Compacting" muted
+  line
+    text " ◆ " bold selected
+    text "asking" bold selected
+    text "  " bold selected
+    text "Allow edit to src/main.rs?" bold selected
+    fill ' ' bold selected
+  line
+    text " ◆ " status_blocked
+    text "blocked-silent"
+    text "  "
+    text "Blocked" status_blocked
+  line
+    text " ○ " status_idle
+    text "blank-activity"
+  line
+    text " ○ " status_idle
+    text "trimmed-activity"
+    text "  "
+    text "padded" muted

@@ -1,0 +1,33 @@
+---
+source: tests/bundled_automations_panel.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=0 scrollbar=false
+  line
+    text " ● " accent bold
+    text "due now" accent bold
+    text " — daily 09:00 · spawn · due " accent bold
+  line
+    text " ● " secondary
+    text "seconds" secondary
+    text " — daily 09:00 · spawn · in 45s " secondary
+  line
+    text " ● " secondary
+    text "minutes and seconds" secondary
+    text " — daily 09:00 · spawn · in 2m 30s " secondary
+  line
+    text " ● " secondary
+    text "whole minutes" secondary
+    text " — daily 09:00 · spawn · in 5m " secondary
+  line
+    text " ● " secondary
+    text "whole hours" secondary
+    text " — daily 09:00 · spawn · in 2h " secondary
+  line
+    text " ● " secondary
+    text "hours and minutes" secondary
+    text " — daily 09:00 · spawn · in 3h 20m " secondary
+  line
+    text " ● " secondary
+    text "no next run" secondary
+    text " — daily 09:00 · spawn · — " secondary

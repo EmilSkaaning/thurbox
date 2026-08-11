@@ -1,0 +1,23 @@
+---
+source: tests/bundled_session_list.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=2 scrollbar=false
+  line
+    text "── thurbox " muted
+    fill '─' muted
+  line
+    text " ○ " muted
+    text "above" muted
+  line
+    text " ◆ " bold selected
+    text "└ " bold selected
+    text "⇅ " bold selected
+    text "⑂ " bold selected
+    text "e" bold underline selected
+    text "v" bold selected
+    text "e" bold underline selected
+    text "rything" bold selected
+    text "  " bold selected
+    text "Approve?" bold selected
+    fill ' ' bold selected

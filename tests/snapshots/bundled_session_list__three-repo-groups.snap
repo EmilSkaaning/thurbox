@@ -1,0 +1,37 @@
+---
+source: tests/bundled_session_list.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=4 scrollbar=false
+  line
+    text "── webapp " muted
+    fill '─' muted
+  line
+    text " ○ " status_idle
+    text "a"
+  line
+    text " ○ " status_idle
+    text "b"
+  line
+    text "── infra " muted
+    fill '─' muted
+  line
+    motion cycle key="spinner" keyed_by_id=true fps=8 repeat=true
+      text " ⠋ " bold selected
+      text " ⠙ " bold selected
+      text " ⠹ " bold selected
+      text " ⠸ " bold selected
+      text " ⠼ " bold selected
+      text " ⠴ " bold selected
+      text " ⠦ " bold selected
+      text " ⠧ " bold selected
+      text " ⠇ " bold selected
+      text " ⠏ " bold selected
+    text "c" bold selected
+    fill ' ' bold selected
+  line
+    text "── docs " muted
+    fill '─' muted
+  line
+    text " ○ " status_idle
+    text "d"

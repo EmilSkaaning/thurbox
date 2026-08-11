@@ -1,0 +1,12 @@
+---
+source: tests/bundled_automations_panel.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=0 scrollbar=false
+  line
+    text " ● " secondary
+    text "a" accent bold underline
+    text "bc…" secondary
+    text " " accent bold underline
+    text "def" secondary
+    text " — daily 09:00 · spawn · in 2m " secondary
