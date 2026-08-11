@@ -407,6 +407,87 @@ pub struct ReviewSnapshot {
 /// cursor.
 pub const MAX_REVIEW_ROWS: usize = 60;
 
+/// One row of the session list, as a pane draws it.
+///
+/// Five of its fields are *view* facts rather than stored ones — [`Self::group`],
+/// [`Self::depth`], [`Self::cross_group_child`], [`Self::selected`] and
+/// [`Self::dimmed`] — and they are here for [`TaskSnapshot`]'s reason: the kernel
+/// owns the keyboard that moves the cursor, the search that dims and matches, and
+/// the ordering rules that decide which row opens a repo group and which row is
+/// nested under which.
+///
+/// What is deliberately **not** here is the row's rendering: no composed line, no
+/// glyph padded to a width, no prefix marks, no frames of the working animation,
+/// and no single status text already chosen between [`Self::activity`] and
+/// [`Self::notification`]. Which of those two a row shows is a presentation
+/// decision a pane makes from a status name it already has. The one rendering that
+/// *does* cross is the status triple, for the reason [`StatusSnapshot`] gives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRowSnapshot {
+    /// The session's name, as the model knows it.
+    ///
+    /// Not fitted to any column, for [`TaskSnapshot::title`]'s reason.
+    pub name: String,
+    /// Its status, in drawable form.
+    pub status: StatusSnapshot,
+    /// The repo-group label when this row is the first of its group; `None` on
+    /// every other row. The kernel resolves it because grouping is its rule.
+    pub group: Option<String>,
+    /// How deeply the row nests under its parent within its repo group; a root is
+    /// 0. Drives the tree prefix.
+    pub depth: u8,
+    /// The row is a child whose parent renders in a *different* group, so it keeps
+    /// its own position and is marked rather than indented.
+    pub cross_group_child: bool,
+    /// The session runs on a remote host.
+    ///
+    /// A flag rather than the host's name: the row draws a mark, not a name, so
+    /// publishing the name would disclose more than the pane uses.
+    pub remote: bool,
+    /// The session has at least one worktree.
+    pub worktree: bool,
+    /// The user's cursor is on this row *and* the interface is showing it. No row
+    /// reports it in a context where the active session is irrelevant.
+    pub selected: bool,
+    /// A running search filtered this row out.
+    pub dimmed: bool,
+    /// Byte offsets in `name` a running search matched. Empty when no search is
+    /// running or this row did not match; the pane decides how a matched run is
+    /// emphasised.
+    pub match_positions: Vec<usize>,
+    /// The latest activity text the session's agent emitted.
+    pub activity: Option<String>,
+    /// The latest attention notification the session's agent emitted.
+    pub notification: Option<String>,
+}
+
+/// The session list a pane draws, in the order the pane renders it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionListSnapshot {
+    /// One entry per rendered row.
+    pub rows: Vec<SessionRowSnapshot>,
+}
+
+impl SessionListSnapshot {
+    /// Build from `rows`, keeping at most [`MAX_SESSION_ROWS`].
+    ///
+    /// A constructor rather than a `take` at the call site so the bound cannot be
+    /// forgotten by a second publisher, and so it is testable without an `App`.
+    pub fn bounded(rows: impl IntoIterator<Item = SessionRowSnapshot>) -> SessionListSnapshot {
+        SessionListSnapshot {
+            rows: rows.into_iter().take(MAX_SESSION_ROWS).collect(),
+        }
+    }
+}
+
+/// Most session rows a publication carries.
+///
+/// A bound on the *section* for [`MAX_TASK_ROWS`]' reason: a row costs several
+/// view-tree nodes, so an unbounded list would make every render of a
+/// session-list pane fail rather than merely scroll. No pane shows this many rows
+/// on any terminal, so the bound costs nothing visible.
+pub const MAX_SESSION_ROWS: usize = 200;
+
 /// Everything a plugin may read about the kernel's current state.
 ///
 /// One value rather than three published separately: every section describes the
@@ -428,6 +509,9 @@ pub struct PaneContext {
     /// The diff the code-review view has open, empty when it has none or the
     /// feature is off.
     pub review: ReviewSnapshot,
+    /// The session list, in the order the pane renders it. Empty when no session
+    /// is open.
+    pub session_list: SessionListSnapshot,
 }
 
 /// The process-wide snapshot slot.
@@ -519,6 +603,7 @@ mod tests {
             tasks: TasksSnapshot::default(),
             files: FilesSnapshot::default(),
             review: ReviewSnapshot::default(),
+            session_list: SessionListSnapshot::default(),
         }
     }
 
@@ -533,6 +618,33 @@ mod tests {
         );
         publish(context_with_name("second"));
         assert_eq!(published().unwrap().session.unwrap().name, "second");
+    }
+
+    #[test]
+    fn the_session_list_section_is_bounded() {
+        let row = || SessionRowSnapshot {
+            name: "s".to_string(),
+            status: StatusSnapshot::of(SessionStatus::Idle),
+            group: None,
+            depth: 0,
+            cross_group_child: false,
+            remote: false,
+            worktree: false,
+            selected: false,
+            dimmed: false,
+            match_positions: Vec::new(),
+            activity: None,
+            notification: None,
+        };
+        let over = SessionListSnapshot::bounded((0..MAX_SESSION_ROWS + 25).map(|_| row()));
+        assert_eq!(
+            over.rows.len(),
+            MAX_SESSION_ROWS,
+            "past the bound a pane must still render, which it cannot do if the \
+             tree it builds exceeds the node budget"
+        );
+        let under = SessionListSnapshot::bounded((0..3).map(|_| row()));
+        assert_eq!(under.rows.len(), 3);
     }
 
     #[test]

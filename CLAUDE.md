@@ -937,8 +937,8 @@ and granted capabilities, and everything discovery rejected with its cause.
 `list`/`status` **start** the plugins they report, since a compile or `init`
 failure is invisible until something runs them; `doctor` discovers only.
 Plugins live in `~/.config/thurbox/plugins/<name>/` as a `plugin.toml` plus an
-`init.luau`; the bundled `hello`, `info-panel`, `tasks`, `file-viewer` and
-`code-review` plugins are materialized to
+`init.luau`; the bundled `hello`, `info-panel`, `tasks`, `file-viewer`,
+`code-review` and `session-list` plugins are materialized to
 `~/.local/share/thurbox/builtin-plugins/`, and a user plugin of the same name
 overrides it) and **`command`** (list/describe/run: the typed, agent-callable
 plugin command registry — below; unlike `plugin list`, discovery here starts no
@@ -1203,7 +1203,8 @@ to the closed `Action` enum.
 
 A pane plugin reads kernel state through **capability-gated readers** over one
 published snapshot (`session::pane_context`, ADR-27): `sessions` →
-`thurbox.activeSession()`, `metrics` → `thurbox.systemMetrics()`, `automations` →
+`thurbox.activeSession()` **and** `thurbox.sessionList()`, `metrics` →
+`thurbox.systemMetrics()`, `automations` →
 `thurbox.upcomingAutomations()`, `tasks` → `thurbox.tasks()`, `files` →
 `thurbox.files()`, and `review` → `thurbox.review()`. Gated per *kind* rather than
 by one blanket grant because the capability list is what an install prompt is
@@ -1249,6 +1250,18 @@ contributions need. Nothing here can fail a spawn: every refusal is a
 `Rejection`, logged at the spawn and re-derived from the manifests by
 `thurbox-cli plugin doctor`'s spawn section (which still starts no VM).
 
+**`sessions` covers the whole list, not only the active session** (ADR-33):
+`thurbox.sessionList()` returns the rows thurbox's own session list renders, in
+its order — per row a name, the status quadruple, the repo-group label on the row
+that opens a group, the nesting depth, whether the parent renders in another
+group, remote/worktree flags, whether the cursor is on it, whether a search dimmed
+it, that search's matched byte offsets, and the agent's **unresolved** activity and
+notification text. One grant rather than two because both readers answer the one
+question a user is asked; the capability's own doc says the disclosure covers every
+session. Nothing is fitted to a column (the fit needs a width, and the plugin's
+pane is a different rect) and no row crosses composed: which of the two reported
+strings a row shows, and every glyph, mark and colour role, is the pane's.
+
 A node may declare **motion** — an animation the *kernel* drives (ADR-V18). The
 plugin pushes once (`motion = { kind = "cycle", fps = 8, frames = { … } }` on
 any node, 2–64 frames, rate clamped to `[1, 30]`); there is no API by which a
@@ -1282,6 +1295,16 @@ not on wall-clock timing. `[motion] reduce_motion` (settings.toml, live,
 default `false`) suppresses **every** animation app-wide: plugin motion renders
 frame 0 and takes no lease, and thurbox's own working spinner holds one glyph —
 which is why frame 0 must be a correct rendering on its own.
+
+thurbox's **own** working spinner is declared motion too (ADR-33): the session
+list's tree carries a keyed ten-frame `cycle` at 8 fps, and the native pane
+resolves which frame is showing through a `FrameTable` the app fills from
+`App::spinner_frame()` — the plain-data channel `ui` already reads, so the
+renderer still has no path back to a VM. It deliberately takes **no lease**:
+leases share a bounded aggregate rate, so putting thurbox's own spinner in that
+budget would let an installed plugin's animation degrade it. The bundled
+`session-list` plugin declares the same node, which is what lets the port's
+tree-equality claim cover the animated part of the pane instead of exempting it.
 
 Output is
 **human-readable by default** and switches to JSON automatically when stdout is

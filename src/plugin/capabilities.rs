@@ -148,6 +148,18 @@ pub fn build_module_table(
             super::kernel_state::session_table(lua, &context)
         })?;
         module.set("activeSession", read)?;
+
+        // The whole rendered list, under the *same* grant. The capability's
+        // sentence is already "read the sessions thurbox is running" — plural —
+        // and both readers answer the one question a user is being asked.
+        // Splitting them would put two questions in an install prompt for one
+        // disclosure, and would make a pane that draws the session list demand
+        // two grants to draw one pane.
+        let read_list = lua.create_function(|lua, ()| {
+            let context = crate::session::pane_context::published().unwrap_or_default();
+            super::kernel_state::session_list_table(lua, &context)
+        })?;
+        module.set("sessionList", read_list)?;
     }
 
     if granted.has(Capability::Metrics) {

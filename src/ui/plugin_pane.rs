@@ -216,6 +216,32 @@ fn inline_width(node: &ViewNode) -> usize {
     }
 }
 
+/// The spans a one-row node draws as, resolved against `width`.
+///
+/// Exposed for a **native** pane whose rows are view-tree nodes but whose *list*
+/// is not — thurbox's session list keeps its ratatui list widget, so its rows
+/// have to become `Line`s rather than be painted into rects. Sharing this walk is
+/// what makes a `Fill`'s residue come out at the same column in the native pane
+/// and in a plugin reproducing it; two implementations of that arithmetic would
+/// be two panes that disagree about where a selection bar ends.
+///
+/// A node that is not a [`ViewNode::Line`] is treated as a line of one run, so a
+/// caller may pass either.
+pub fn line_spans<'a>(
+    node: &'a ViewNode,
+    width: u16,
+    palette: &ThemePalette,
+    frames: &FrameTable,
+) -> Vec<Span<'a>> {
+    let mut out = Vec::new();
+    let runs = match node {
+        ViewNode::Line(runs) => runs.as_slice(),
+        other => std::slice::from_ref(other),
+    };
+    inline_spans(runs, width as usize, palette, frames, &mut out);
+    out
+}
+
 /// Flatten a line's runs into spans, in order, padding each to the width it
 /// reserved.
 ///

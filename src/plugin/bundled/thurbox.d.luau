@@ -330,6 +330,47 @@ export type ReviewDiff = {
     numberWidth: number,
 }
 
+-- One row of the session list.
+--
+-- `status` is the row's state in the four forms a pane needs, exactly as
+-- `Session.status` carries it — including the token, so a pane cannot disagree
+-- with thurbox about which colour a state gets.
+--
+-- `group` is the repo-group label when this row is the **first** of its group and
+-- absent on every other row, so `if row.group then` is where a header goes.
+-- `depth` is nesting under a parent within that group (a root is 0);
+-- `crossGroupChild` is a child whose parent renders in a *different* group, which
+-- is marked rather than indented.
+--
+-- `matchPositions` are zero-based byte offsets into `name`, segmented exactly as
+-- `TaskEntry.matchPositions` are. `activity` and `notification` are what the
+-- agent last reported, **unresolved**: which of the two a row shows — and whether
+-- it shows one at all — is your pane's rule. Nothing here is fitted to a column.
+export type SessionRow = {
+    name: string,
+    status: SessionStatusInfo,
+    group: string?,
+    depth: number,
+    crossGroupChild: boolean,
+    remote: boolean,
+    worktree: boolean,
+    selected: boolean,
+    dimmed: boolean,
+    matchPositions: { number },
+    activity: string?,
+    notification: string?,
+}
+
+-- The session list, in the order the pane renders it.
+--
+-- There is deliberately no cursor index here, unlike `FileTree.selected`: a
+-- group's first row is preceded by a header, so the rows and a list's children
+-- are not one for one and the index `ui.list` wants is one only your pane knows.
+-- Each row says whether the cursor is on *it*; count the children you emit.
+export type SessionList = {
+    rows: { SessionRow },
+}
+
 export type Thurbox = {
     -- This plugin's own name. Always present.
     name: string,
@@ -343,6 +384,12 @@ export type Thurbox = {
     -- Present only with `sessions`. `nil` when no session is open, and also on
     -- the first render before the host has published anything.
     activeSession: (() -> Session?)?,
+    -- Present only with `sessions`, the same grant `activeSession` needs. Always
+    -- a table — "no session is open" is a fact — whose `rows` are in the order
+    -- thurbox's own session list renders them, group headers included as a label
+    -- on the row that opens each group. Names and reported text are *not* fitted
+    -- to any width: your pane's size is not yours to know.
+    sessionList: (() -> SessionList)?,
     -- Present only with `metrics`. `nil` until the first sample.
     systemMetrics: (() -> SystemMetrics?)?,
     -- Present only with `automations`. Always an array — "there are none" is a

@@ -63,6 +63,14 @@ pub enum Capability {
     /// Read the sessions thurbox is running — names, branches, agent metrics,
     /// activity text.
     ///
+    /// Covers **every** session, not only the one the user is on: it grants both
+    /// the active-session reader and the reader that returns the whole rendered
+    /// session list. Stated here because the disclosure genuinely widens — one
+    /// session's name and activity becomes every session's — and a capability
+    /// list is only honest if it says what it discloses. One grant rather than
+    /// two because both readers answer the same question a user is asked, and a
+    /// pane that draws the session list must not have to demand two.
+    ///
     /// Kernel state is gated per *kind* rather than by one blanket grant,
     /// because the capability list is what an install prompt is written from:
     /// "reads your sessions" and "reads this machine's CPU and memory" are

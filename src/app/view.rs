@@ -389,8 +389,8 @@ impl App {
         // A (global) search is active iff there's a query — non-matching rows dim.
         let session_search_active = global_query.is_some();
 
-        let spinner =
-            crate::ui::SPINNER_FRAMES[self.spinner_frame() % crate::ui::SPINNER_FRAMES.len()];
+        // Resolved before the state below takes a mutable borrow of `self`.
+        let spinner_frame = self.spinner_frame();
         let rows = project_list::render_left_panel(
             frame,
             left_area,
@@ -404,7 +404,7 @@ impl App {
                 session_search_active,
                 headers: ordered.headers,
                 depths: ordered.depths,
-                spinner,
+                spinner_frame,
                 pending_spawn: self.pending_spawn.as_ref(),
             },
         );
@@ -2159,7 +2159,7 @@ pub(super) fn truncate_str(s: &str, max_len: usize) -> String {
 /// Fuzzy-match a query against a session's fields (name/agent/branch/cwd/status),
 /// returning highlight positions per field — drives live session-list
 /// highlighting from the global-search query.
-fn session_fuzzy(query: &str, info: &SessionInfo) -> Option<project_list::SessionMatch> {
+pub(crate) fn session_fuzzy(query: &str, info: &SessionInfo) -> Option<project_list::SessionMatch> {
     let name = crate::fuzzy::fuzzy_match(query, &info.name).map(|m| m.positions);
     let agent = crate::fuzzy::fuzzy_match(query, &info.agent).map(|m| m.positions);
     let branch = info

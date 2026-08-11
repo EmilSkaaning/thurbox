@@ -149,12 +149,13 @@ impl Case {
 
         PaneContext {
             session: Some(session),
-            // The task, file and review sections stay default here: this pane
-            // reads none of them, which is itself worth pinning — a pane sees
-            // only what it declares.
+            // The task, file, review and session-list sections stay default
+            // here: this pane reads none of them, which is itself worth pinning —
+            // a pane sees only what it declares.
             tasks: Default::default(),
             review: Default::default(),
             files: Default::default(),
+            session_list: Default::default(),
             system: self.metrics.as_ref().map(|m| SystemSnapshot {
                 cpu_percent: m.cpu_percent,
                 memory_used: m.memory_used,
@@ -484,6 +485,7 @@ fn with_no_session_the_plugin_still_shows_what_it_knows() {
         tasks: Default::default(),
         files: Default::default(),
         review: Default::default(),
+        session_list: Default::default(),
         system: Some(SystemSnapshot {
             cpu_percent: 5.0,
             memory_used: 1_073_741_824,

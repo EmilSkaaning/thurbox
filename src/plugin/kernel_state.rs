@@ -19,8 +19,8 @@
 use mlua::{Lua, Table};
 
 use crate::session::pane_context::{
-    AutomationSnapshot, FileNodeSnapshot, PaneContext, ReviewLineSnapshot, SessionSnapshot,
-    SystemSnapshot, TaskSnapshot,
+    AutomationSnapshot, FileNodeSnapshot, PaneContext, ReviewLineSnapshot, SessionRowSnapshot,
+    SessionSnapshot, SystemSnapshot, TaskSnapshot,
 };
 
 /// Set `key` to `value` only when there is one.
@@ -273,12 +273,73 @@ fn build_review_line(lua: &Lua, line: &ReviewLineSnapshot) -> mlua::Result<Table
     Ok(t)
 }
 
+/// The session list: `{ rows = { … } }`.
+///
+/// Always a table, for the file tree's reason — "no session is open" is knowledge
+/// the kernel has, so a pane draws its empty state from an empty list rather than
+/// branching on a nil. `rows` is a one-based array so
+/// `for _, row in ipairs(list.rows)` works.
+///
+/// There is deliberately no top-level cursor index here, unlike `files.selected`
+/// and `review.cursor`. A pane's rows are not the list's children one for one —
+/// a repo group's first row is preceded by a header row — so the index `ui.list`
+/// wants is one the pane knows and the kernel does not. Each row therefore says
+/// whether the cursor is on *it*, and the pane counts the children it emitted.
+pub fn session_list_table(lua: &Lua, context: &PaneContext) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    let rows = lua.create_table()?;
+    for (i, row) in context.session_list.rows.iter().enumerate() {
+        rows.set(i + 1, build_session_row(lua, row)?)?;
+    }
+    t.set("rows", rows)?;
+    Ok(t)
+}
+
+fn build_session_row(lua: &Lua, row: &SessionRowSnapshot) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("name", row.name.clone())?;
+
+    let status = lua.create_table()?;
+    status.set("name", row.status.name)?;
+    status.set("label", row.status.label.clone())?;
+    status.set("icon", row.status.icon)?;
+    status.set("token", row.status.token)?;
+    t.set("status", status)?;
+
+    // Absent on every row but a group's first, which is what lets a pane write
+    // `if row.group then` and emit a header there.
+    set_opt(&t, "group", row.group.clone())?;
+    t.set("depth", u64::from(row.depth))?;
+    // Booleans cross even when false: every row carries all five as facts and a
+    // pane reads them unconditionally.
+    t.set("crossGroupChild", row.cross_group_child)?;
+    t.set("remote", row.remote)?;
+    t.set("worktree", row.worktree)?;
+    t.set("selected", row.selected)?;
+    t.set("dimmed", row.dimmed)?;
+
+    // Byte offsets, not pre-split runs — the split is presentation. One-based
+    // array of the zero-based offsets the matcher produced, exactly as a task
+    // row's cross.
+    let matches = lua.create_table()?;
+    for (i, pos) in row.match_positions.iter().enumerate() {
+        matches.set(i + 1, *pos as u64)?;
+    }
+    t.set("matchPositions", matches)?;
+
+    // Both texts, unresolved: which one a row shows (and whether it shows one at
+    // all) is the pane's rule, not the kernel's.
+    set_opt(&t, "activity", row.activity.clone())?;
+    set_opt(&t, "notification", row.notification.clone())?;
+    Ok(t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session::pane_context::{
-        AgentMetricsSnapshot, GitSnapshot, ReviewSnapshot, StatusSnapshot, TasksSnapshot,
-        UsageSnapshot, UsageWindowSnapshot,
+        AgentMetricsSnapshot, GitSnapshot, ReviewSnapshot, SessionListSnapshot, StatusSnapshot,
+        TasksSnapshot, UsageSnapshot, UsageWindowSnapshot,
     };
     use crate::session::SessionStatus;
 
@@ -506,6 +567,120 @@ mod tests {
         let entries: Table = t.get("entries").unwrap();
         assert_eq!(entries.raw_len(), 0);
         assert!(!t.get::<bool>("focused").unwrap());
+    }
+
+    // ── the session list ──
+
+    fn session_row(name: &str, status: SessionStatus) -> SessionRowSnapshot {
+        SessionRowSnapshot {
+            name: name.to_string(),
+            status: StatusSnapshot::of(status),
+            group: None,
+            depth: 0,
+            cross_group_child: false,
+            remote: false,
+            worktree: false,
+            selected: false,
+            dimmed: false,
+            match_positions: Vec::new(),
+            activity: None,
+            notification: None,
+        }
+    }
+
+    fn session_list_context(rows: Vec<SessionRowSnapshot>) -> PaneContext {
+        PaneContext {
+            session_list: SessionListSnapshot { rows },
+            ..PaneContext::default()
+        }
+    }
+
+    #[test]
+    fn a_session_row_crosses_with_its_view_facts_and_no_rendering() {
+        let lua = Lua::new();
+        let ctx = session_list_context(vec![SessionRowSnapshot {
+            group: Some("thurbox".to_string()),
+            depth: 2,
+            cross_group_child: true,
+            remote: true,
+            worktree: true,
+            selected: true,
+            dimmed: true,
+            match_positions: vec![0, 4],
+            activity: Some("Compacting".to_string()),
+            notification: Some("Approve?".to_string()),
+            ..session_row("worker", SessionStatus::Working)
+        }]);
+
+        let table = session_list_table(&lua, &ctx).unwrap();
+        let rows: Table = table.get("rows").unwrap();
+        assert_eq!(rows.raw_len(), 1);
+        let row: Table = rows.get(1).unwrap();
+
+        assert_eq!(row.get::<String>("name").unwrap(), "worker");
+        assert_eq!(row.get::<String>("group").unwrap(), "thurbox");
+        assert_eq!(row.get::<u64>("depth").unwrap(), 2);
+        assert!(row.get::<bool>("crossGroupChild").unwrap());
+        assert!(row.get::<bool>("remote").unwrap());
+        assert!(row.get::<bool>("worktree").unwrap());
+        assert!(row.get::<bool>("selected").unwrap());
+        assert!(row.get::<bool>("dimmed").unwrap());
+        assert_eq!(row.get::<String>("activity").unwrap(), "Compacting");
+        assert_eq!(row.get::<String>("notification").unwrap(), "Approve?");
+
+        // The status triple, which is the one *rendering* that crosses — a pane
+        // must not re-derive which colour a state gets.
+        let status: Table = row.get("status").unwrap();
+        assert_eq!(status.get::<String>("name").unwrap(), "working");
+        assert_eq!(status.get::<String>("token").unwrap(), "status_working");
+        assert!(!status.get::<String>("icon").unwrap().is_empty());
+
+        // Offsets, not runs: the split into emphasised and plain is presentation.
+        let matches: Table = row.get("matchPositions").unwrap();
+        assert_eq!(matches.raw_len(), 2);
+        assert_eq!(matches.get::<u64>(1).unwrap(), 0);
+        assert_eq!(matches.get::<u64>(2).unwrap(), 4);
+
+        // No composed row, no prefix, no fitted text, and no cursor index on the
+        // list: a group header makes rows and list children differ, so the index
+        // is the pane's to count.
+        for absent in ["line", "prefix", "text", "glyph"] {
+            assert!(row.get::<mlua::Value>(absent).unwrap().is_nil());
+        }
+        assert!(table.get::<mlua::Value>("cursor").unwrap().is_nil());
+        assert!(table.get::<mlua::Value>("selected").unwrap().is_nil());
+    }
+
+    #[test]
+    fn a_session_rows_flags_cross_even_when_false() {
+        let lua = Lua::new();
+        let ctx = session_list_context(vec![session_row("plain", SessionStatus::Idle)]);
+        let rows: Table = session_list_table(&lua, &ctx).unwrap().get("rows").unwrap();
+        let row: Table = rows.get(1).unwrap();
+        // A fact every row carries is a `false`, not a missing key — a pane reads
+        // all five unconditionally.
+        for flag in [
+            "crossGroupChild",
+            "remote",
+            "worktree",
+            "selected",
+            "dimmed",
+        ] {
+            assert!(!row.get::<bool>(flag).unwrap(), "{flag}");
+        }
+        // An absent value is an absent key, which is the other half of the rule.
+        for absent in ["group", "activity", "notification"] {
+            assert!(row.get::<mlua::Value>(absent).unwrap().is_nil(), "{absent}");
+        }
+        // And an empty match list is still a table, so `ipairs` needs no guard.
+        assert_eq!(row.get::<Table>("matchPositions").unwrap().raw_len(), 0);
+    }
+
+    #[test]
+    fn no_sessions_is_an_empty_array() {
+        let lua = Lua::new();
+        let table = session_list_table(&lua, &PaneContext::default()).unwrap();
+        assert_eq!(table.get::<Table>("rows").unwrap().raw_len(), 0);
     }
 
     // ── the open file tree ──

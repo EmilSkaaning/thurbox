@@ -697,3 +697,170 @@ is a second, quantitative reason to design the non-pane extension point before
 porting it: the session list is small, but it is the pane most likely to be
 **rebuilt often**, and this pane established that the binding constraint on a
 plugin pane is not what it can express but how much work it may do per frame.
+
+## 13. The fifth port: the session list, the pane ADR-V1 hinges on (ADR-33)
+
+Numbered 13 because §12 and ADR-32 are reserved for the automations pane, whose
+port is in flight on another branch; a hole is cheaper to read than two sections
+with the same number.
+
+This is the gate. ADR-V1 says everything but six things is a plugin **including
+the session list**, and §11 closed by naming it as the last surface. It is the
+densest pane thurbox has, the one redrawn most often, and the one whose ordering,
+nesting and status rules the kernel owns.
+`docs/SPIKE-SESSION-LIST.md` measured whether it could be a plugin at all and
+answered *yes, on three conditions*. This section re-checks those three, because a
+conditional verdict that nobody re-checks is a verdict that expires quietly.
+
+### The headline: the drawing surface needed nothing new
+
+No node kind, no style field, no style token, no capability. The whole pane is
+four node kinds — `list`, `line`, `text`, `fill` — and it is pinned by
+`the_host_surface_needed_no_new_node` rather than asserted here, because "the API
+sufficed" is the claim ADR-V1 rests on and a claim in a document expires without
+telling anyone.
+
+What *did* grow is the **state** surface, by one reader: `thurbox.sessionList()`,
+under the `sessions` grant that already existed for it. That is the shape every
+port has had — a pane cannot draw records nobody publishes — and it is the
+difference between "the vocabulary held" (which is the claim) and "nothing was
+added" (which would not be true).
+
+Two of those four earned their keep for the second time. `Line` (ADR-28) is what
+the spike said had to exist before this pane could be attempted at all, and
+`Fill` (ADR-31) — added six days earlier for a diff row's tint — is exactly what
+a selection bar and a group header's trailing rule need. That is the first
+evidence that `Fill` was a general node rather than one pane's escape hatch.
+
+### The spike's three conditions, re-checked
+
+| Condition | Verdict | Why |
+|---|---|---|
+| the catalogue needs a styled-span line node | **met** | `ViewNode::Line` (ADR-28), plus `Fill` for the residue a bar reaches across |
+| selection stays kernel state | **met, and load-bearing** | the cursor is published per row, exactly as a task row's is; the plugin receives no keys and owns no cursor |
+| render is event-driven, not a fixed poll | **not met** | measured below; recorded rather than worked around |
+
+### What was ported, and what was not
+
+**In scope:** every row the pane draws. The repo-group header and its trailing
+rule, the status glyph in that status's colour — **animated** while the session is
+working — the `└` nesting prefix and the `↳` cross-group child mark, the remote
+and worktree marks, the name with the global search's matched characters
+emphasised, the agent's activity text (or, when blocked, its notification), the
+`selected > dimmed > role` precedence, and the cursor's row in the theme's
+selection pair across the pane's whole width.
+
+| Not ported | Why |
+|---|---|
+| the pane's border chrome | the `Sessions` block, the one-dot-per-session strip on its top border, and the `▲ N` / `▼ N` clipped-row indicators. A plugin pane's frame is the host's, and nothing in the catalogue describes a border overlay — §9 recorded the same gap for the file viewer's search bar |
+| the empty state | `No sessions yet` / `Press Ctrl+N to create one` are drawn **centred**, and no node carries an alignment. A **new** vocabulary row, below |
+| the pending-spawn placeholder row | a row for a session that does not exist yet, inserted at an index the kernel computes from the group layout, whose phase label is dropped by a width rule. A second published shape and a second geometry rule |
+| scrolling by the native pane's rule | the plugin declares its cursor's row and the kernel windows the list (ADR-30); the native pane keeps ratatui's sticky offset, which its two-line items and click hitboxes are derived from. Both keep the cursor visible; they disagree about which rows sit beside it |
+| keys and hitboxes | no `j`/`k`, no `Shift+J` reordering, no click. The cursor the pane draws is the kernel's |
+
+### The oracle is a refactor, and a two-link chain
+
+The three list ports before this one refactored their native pane to draw its own
+tree; the code-review port did not, because its painter is width-dependent in ways
+no tree expresses (§11). This pane is in between, and the split is drawn at the
+row: **the rows became trees, the list did not.**
+
+- `ui::project_list::session_item_node` builds each row and header, and the native
+  pane paints those nodes through the same inline walk `ui::plugin_pane` uses
+  (`line_spans`). So a `Fill`'s residue is resolved by one implementation in both
+  panes — two would be two panes disagreeing about where a selection bar ends.
+- The ratatui `List` is left alone. Which rows are on screen, where a two-line
+  item starts and which cell a click lands in are its answers, and the hitboxes
+  are derived from the offset it actually used.
+
+The chain therefore has two links, both asserted: the plugin's tree equals
+`session_list_tree` (eleven content variants, `tests/bundled_session_list.rs`),
+and each node paints what the **pre-port span builder** painted, cell for cell, at
+two widths and for every spinner frame (`the_tree_paints_what_the_span_builder_painted`,
+against the retained `legacy_session_line` oracle).
+
+| Divergence | Native | The tree |
+|---|---|---|
+| a blank cell's foreground before the agent's text | `Span::raw`, which leaves the foreground unset | a token-less run, which resolves the theme's primary |
+
+That is the only one, and it is pinned in both directions: `assert_same_ink`
+grants it *only* on a cell with no glyph in it, and
+`the_only_divergence_is_a_blank_cells_foreground` fails if it ever stops being
+needed, so the latitude cannot outlive its reason.
+
+### The spinner is declared motion, and it is inside the equality
+
+ADR-V18 shipped with no bundled consumer. This pane is it: a working row's glyph
+is a `cycle` of ten braille frames at 8 fps, keyed, pushed once — the frames are
+the plugin's choice, the clock is the kernel's, and there is no call by which a
+plugin asks for a frame.
+
+The native pane declares the **same** node and resolves its frame through a
+`FrameTable` filled from `App::spinner_frame()`, the clock it already ran on. Two
+consequences worth stating:
+
+- the equality covers the animation instead of exempting it — the alternative
+  (native holds a text node, plugin holds a motion node, compare "up to the
+  spinner") would have excused the one part of the pane that moves;
+- `ui` still cannot reach a VM. The frame table is plain data, which is why
+  `tests/architecture_rules.rs` is untouched by a pane that animates.
+
+Deliberately **not** done: giving the native pane a real motion lease in
+`App::motion`. Leases share a bounded aggregate rate, so putting thurbox's own
+spinner in that budget would let an installed plugin's animation degrade it — a
+regression introduced for tidiness.
+
+### The render trigger: the spike's third condition does not hold
+
+The plugin worker renders every pane, then waits out a **fixed 1 s interval** in
+ten 100 ms slices serving key requests. Nothing tells it that kernel state moved.
+So when the user presses `Ctrl+J`:
+
+| | latency |
+|---|---|
+| the native pane's cursor moves | next frame — single-digit ms |
+| the plugin's *copy* of that cursor moves | the worker's next cycle — **up to 1 s** |
+
+The spike's bar 4 was 5 ms of added latency on a selection change, and it made the
+verdict conditional on the render being event-driven. It is not, so the bar is
+missed by ~200× — for a plugin's copy.
+
+**Why that is a finding and not a defect in this pane.** The cursor a user drives
+is kernel state (the spike's second condition), so the highlight the user actually
+watches moves in the frame the key was handled. What trails is a reproduction of
+it in a pane that is hidden by default. Had the plugin owned its own cursor — the
+design this port refused — the second of those two rows would be the *only* row,
+and the pane would feel broken.
+
+Two closures were considered and neither belongs to a pane port:
+
+| Closure | Why not here |
+|---|---|
+| nudge the worker whenever the published snapshot changes | the snapshot carries host CPU and memory, so it changes on nearly every tick: a 1 Hz poll becomes a ~100 Hz one. A regression in idle cost bought with latency nobody can see |
+| nudge only when the session section changes | probably right eventually, but it is a change to the render loop's contract *plus* a rate policy (without a floor, an agent emitting activity text quickly breaks the spike's own 10 Hz ceiling). It belongs to a change about ADR-V11's frame budget, with its own measurement |
+
+So the honest state is: **the session list can be a plugin, and a plugin's view of
+kernel state is one render interval stale.** That is a property of the host, not of
+this pane, and every plugin pane already has it — this is simply the first pane
+whose content changes fast enough for it to matter.
+
+### The open gaps this port leaves
+
+| Open gap | Where the host stands | Cheapest closure |
+|---|---|---|
+| **a centred line** (new) | every node draws from the left; `Gauge` right-aligns a suffix and `Fill` can push a run flush right, but neither centres | an alignment on a line node. One consumer so far, so it is recorded rather than designed |
+| **a pane's border chrome** (new) | a pane's block is drawn by the host around whatever the plugin returned; nothing describes an overlay on it | this is §9's frame-node row seen from the other side, and its **third** consumer (file-viewer search bar, global search strip, this) |
+| the render interval | above | above |
+| §8's ellipsizing clip | unchanged; this pane's fitting stays in the kernel | a line that clips with an ellipsis |
+| the four vocabulary rows §10 left open | unchanged (frame node, bottom-anchored row, search accent, italic) | this port needed none of them |
+
+### What Phase 4 has established, now that the gate pane is through
+
+Five panes are reproduced and one surface is recorded as structurally unportable.
+The catalogue that draws them has grown by four nodes and three style roles across
+those five ports, and the last one — the pane the whole model hinges on — needed
+none of them. What remains open is not expressiveness: it is **chrome** (a frame
+node, an alignment, a bottom-anchored region), **clipping** (§8), and **when a
+plugin is asked to render**. The first two are additive vocabulary with two or
+three consumers each. The third is the only one that is a design question, and it
+is the one this port promotes from a spike's footnote to a measured, named gap.

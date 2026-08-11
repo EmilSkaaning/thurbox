@@ -1,15 +1,21 @@
 use ratatui::{
     layout::Rect,
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{List, ListItem, ListState, Paragraph},
     Frame,
 };
+// Only the retained pre-port oracle (`legacy_session_line` and friends) still
+// assembles ratatui spans and reaches for a palette colour by hand; the pane
+// itself draws the view tree below.
+#[cfg(test)]
+use ratatui::style::Modifier;
 
-use super::highlight::append_highlighted as append_name_spans;
 use super::theme::Theme;
-use super::{focus_block, status_color, FocusLevel};
-use crate::session::SessionInfo;
+use super::{focus_block, FocusLevel};
+use crate::session::motion::{FrameTable, Motion, DEFAULT_FPS};
+use crate::session::view_tree::{StyleToken, TextStyle, ViewNode};
+use crate::session::{SessionInfo, SessionStatus};
 
 /// Per-field fuzzy match positions for a session entry.
 #[derive(Clone)]
@@ -45,15 +51,6 @@ impl SessionMatch {
             })
         } else {
             None
-        }
-    }
-
-    /// Extract non-empty positions for a field, suitable for `append_name_spans`.
-    fn positions<'a>(&self, field: &'a [usize]) -> Option<&'a [usize]> {
-        if field.is_empty() {
-            None
-        } else {
-            Some(field)
         }
     }
 }
@@ -566,9 +563,13 @@ pub struct LeftPanelState<'a> {
     /// Parallel to `sessions`: tree depth within the repo group
     /// (see [`SessionOrder::depths`]). Children render indented.
     pub depths: &'a [u8],
-    /// Current animated spinner frame for the `Working` status
-    /// (`SPINNER_FRAMES[App::spinner_frame()]`).
-    pub spinner: &'a str,
+    /// Current frame index of the `Working` spinner (into
+    /// [`super::SPINNER_FRAMES`]).
+    ///
+    /// The index rather than the resolved glyph, because a working row's glyph is
+    /// a *motion* node in the pane's view tree and the paint resolves it through a
+    /// frame table — see `spinner_frames`.
+    pub spinner_frame: usize,
     /// A session being created (git fetch / `worktree add` / spawn), rendered as
     /// a trailing placeholder row so it shows up the moment the wizard is
     /// confirmed rather than after a slow shell-out. Not selectable and not
@@ -595,7 +596,7 @@ pub fn render_left_panel(
         state.session_search_active,
         state.headers,
         state.depths,
-        state.spinner,
+        state.spinner_frame,
         state.pending_spawn,
     )
 }
@@ -680,9 +681,10 @@ fn render_session_section(
     search_active: bool,
     headers: &[Option<String>],
     depths: &[u8],
-    spinner: &str,
+    spinner_frame: usize,
     pending_spawn: Option<&crate::app::PendingSpawn>,
 ) -> Vec<super::RowHitbox> {
+    let spinner = super::SPINNER_FRAMES[spinner_frame % super::SPINNER_FRAMES.len()];
     let mut block = focus_block(" Sessions ", level);
 
     if !sessions.is_empty() {
@@ -691,7 +693,7 @@ fn render_session_section(
             .map(|info| {
                 Span::styled(
                     super::status_glyph(info.status, spinner).to_string(),
-                    Style::default().fg(status_color(info.status)),
+                    Style::default().fg(super::status_color(info.status)),
                 )
             })
             .collect();
@@ -706,46 +708,58 @@ fn render_session_section(
     // Available width inside the block (subtract 2 for borders)
     let inner_width = area.width.saturating_sub(2) as usize;
 
-    let mut item_heights: Vec<u16> = Vec::with_capacity(sessions.len());
+    // Rows as view-tree nodes, then painted through the same inline walk a plugin
+    // pane's line goes through — so a `Fill`'s residue lands in the same column
+    // here and in the bundled plugin that reproduces this pane. The nodes are held
+    // for the whole function because the spans borrow them.
+    let items_data = resolve_items(
+        &RowInputs {
+            sessions,
+            active_index,
+            show_selection,
+            match_positions,
+            search_active,
+            headers,
+            depths,
+        },
+        inner_width,
+    );
+    let palette = super::theme::current();
+    let frames = spinner_frames(spinner_frame);
 
-    // Session ids on screen, for the cross-group child mark (a child whose
-    // parent lives in another repo group gets `↳` instead of indentation).
-    let visible_ids: std::collections::HashSet<crate::session::SessionId> =
-        sessions.iter().map(|s| s.id).collect();
-
-    let mut items: Vec<ListItem> = sessions
-        .iter()
-        .enumerate()
-        .map(|(i, info)| {
-            let is_active = i == active_index && show_selection;
-            let session_match = match_positions.get(i).and_then(|m| m.as_ref());
-            let is_dimmed = search_active && session_match.is_none();
-            let depth = depths.get(i).copied().unwrap_or(0);
-            let cross_group_child = depth == 0
-                && info
-                    .parent_session_id
-                    .is_some_and(|p| p != info.id && visible_ids.contains(&p));
-
-            let mut item_lines = vec![build_session_line(
-                info,
-                session_match,
-                is_active,
-                is_dimmed,
-                depth,
-                cross_group_child,
-                inner_width,
-                spinner,
-            )];
-
-            // Prepend a subtle repo-group header above the first session of
-            // each group. The header never reflects selection (that stays on
-            // the session rows).
-            if let Some(Some(label)) = headers.get(i) {
-                item_lines.insert(0, group_header_line(label, inner_width));
+    // One entry per widget item: a group header travels with the row below it, so
+    // clicking the header selects that group's first session.
+    let mut item_nodes: Vec<Vec<ViewNode>> = Vec::with_capacity(sessions.len());
+    let mut pending_header: Option<ViewNode> = None;
+    for item in &items_data {
+        match item {
+            SessionListItem::Header(label) => pending_header = Some(group_header_node(label)),
+            SessionListItem::Session(_) => {
+                let mut nodes = Vec::new();
+                nodes.extend(pending_header.take());
+                nodes.push(session_item_node(item));
+                item_nodes.push(nodes);
             }
+        }
+    }
 
-            item_heights.push(item_lines.len() as u16);
-            ListItem::new(item_lines)
+    let mut item_heights: Vec<u16> = item_nodes.iter().map(|n| n.len() as u16).collect();
+    let mut items: Vec<ListItem> = item_nodes
+        .iter()
+        .map(|nodes| {
+            ListItem::new(
+                nodes
+                    .iter()
+                    .map(|node| {
+                        Line::from(super::plugin_pane::line_spans(
+                            node,
+                            inner_width as u16,
+                            &palette,
+                            &frames,
+                        ))
+                    })
+                    .collect::<Vec<_>>(),
+            )
         })
         .collect();
 
@@ -759,8 +773,14 @@ fn render_session_section(
         let mut lines = Vec::new();
         // A group with no rows yet brings its own header, so the placeholder is
         // filed under a label instead of floating loose at the end.
-        if let Some(label) = slot.header.as_deref() {
-            lines.push(group_header_line(label, inner_width));
+        let header_node = slot.header.as_deref().map(group_header_node);
+        if let Some(node) = header_node.as_ref() {
+            lines.push(Line::from(
+                super::plugin_pane::line_spans(node, inner_width as u16, &palette, &frames)
+                    .into_iter()
+                    .map(|s| Span::styled(s.content.into_owned(), s.style))
+                    .collect::<Vec<_>>(),
+            ));
         }
         lines.push(pending_spawn_line(pending, inner_width, spinner));
         item_heights.insert(slot.index, lines.len() as u16);
@@ -768,8 +788,8 @@ fn render_session_section(
         slot.index
     });
 
-    // The active-row selection background is painted by `build_session_line`
-    // itself (per-span, full width), *not* by the List's `highlight_style` —
+    // The active-row selection background is painted by the row's own nodes (a
+    // trailing fill, full width), *not* by the List's `highlight_style` —
     // because `highlight_style` patches the whole item area, which for a row
     // that carries a prepended repo-group header would bleed the background up
     // onto that header. Painting it in the row keeps the highlight to the
@@ -875,28 +895,199 @@ fn render_empty_sessions(frame: &mut Frame, area: Rect, block: ratatui::widgets:
     frame.render_widget(text, area);
 }
 
-/// A full-width repo-group header: `── label ──────────`. The label is always
-/// muted, and the header never reflects selection — highlighting belongs to the
-/// session rows alone, so selecting a group's first row must not light up its
-/// header. Status lives on the session rows, never here.
-fn group_header_line(label: &str, inner_width: usize) -> Line<'static> {
-    let mut text = format!("\u{2500}\u{2500} {label} ");
-    let used = text.chars().count();
-    if inner_width > used {
-        text.push_str(&"\u{2500}".repeat(inner_width - used));
+/// One row of the session list as the pane's view tree describes it: everything
+/// resolved, nothing measured.
+///
+/// Distinct from [`SessionInfo`] because this is the *view* row — the search's
+/// verdict has been applied, the cursor has folded in the pane's focus, and
+/// `status_text` has been fitted to the column — so building the tree from it
+/// needs no width, no focus and no session set. Mirrors
+/// [`super::tasks_panel::TaskRow`], which draws the same line for the same
+/// reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRow {
+    /// The session's status; picks the glyph and its colour role.
+    pub status: SessionStatus,
+    /// Its name, as the model has it.
+    pub name: String,
+    /// Byte offsets in `name` a running search matched.
+    pub name_matches: Vec<usize>,
+    /// Nesting depth within the repo group; a root is 0.
+    pub depth: u8,
+    /// A child whose parent renders in another group, so it is marked rather than
+    /// indented.
+    pub cross_group_child: bool,
+    /// The session runs on a remote host.
+    pub remote: bool,
+    /// It has at least one worktree.
+    pub worktree: bool,
+    /// The user's cursor is on this row *and* it is visible as such.
+    pub selected: bool,
+    /// A running search filtered this row out.
+    pub dimmed: bool,
+    /// The agent-reported text shown after the name, **already fitted** to the
+    /// column and absent when the column had no room for it.
+    pub status_text: Option<String>,
+}
+
+/// One item of the rendered list: a repo-group header, or a session row.
+///
+/// A flat sequence rather than a header owning its rows, because that is the
+/// shape both consumers want — the native pane prepends a header to the item
+/// below it, and a plugin emits one list child per element.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionListItem {
+    /// A repo-group header, above that group's first row.
+    Header(String),
+    /// A session.
+    Session(SessionRow),
+}
+
+/// What the geometry step reads to resolve the pane's rows.
+///
+/// A struct rather than nine positional arguments because two callers build it:
+/// the pane, and the publisher that hands the same rows to a plugin.
+pub struct RowInputs<'a> {
+    /// Sessions in render order.
+    pub sessions: &'a [&'a SessionInfo],
+    /// Which of them the cursor is on.
+    pub active_index: usize,
+    /// Whether the cursor is shown at all (it is not while the automations
+    /// context owns the central pane).
+    pub show_selection: bool,
+    /// Per-session fuzzy match positions, parallel to `sessions`.
+    pub match_positions: &'a [Option<SessionMatch>],
+    /// Whether a search is running, which is what dims a non-matching row.
+    pub search_active: bool,
+    /// `Some(label)` on each group's first row, parallel to `sessions`.
+    pub headers: &'a [Option<String>],
+    /// Tree depth within the repo group, parallel to `sessions`.
+    pub depths: &'a [u8],
+}
+
+/// Separator between the session name and the inline agent status.
+const AGENT_STATUS_SEPARATOR: &str = "  ";
+/// Minimum columns the inline agent status needs to be worth showing.
+const AGENT_STATUS_MIN_WIDTH: usize = 4;
+/// Columns the status glyph occupies: the glyph with a space either side.
+const STATUS_GLYPH_COLUMNS: usize = 3;
+/// The remote-host mark, and the worktree mark, each with its trailing space.
+const REMOTE_MARK: &str = "\u{21c5} ";
+const WORKTREE_MARK: &str = "\u{2442} ";
+
+/// Identity of the working spinner's motion within the pane.
+///
+/// Motion identity is `(pane, key, signature)`, so this string only has to be
+/// unique inside one pane — a plugin reproducing this pane may use any key it
+/// likes and animates identically. The bundled plugin uses this one so the two
+/// trees compare equal, which is a property of the test rather than a name a
+/// plugin has to know.
+pub const SPINNER_MOTION_KEY: &str = "spinner";
+
+/// The pane's rows in render order, before the agent's text is fitted.
+///
+/// Each entry pairs the repo-group header that precedes its row (`None` on every
+/// row but a group's first) with the row itself. Shared by the two callers that
+/// need the same rows for different reasons — the pane fits the agent's text to
+/// its column, the publisher hands a plugin the text whole — so neither can
+/// disagree with the other about which row is dimmed, nested, or a cross-group
+/// child.
+///
+/// The returned rows carry no [`SessionRow::status_text`]: resolving one needs a
+/// width, and that is [`resolve_items`]' job.
+pub fn resolve_rows(inputs: &RowInputs<'_>) -> Vec<(Option<String>, SessionRow)> {
+    // Session ids on screen, for the cross-group child mark (a child whose parent
+    // renders in another repo group gets `↳` instead of indentation).
+    let visible_ids: std::collections::HashSet<crate::session::SessionId> =
+        inputs.sessions.iter().map(|s| s.id).collect();
+
+    inputs
+        .sessions
+        .iter()
+        .enumerate()
+        .map(|(i, info)| {
+            let session_match = inputs.match_positions.get(i).and_then(|m| m.as_ref());
+            let depth = inputs.depths.get(i).copied().unwrap_or(0);
+            let row = SessionRow {
+                status: info.status,
+                name: info.name.clone(),
+                name_matches: session_match.map(|m| m.name.clone()).unwrap_or_default(),
+                depth,
+                cross_group_child: depth == 0
+                    && info
+                        .parent_session_id
+                        .is_some_and(|p| p != info.id && visible_ids.contains(&p)),
+                remote: info.remote_host.is_some(),
+                worktree: !info.worktrees.is_empty(),
+                selected: i == inputs.active_index && inputs.show_selection,
+                dimmed: inputs.search_active && session_match.is_none(),
+                status_text: None,
+            };
+            (inputs.headers.get(i).cloned().flatten(), row)
+        })
+        .collect()
+}
+
+/// Resolve the pane's rows for a column `inner_width` wide.
+///
+/// The **geometry** step: on top of [`resolve_rows`] it decides how much of the
+/// agent's reported text fits after the name, and whether it fits at all. A plugin
+/// never learns its pane's width, so this stays the kernel's —
+/// [`session_list_tree`] below is the part a plugin reproduces.
+pub fn resolve_items(inputs: &RowInputs<'_>, inner_width: usize) -> Vec<SessionListItem> {
+    let mut items = Vec::with_capacity(inputs.sessions.len());
+    for ((header, row), info) in resolve_rows(inputs).into_iter().zip(inputs.sessions) {
+        if let Some(label) = header {
+            items.push(SessionListItem::Header(label));
+        }
+        let status_text = agent_status_text(info)
+            .and_then(|text| fit_status_text(&text, row_used_columns(&row), inner_width));
+        items.push(SessionListItem::Session(SessionRow { status_text, ..row }));
     }
-    Line::from(Span::styled(text, Style::default().fg(Theme::text_muted())))
+    items
+}
+
+/// Columns the row's runs occupy before the agent's text, counted in **chars**.
+///
+/// Chars rather than display columns because that is what the pre-port span walk
+/// counted, and the fit below has to keep giving the same answer.
+fn row_used_columns(row: &SessionRow) -> usize {
+    STATUS_GLYPH_COLUMNS
+        + prefix_text(row.depth, row.cross_group_child)
+            .chars()
+            .count()
+        + if row.remote {
+            REMOTE_MARK.chars().count()
+        } else {
+            0
+        }
+        + if row.worktree {
+            WORKTREE_MARK.chars().count()
+        } else {
+            0
+        }
+        + row.name.chars().count()
+}
+
+/// Fit the agent's reported text into what is left of the column, or drop it.
+///
+/// Dropped rather than overflowed when fewer than [`AGENT_STATUS_MIN_WIDTH`]
+/// columns remain: the coloured status glyph already carries the state, so a
+/// two-column stub of the message is worth less than the name it would push out.
+fn fit_status_text(text: &str, used_before: usize, inner_width: usize) -> Option<String> {
+    let used = used_before + AGENT_STATUS_SEPARATOR.chars().count();
+    let avail = inner_width.saturating_sub(used);
+    (avail >= AGENT_STATUS_MIN_WIDTH).then(|| super::truncate_ellipsis(text, avail))
 }
 
 /// Resolve the agent-reported status text for a session row, if any.
-/// Priority:
-///   1. Blocked → the agent's notification message (falls back to "Blocked").
-///   2. The agent-reported OSC activity title (richer "insight").
 ///
-/// The colored status dot already conveys the state, so a row with no
-/// agent-reported text carries no status text at all.
+/// Priority: a blocked session shows its agent's notification (falling back to
+/// the status label); otherwise the agent's reported activity title. The coloured
+/// status glyph already conveys the state, so a row with no agent-reported text
+/// carries none.
 fn agent_status_text(info: &SessionInfo) -> Option<String> {
-    if info.status == crate::session::SessionStatus::Blocked {
+    if info.status == SessionStatus::Blocked {
         return Some(
             info.notification
                 .clone()
@@ -910,19 +1101,270 @@ fn agent_status_text(info: &SessionInfo) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Separator between the session name and the inline agent status.
-const AGENT_STATUS_SEPARATOR: &str = "  ";
-/// Minimum columns the inline agent status needs to be worth showing.
-const AGENT_STATUS_MIN_WIDTH: usize = 4;
+/// The pane's whole view tree: one list child per resolved item.
+///
+/// The **presentation** step, and it carries no geometry at all: glyphs, marks,
+/// colour roles, the `selected > dimmed > role` precedence, the search emphasis,
+/// and the animation of a working row. That is the part
+/// `tests/bundled_session_list.rs` asserts a bundled Luau plugin reproduces
+/// exactly.
+///
+/// The cursor is declared on the list so the *kernel* windows it, which is how a
+/// pane that is never told its height scrolls (ADR-30). The native pane hands its
+/// nodes to a ratatui list instead and keeps its own offset — see
+/// `render_session_section` — so the two window by different rules, which is
+/// the one divergence the port records.
+pub fn session_list_tree(items: &[SessionListItem]) -> ViewNode {
+    let selected = items
+        .iter()
+        .position(|item| matches!(item, SessionListItem::Session(row) if row.selected));
+    ViewNode::List {
+        children: items.iter().map(session_item_node).collect(),
+        selected,
+    }
+}
 
-/// Style for the session name span.
-fn name_span_style(is_active: bool, is_dimmed: bool) -> Style {
+/// One item's node: a group header, or a session row.
+pub fn session_item_node(item: &SessionListItem) -> ViewNode {
+    match item {
+        SessionListItem::Header(label) => group_header_node(label),
+        SessionListItem::Session(row) => session_row_node(row),
+    }
+}
+
+/// A full-width repo-group header: `── label ──────────`.
+///
+/// Always muted, and it never reflects selection — highlighting belongs to the
+/// session rows alone, so selecting a group's first row must not light up its
+/// header. Status lives on the rows, never here. The trailing rule is a fill: it
+/// reaches the pane's edge, and a plugin is never told which column that is.
+fn group_header_node(label: &str) -> ViewNode {
+    ViewNode::Line(vec![
+        ViewNode::token(format!("\u{2500}\u{2500} {label} "), StyleToken::Muted),
+        ViewNode::Fill {
+            glyph: '\u{2500}',
+            style: token_style(StyleToken::Muted),
+        },
+    ])
+}
+
+/// A session row: status glyph, prefix marks, name, agent text — and, on the
+/// cursor's row, a fill that carries the selection bar to the pane's edge.
+fn session_row_node(row: &SessionRow) -> ViewNode {
+    let mut runs = vec![status_glyph_node(row)];
+
+    let prefix = prefix_text(row.depth, row.cross_group_child);
+    if !prefix.is_empty() {
+        // The tree prefix is muted whether or not the row matched a search: it is
+        // structure, not content, so dimming it would say nothing.
+        runs.push(ViewNode::styled(prefix, run_style(row, StyleToken::Muted)));
+    }
+    if row.remote {
+        runs.push(ViewNode::styled(
+            REMOTE_MARK,
+            mark_style(row, StyleToken::Accent),
+        ));
+    }
+    if row.worktree {
+        runs.push(ViewNode::styled(
+            WORKTREE_MARK,
+            mark_style(row, StyleToken::Branch),
+        ));
+    }
+
+    for (range, matched) in super::highlight::highlight_runs(&row.name, &row.name_matches) {
+        let style = if matched {
+            matched_style(row)
+        } else {
+            name_style(row)
+        };
+        runs.push(ViewNode::styled(&row.name[range], style));
+    }
+
+    if let Some(text) = row.status_text.as_deref() {
+        // The separator takes no role of its own — two spaces carry no meaning —
+        // so it inherits the row's selection appearance and nothing else.
+        runs.push(ViewNode::styled(
+            AGENT_STATUS_SEPARATOR,
+            if row.selected {
+                SELECTED_STYLE
+            } else {
+                TextStyle::default()
+            },
+        ));
+        runs.push(ViewNode::styled(text, status_text_style(row)));
+    }
+
+    if row.selected {
+        // The selection bar is the row, not the text on it: it reaches the pane's
+        // right edge. A plugin cannot pad to a width it is never told, so the
+        // residue is a fill.
+        runs.push(ViewNode::Fill {
+            glyph: ' ',
+            style: SELECTED_STYLE,
+        });
+    }
+
+    ViewNode::Line(runs)
+}
+
+/// The status glyph, animated while the session is working.
+///
+/// Ten braille frames at [`DEFAULT_FPS`], declared as motion so the **kernel**
+/// drives them: the frames are this pane's choice and the clock is not. A
+/// non-working status is a static glyph, which is also what frame 0 of the
+/// animation is, so a reduced-motion pane still reads correctly.
+fn status_glyph_node(row: &SessionRow) -> ViewNode {
+    let style = glyph_style(row);
+    if row.status == SessionStatus::Working {
+        let frames = super::SPINNER_FRAMES
+            .iter()
+            .map(|f| ViewNode::styled(format!(" {f} "), style))
+            .collect();
+        return ViewNode::Motion {
+            key: SPINNER_MOTION_KEY.to_string(),
+            keyed_by_id: true,
+            motion: Motion::cycle(frames, DEFAULT_FPS, true),
+        };
+    }
+    ViewNode::styled(format!(" {} ", row.status.icon()), style)
+}
+
+/// The tree prefix between the status glyph and the name: `└ ` per level of
+/// nesting, or `↳ ` for a child whose parent renders in another group.
+fn prefix_text(depth: u8, cross_group_child: bool) -> String {
+    if depth > 0 {
+        format!("{}\u{2514} ", "  ".repeat(depth as usize - 1))
+    } else if cross_group_child {
+        "\u{21b3} ".to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// How every run of the cursor's row is drawn.
+///
+/// One appearance for the whole row, bold, in the theme's selection pair: the
+/// row's own colour roles are *replaced* rather than layered under it, which is
+/// what makes the bar read as one bar.
+const SELECTED_STYLE: TextStyle = TextStyle {
+    token: None,
+    bold: true,
+    dim: false,
+    underline: false,
+    selected: true,
+    tint: None,
+};
+
+/// A colour role with no emphasis — the shape most runs are.
+const fn token_style(token: StyleToken) -> TextStyle {
+    TextStyle {
+        token: Some(token),
+        bold: false,
+        dim: false,
+        underline: false,
+        selected: false,
+        tint: None,
+    }
+}
+
+/// A run in `token`, unless the row's selection overrides it.
+fn run_style(row: &SessionRow, token: StyleToken) -> TextStyle {
+    if row.selected {
+        SELECTED_STYLE
+    } else {
+        token_style(token)
+    }
+}
+
+/// A prefix mark: muted when a search dimmed the row, otherwise its own role.
+fn mark_style(row: &SessionRow, token: StyleToken) -> TextStyle {
+    run_style(row, if row.dimmed { StyleToken::Muted } else { token })
+}
+
+/// The status glyph: its status's role, or muted on a dimmed row.
+fn glyph_style(row: &SessionRow) -> TextStyle {
+    mark_style(row, StyleToken::for_status(row.status))
+}
+
+/// The session name: the theme's primary text, muted on a dimmed row.
+fn name_style(row: &SessionRow) -> TextStyle {
+    if row.selected {
+        SELECTED_STYLE
+    } else if row.dimmed {
+        token_style(StyleToken::Muted)
+    } else {
+        // No token: the theme's primary foreground, which is what an ordinary row
+        // has always been.
+        TextStyle::default()
+    }
+}
+
+/// A character the search matched: accent, bold and underlined — and on the
+/// cursor's row, underlined over the selection pair, since the bar owns the
+/// colour there.
+fn matched_style(row: &SessionRow) -> TextStyle {
+    if row.selected {
+        TextStyle {
+            underline: true,
+            ..SELECTED_STYLE
+        }
+    } else {
+        TextStyle {
+            token: Some(StyleToken::Accent),
+            bold: true,
+            underline: true,
+            ..TextStyle::default()
+        }
+    }
+}
+
+/// The agent's text after the name: an attention notification keeps the status
+/// colour (the same role as the glyph) so it stands out; ordinary activity text
+/// is muted so the name stays the anchor.
+fn status_text_style(row: &SessionRow) -> TextStyle {
+    if row.status == SessionStatus::Blocked {
+        glyph_style(row)
+    } else {
+        run_style(row, StyleToken::Muted)
+    }
+}
+
+/// The frame table the native pane paints its rows with.
+///
+/// The kernel's clock reaches the renderer as plain data — the same channel a
+/// plugin's declared motion is resolved through — which is why `ui` can draw an
+/// animation without any path back to a VM.
+fn spinner_frames(spinner_frame: usize) -> FrameTable {
+    let mut frames = FrameTable::default();
+    frames.set(
+        SPINNER_MOTION_KEY,
+        spinner_frame % super::SPINNER_FRAMES.len(),
+    );
+    frames
+}
+
+/// The pre-port span builders, retained as the oracle that pins the tree to what
+/// the pane drew before it: `legacy_session_line` and `legacy_group_header_line`
+/// are the code this module shipped until the rows became view-tree nodes, and
+/// `the_tree_paints_what_the_span_builder_painted` asserts the two agree cell for
+/// cell.
+#[cfg(test)]
+fn legacy_group_header_line(label: &str, inner_width: usize) -> Line<'static> {
+    let mut text = format!("\u{2500}\u{2500} {label} ");
+    let used = text.chars().count();
+    if inner_width > used {
+        text.push_str(&"\u{2500}".repeat(inner_width - used));
+    }
+    Line::from(Span::styled(text, Style::default().fg(Theme::text_muted())))
+}
+
+/// Style for the session name span, as the pre-port pane resolved it.
+#[cfg(test)]
+fn legacy_name_style(is_active: bool, is_dimmed: bool) -> Style {
     if is_dimmed {
         Style::default().fg(Theme::text_muted())
     } else if is_active {
-        // `build_session_line` paints the active row with `selection_bg`, so the
-        // name must use the theme's `selection_fg` (not `accent`) to stay legible
-        // on that background — each theme tunes the pair for contrast.
         Style::default()
             .fg(Theme::selection_fg())
             .add_modifier(Modifier::BOLD)
@@ -931,48 +1373,9 @@ fn name_span_style(is_active: bool, is_dimmed: bool) -> Style {
     }
 }
 
-/// Push the prefix marks that sit between the status dot and the name: the
-/// tree/cross-group child glyph, the remote-host cloud, and the worktree mark.
-fn push_prefix_marks(
-    spans: &mut Vec<Span<'_>>,
-    info: &SessionInfo,
-    is_dimmed: bool,
-    depth: u8,
-    cross_group_child: bool,
-) {
-    // Tree prefix for children nested under their parent in the same repo
-    // group; `↳` for children whose parent renders elsewhere in the list.
-    let tree_style = Style::default().fg(Theme::text_muted());
-    if depth > 0 {
-        let indent = "  ".repeat(depth as usize - 1);
-        spans.push(Span::styled(format!("{indent}\u{2514} "), tree_style));
-    } else if cross_group_child {
-        spans.push(Span::styled("\u{21b3} ", tree_style));
-    }
-
-    // Remote (ssh:/wsl:) sessions get a remote-link mark so it's clear at a
-    // glance the agent runs on another machine. Sits right after the status
-    // dot; a single trailing space keeps it off the session name, matching
-    // the worktree mark's spacing.
-    if info.remote_host.is_some() {
-        spans.push(Span::styled(
-            "\u{21c5} ",
-            mark_style(is_dimmed, Theme::accent),
-        ));
-    }
-
-    // Worktree sessions get a dedicated mark, subordinate to the status dot.
-    if !info.worktrees.is_empty() {
-        spans.push(Span::styled(
-            "\u{2442} ",
-            mark_style(is_dimmed, Theme::branch_name),
-        ));
-    }
-}
-
-/// Style for a prefix mark: muted when the row is dimmed, otherwise the given
-/// accent color.
-fn mark_style(is_dimmed: bool, color: fn() -> ratatui::style::Color) -> Style {
+/// Style for a prefix mark, as the pre-port pane resolved it.
+#[cfg(test)]
+fn legacy_mark_style(is_dimmed: bool, color: fn() -> ratatui::style::Color) -> Style {
     if is_dimmed {
         Style::default().fg(Theme::text_muted())
     } else {
@@ -980,80 +1383,58 @@ fn mark_style(is_dimmed: bool, color: fn() -> ratatui::style::Color) -> Style {
     }
 }
 
-/// Append the agent-reported status after the name, truncated to fit
-/// `inner_width`. An attention notification keeps the status color (same accent
-/// as the dot) so it stands out; plain activity text is muted so the name stays
-/// the visual anchor.
-fn push_agent_status(
-    spans: &mut Vec<Span<'_>>,
-    info: &SessionInfo,
-    status_style: Style,
-    inner_width: usize,
-) {
-    let Some(status_text) = agent_status_text(info) else {
-        return;
-    };
-    let agent_status_style = if info.status == crate::session::SessionStatus::Blocked {
-        status_style
-    } else {
-        Style::default().fg(Theme::text_muted())
-    };
-    let used: usize = spans
-        .iter()
-        .map(|s| s.content.chars().count())
-        .sum::<usize>()
-        + AGENT_STATUS_SEPARATOR.chars().count();
-    let avail = inner_width.saturating_sub(used);
-    if avail >= AGENT_STATUS_MIN_WIDTH {
-        spans.push(Span::raw(AGENT_STATUS_SEPARATOR));
-        spans.push(Span::styled(
-            super::truncate_ellipsis(&status_text, avail),
-            agent_status_style,
-        ));
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_session_line<'a>(
-    info: &'a SessionInfo,
-    session_match: Option<&SessionMatch>,
-    is_active: bool,
-    is_dimmed: bool,
-    depth: u8,
-    cross_group_child: bool,
-    inner_width: usize,
-    spinner: &str,
-) -> Line<'a> {
-    let name_style = name_span_style(is_active, is_dimmed);
-    let status_style = if is_dimmed {
+/// The row line, as the pre-port pane built it.
+#[cfg(test)]
+fn legacy_session_line(row: &SessionRow, inner_width: usize, spinner: &str) -> Line<'static> {
+    let name_style = legacy_name_style(row.selected, row.dimmed);
+    let status_style = if row.dimmed {
         Style::default().fg(Theme::text_muted())
     } else {
-        Style::default().fg(super::status_color(info.status))
+        Style::default().fg(super::status_color(row.status))
     };
 
     let mut spans = vec![Span::styled(
-        format!(" {} ", super::status_glyph(info.status, spinner)),
+        format!(" {} ", super::status_glyph(row.status, spinner)),
         status_style,
     )];
 
-    push_prefix_marks(&mut spans, info, is_dimmed, depth, cross_group_child);
+    let tree_style = Style::default().fg(Theme::text_muted());
+    let prefix = prefix_text(row.depth, row.cross_group_child);
+    if !prefix.is_empty() {
+        spans.push(Span::styled(prefix, tree_style));
+    }
+    if row.remote {
+        spans.push(Span::styled(
+            REMOTE_MARK,
+            legacy_mark_style(row.dimmed, Theme::accent),
+        ));
+    }
+    if row.worktree {
+        spans.push(Span::styled(
+            WORKTREE_MARK,
+            legacy_mark_style(row.dimmed, Theme::branch_name),
+        ));
+    }
 
-    append_name_spans(
+    super::highlight::append_highlighted(
         &mut spans,
-        &info.name,
-        session_match.and_then(|m| m.positions(&m.name)),
+        &row.name,
+        (!row.name_matches.is_empty()).then_some(row.name_matches.as_slice()),
         name_style,
     );
 
-    push_agent_status(&mut spans, info, status_style, inner_width);
+    if let Some(text) = row.status_text.as_deref() {
+        let agent_status_style = if row.status == SessionStatus::Blocked {
+            status_style
+        } else {
+            Style::default().fg(Theme::text_muted())
+        };
+        spans.push(Span::raw(AGENT_STATUS_SEPARATOR));
+        spans.push(Span::styled(text.to_string(), agent_status_style));
+    }
 
     let mut line = Line::from(spans);
-
-    // Paint the selection background across the whole row here, rather than via
-    // the List's `highlight_style` (which would also tint the repo-group header
-    // prepended above the first row of each group). Pad to the full inner width
-    // and patch the selection style over every span so the bar fills the row.
-    if is_active {
+    if row.selected {
         let selection_style = Style::default()
             .bg(Theme::selection_bg())
             .fg(Theme::selection_fg())
@@ -1066,12 +1447,21 @@ fn build_session_line<'a>(
             span.style = span.style.patch(selection_style);
         }
     }
-
-    line
+    // The pre-port line borrowed its name from the session; the oracle owns it so
+    // a test can hold it past the row.
+    Line::from(
+        line.spans
+            .into_iter()
+            .map(|s| Span::styled(s.content.into_owned(), s.style))
+            .collect::<Vec<_>>(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+
+    use super::super::highlight::append_highlighted as append_name_spans;
     use super::super::highlight::highlighted_spans as build_highlighted_spans;
     use super::*;
     use crate::session::SessionStatus;
@@ -1282,16 +1672,16 @@ mod tests {
     }
 
     #[test]
-    fn session_match_positions_empty_returns_none() {
+    fn session_match_unmatched_fields_are_empty() {
         let m = SessionMatch::from_matches(Some(vec![0]), None, None, None, None).unwrap();
-        assert!(m.positions(&m.agent).is_none());
-        assert!(m.positions(&m.branch).is_none());
+        assert!(m.agent.is_empty());
+        assert!(m.branch.is_empty());
     }
 
     #[test]
-    fn session_match_positions_non_empty_returns_some() {
+    fn session_match_keeps_the_offsets_it_was_given() {
         let m = SessionMatch::from_matches(Some(vec![0, 4]), None, None, None, None).unwrap();
-        assert_eq!(m.positions(&m.name), Some(&[0, 4][..]));
+        assert_eq!(m.name, vec![0, 4]);
     }
 
     // --- OrderedSessions ---
@@ -1342,7 +1732,7 @@ mod tests {
                         session_search_active: false,
                         headers: ordered.headers,
                         depths: ordered.depths,
-                        spinner: "◐",
+                        spinner_frame: 0,
                         pending_spawn: None,
                     },
                 );
@@ -1374,6 +1764,426 @@ mod tests {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
+    /// The row the pane resolves for one session at `inner_width`.
+    ///
+    /// Built directly rather than through [`resolve_items`] so a test can force
+    /// the two facts that need a *set* of sessions to arise — a dimmed row needs a
+    /// running search that missed it, a cross-group child needs its parent
+    /// elsewhere on screen — while still going through the real fit.
+    #[allow(clippy::too_many_arguments)]
+    fn test_row(
+        info: &SessionInfo,
+        matches: Option<&SessionMatch>,
+        selected: bool,
+        dimmed: bool,
+        depth: u8,
+        cross_group_child: bool,
+        inner_width: usize,
+    ) -> SessionRow {
+        let row = SessionRow {
+            status: info.status,
+            name: info.name.clone(),
+            name_matches: matches.map(|m| m.name.clone()).unwrap_or_default(),
+            depth,
+            cross_group_child,
+            remote: info.remote_host.is_some(),
+            worktree: !info.worktrees.is_empty(),
+            selected,
+            dimmed,
+            status_text: None,
+        };
+        let status_text = agent_status_text(info)
+            .and_then(|t| fit_status_text(&t, row_used_columns(&row), inner_width));
+        SessionRow { status_text, ..row }
+    }
+
+    /// Paint a node the way the pane paints its rows, as an owned line.
+    fn paint(node: &ViewNode, inner_width: usize, spinner_frame: usize) -> Line<'static> {
+        Line::from(
+            super::super::plugin_pane::line_spans(
+                node,
+                inner_width as u16,
+                &super::super::theme::current(),
+                &spinner_frames(spinner_frame),
+            )
+            .into_iter()
+            .map(|s| Span::styled(s.content.into_owned(), s.style))
+            .collect::<Vec<_>>(),
+        )
+    }
+
+    /// The line the pane paints for one session — the replacement for the
+    /// pre-port `build_session_line`, through the view tree.
+    #[allow(clippy::too_many_arguments)]
+    fn session_line(
+        info: &SessionInfo,
+        matches: Option<&SessionMatch>,
+        selected: bool,
+        dimmed: bool,
+        depth: u8,
+        cross_group_child: bool,
+        inner_width: usize,
+    ) -> Line<'static> {
+        let row = test_row(
+            info,
+            matches,
+            selected,
+            dimmed,
+            depth,
+            cross_group_child,
+            inner_width,
+        );
+        paint(&session_row_node(&row), inner_width, 0)
+    }
+
+    /// The line the pane paints for a repo-group header.
+    fn header_line(label: &str, inner_width: usize) -> Line<'static> {
+        paint(&group_header_node(label), inner_width, 0)
+    }
+
+    // ── the pre-port renderer, retained as an oracle ────────────────────────
+    //
+    // `legacy_session_line` / `legacy_group_header_line` (above, at module scope)
+    // are the span builders this pane used before its rows became view-tree nodes.
+    // They are kept so the port is a *checked* refactor: the differential test
+    // below asserts the tree paints the same cells, which is the only way to know
+    // that moving the pane onto the tree changed nothing a user sees.
+
+    /// Every row appearance the pane has, as `(name, row)` pairs.
+    fn differential_rows() -> Vec<(&'static str, SessionRow)> {
+        let base = |name: &str, status| SessionRow {
+            status,
+            name: name.to_string(),
+            name_matches: Vec::new(),
+            depth: 0,
+            cross_group_child: false,
+            remote: false,
+            worktree: false,
+            selected: false,
+            dimmed: false,
+            status_text: None,
+        };
+        vec![
+            ("idle", base("plain", SessionStatus::Idle)),
+            ("done", base("finished", SessionStatus::Done)),
+            ("error", base("crashed", SessionStatus::Error)),
+            ("unreachable", base("offline", SessionStatus::Unreachable)),
+            ("working", base("busy", SessionStatus::Working)),
+            (
+                "blocked with a notification",
+                SessionRow {
+                    status_text: Some("needs approval".to_string()),
+                    ..base("waiting", SessionStatus::Blocked)
+                },
+            ),
+            (
+                "activity text",
+                SessionRow {
+                    status_text: Some("Compacting".to_string()),
+                    ..base("streaming", SessionStatus::Working)
+                },
+            ),
+            (
+                "nested child",
+                SessionRow {
+                    depth: 2,
+                    ..base("worker", SessionStatus::Idle)
+                },
+            ),
+            (
+                "cross-group child",
+                SessionRow {
+                    cross_group_child: true,
+                    ..base("elsewhere", SessionStatus::Idle)
+                },
+            ),
+            (
+                "remote and worktree",
+                SessionRow {
+                    remote: true,
+                    worktree: true,
+                    ..base("devbox", SessionStatus::Idle)
+                },
+            ),
+            (
+                "selected",
+                SessionRow {
+                    selected: true,
+                    ..base("current", SessionStatus::Working)
+                },
+            ),
+            (
+                "selected with everything on it",
+                SessionRow {
+                    selected: true,
+                    remote: true,
+                    worktree: true,
+                    depth: 1,
+                    name_matches: vec![0, 2],
+                    status_text: Some("Thinking".to_string()),
+                    ..base("hilite", SessionStatus::Blocked)
+                },
+            ),
+            (
+                "dimmed by a search",
+                SessionRow {
+                    dimmed: true,
+                    remote: true,
+                    worktree: true,
+                    status_text: Some("Compacting".to_string()),
+                    ..base("filtered", SessionStatus::Working)
+                },
+            ),
+            (
+                "matched characters",
+                SessionRow {
+                    name_matches: vec![0, 4],
+                    ..base("foo-bar", SessionStatus::Idle)
+                },
+            ),
+            (
+                "matched multi-byte characters",
+                SessionRow {
+                    name_matches: vec![1],
+                    ..base("héllo", SessionStatus::Idle)
+                },
+            ),
+        ]
+    }
+
+    /// Paint one row both ways: through the view tree, and through the pre-port
+    /// span builder.
+    fn render_both(row: &SessionRow, w: u16, spinner_frame: usize) -> (Buffer, Buffer) {
+        let area = Rect::new(0, 0, w, 1);
+        let inner_width = w as usize;
+
+        let mut tree_buf = Buffer::empty(area);
+        let mut terminal = Terminal::new(TestBackend::new(w, 1)).unwrap();
+        terminal
+            .draw(|f| {
+                f.render_widget(
+                    Paragraph::new(paint(&session_row_node(row), inner_width, spinner_frame)),
+                    area,
+                )
+            })
+            .unwrap();
+        tree_buf.merge(terminal.backend().buffer());
+
+        let mut legacy_buf = Buffer::empty(area);
+        let mut legacy_terminal = Terminal::new(TestBackend::new(w, 1)).unwrap();
+        let spinner = super::super::SPINNER_FRAMES[spinner_frame];
+        legacy_terminal
+            .draw(|f| {
+                f.render_widget(
+                    Paragraph::new(legacy_session_line(row, inner_width, spinner)),
+                    area,
+                )
+            })
+            .unwrap();
+        legacy_buf.merge(legacy_terminal.backend().buffer());
+        (tree_buf, legacy_buf)
+    }
+
+    /// Assert two paints agree on every cell that carries ink.
+    ///
+    /// One latitude, and it is the whole difference between the pre-port pane and
+    /// this one: the two-space separator before the agent's text was a
+    /// `Span::raw`, which leaves the foreground **unset**, while a token-less run
+    /// resolves the theme's primary foreground. A space carries no ink, so the
+    /// cells are indistinguishable on screen — but they are not equal `Cell`s, and
+    /// a comparison that ignored the difference everywhere would also ignore a
+    /// real one. So a blank cell may differ in its foreground and in nothing else:
+    /// background, modifiers and underline must match on every cell, and every
+    /// cell with a glyph in it must match exactly.
+    fn assert_same_ink(tree: &Buffer, legacy: &Buffer, context: &str) {
+        assert_eq!(tree.area, legacy.area, "{context}: different areas");
+        for (i, (a, b)) in tree.content.iter().zip(legacy.content.iter()).enumerate() {
+            assert_eq!(a.symbol(), b.symbol(), "{context}: cell {i} glyph");
+            assert_eq!(a.bg, b.bg, "{context}: cell {i} background");
+            assert_eq!(a.modifier, b.modifier, "{context}: cell {i} modifiers");
+            assert_eq!(a.underline_color, b.underline_color, "{context}: cell {i}");
+            if a.symbol() != " " {
+                assert_eq!(a.fg, b.fg, "{context}: cell {i} foreground");
+            }
+        }
+    }
+
+    /// The port's own guarantee: the tree paints the row the pre-port span builder
+    /// painted — every inked cell exactly, at a width where nothing is fitted and
+    /// at one where the selection bar has little room left.
+    #[test]
+    fn the_tree_paints_what_the_span_builder_painted() {
+        for (name, row) in differential_rows() {
+            for width in [40u16, 18] {
+                let (tree, legacy) = render_both(&row, width, 0);
+                assert_same_ink(&tree, &legacy, &format!("`{name}` at width {width}"));
+            }
+        }
+    }
+
+    /// The one latitude `assert_same_ink` grants, pinned so it cannot widen
+    /// unnoticed: it applies to the separator's blanks and to nothing else, and it
+    /// is a foreground on a cell with no glyph in it.
+    #[test]
+    fn the_only_divergence_is_a_blank_cells_foreground() {
+        let row = SessionRow {
+            status_text: Some("Compacting".to_string()),
+            ..differential_rows().remove(0).1
+        };
+        let (tree, legacy) = render_both(&row, 40, 0);
+        let differing: Vec<usize> = tree
+            .content
+            .iter()
+            .zip(legacy.content.iter())
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            !differing.is_empty(),
+            "if the separator no longer differs, delete the latitude in \
+             `assert_same_ink` rather than leaving it granted"
+        );
+        for i in differing {
+            assert_eq!(tree.content[i].symbol(), " ", "cell {i} carries ink");
+            assert_eq!(tree.content[i].bg, legacy.content[i].bg);
+            assert_eq!(tree.content[i].modifier, legacy.content[i].modifier);
+        }
+    }
+
+    /// The animation is not exempt from the guarantee above: every frame of the
+    /// spinner has to paint what the pre-port pane painted at that frame.
+    #[test]
+    fn every_spinner_frame_paints_what_the_span_builder_painted() {
+        let row = SessionRow {
+            selected: false,
+            ..differential_rows()
+                .into_iter()
+                .find(|(name, _)| *name == "working")
+                .expect("a working row")
+                .1
+        };
+        for frame in 0..super::super::SPINNER_FRAMES.len() {
+            let (tree, legacy) = render_both(&row, 40, frame);
+            assert_same_ink(&tree, &legacy, &format!("frame {frame}"));
+        }
+    }
+
+    /// A group header paints identically too — its trailing rule is a fill, and a
+    /// fill resolving a different residue would show up here.
+    #[test]
+    fn the_header_tree_paints_what_the_span_builder_painted() {
+        for width in [40usize, 12, 6] {
+            let area = Rect::new(0, 0, width as u16, 1);
+            let mut tree_buf = Buffer::empty(area);
+            let mut terminal = Terminal::new(TestBackend::new(width as u16, 1)).unwrap();
+            terminal
+                .draw(|f| f.render_widget(Paragraph::new(header_line("repo", width)), area))
+                .unwrap();
+            tree_buf.merge(terminal.backend().buffer());
+
+            let mut legacy_buf = Buffer::empty(area);
+            let mut legacy_terminal = Terminal::new(TestBackend::new(width as u16, 1)).unwrap();
+            legacy_terminal
+                .draw(|f| {
+                    f.render_widget(
+                        Paragraph::new(legacy_group_header_line("repo", width)),
+                        area,
+                    )
+                })
+                .unwrap();
+            legacy_buf.merge(legacy_terminal.backend().buffer());
+            assert_same_ink(&tree_buf, &legacy_buf, &format!("header at width {width}"));
+        }
+    }
+
+    /// The tree must describe content only: the fit lives in [`resolve_items`], so
+    /// nothing in a node may depend on a width — which shows up as a run padded to
+    /// fill one. A trailing [`ViewNode::Fill`] is the exception, and the only one:
+    /// it is a *declaration* that the host resolves a residue, which is how the
+    /// selection bar reaches the edge without the tree knowing where the edge is.
+    #[test]
+    fn the_tree_carries_no_geometry() {
+        fn assert_no_padding(node: &ViewNode) {
+            if let ViewNode::Text { content, .. } = node {
+                assert!(
+                    !content.ends_with("   "),
+                    "a padded run means the tree resolved a width: {content:?}"
+                );
+            }
+            node.children().iter().for_each(assert_no_padding);
+        }
+        for (_, row) in differential_rows() {
+            assert_no_padding(&session_row_node(&row));
+        }
+        assert_no_padding(&group_header_node("a repo group"));
+    }
+
+    /// A working row animates through a *declared* motion, keyed so an identical
+    /// re-push keeps its phase, at the rate thurbox's own spinner has always run
+    /// at. Asserted on the node rather than on a frame, because the whole point of
+    /// the declaration is that the kernel owns the clock.
+    #[test]
+    fn a_working_row_declares_its_animation() {
+        let row = SessionRow {
+            status: SessionStatus::Working,
+            ..differential_rows().remove(0).1
+        };
+        let node = session_row_node(&row);
+        let motion = node
+            .children()
+            .iter()
+            .find_map(|child| match child {
+                ViewNode::Motion {
+                    key,
+                    keyed_by_id,
+                    motion,
+                } => Some((key.clone(), *keyed_by_id, motion.clone())),
+                _ => None,
+            })
+            .expect("a working row's glyph is a motion node");
+        assert_eq!(motion.0, SPINNER_MOTION_KEY);
+        assert!(motion.1, "a structural key would restart on a shape change");
+        assert_eq!(motion.2.fps, DEFAULT_FPS);
+        assert_eq!(motion.2.frames().len(), super::super::SPINNER_FRAMES.len());
+        assert!(motion.2.repeats());
+
+        // A row at rest declares none, so no lease is taken for a static glyph.
+        let resting = SessionRow {
+            status: SessionStatus::Idle,
+            ..row
+        };
+        assert!(!session_row_node(&resting)
+            .children()
+            .iter()
+            .any(|c| matches!(c, ViewNode::Motion { .. })));
+    }
+
+    /// The fit is the pane's only use of a width, so both things it does with one
+    /// — shorten the agent's text, or drop it — are asserted directly.
+    #[test]
+    fn the_agent_text_is_fitted_or_dropped() {
+        let mut info = info("session");
+        info.agent_activity = Some("a very long activity line indeed".to_string());
+        let wide = test_row(&info, None, false, false, 0, false, 80);
+        assert_eq!(
+            wide.status_text.as_deref(),
+            Some("a very long activity line indeed"),
+            "a wide column fits the text whole"
+        );
+
+        let narrow = test_row(&info, None, false, false, 0, false, 24);
+        let narrow_text = narrow.status_text.expect("some of it still fits");
+        assert!(narrow_text.ends_with('…'), "got {narrow_text:?}");
+        assert!(narrow_text.chars().count() <= 24 - (" session".len() + 4));
+
+        // Under four columns of room the text is dropped rather than stubbed: the
+        // coloured glyph already carries the state.
+        assert!(test_row(&info, None, false, false, 0, false, 14)
+            .status_text
+            .is_none());
+    }
+
     #[test]
     fn line_shows_worktree_glyph_when_worktree_present() {
         let mut s = info("feature");
@@ -1382,14 +2192,14 @@ mod tests {
             worktree_path: std::path::PathBuf::from("/tmp/wt/feat"),
             branch: "feat".to_string(),
         });
-        let line = build_session_line(&s, None, false, false, 0, false, WIDE, "◐");
+        let line = session_line(&s, None, false, false, 0, false, WIDE);
         assert!(line_text(&line).contains('\u{2442}'));
     }
 
     #[test]
     fn line_no_worktree_glyph_for_plain_session() {
         let s = info("plain");
-        let line = build_session_line(&s, None, false, false, 0, false, WIDE, "◐");
+        let line = session_line(&s, None, false, false, 0, false, WIDE);
         assert!(!line_text(&line).contains('\u{2442}'));
     }
 
@@ -1397,28 +2207,28 @@ mod tests {
     fn line_shows_remote_glyph_when_remote_host_present() {
         let mut s = info("remote");
         s.remote_host = Some("devbox".to_string());
-        let line = build_session_line(&s, None, false, false, 0, false, WIDE, "◐");
+        let line = session_line(&s, None, false, false, 0, false, WIDE);
         assert!(line_text(&line).contains('\u{21c5}'));
     }
 
     #[test]
     fn line_no_remote_glyph_for_local_session() {
         let s = info("local");
-        let line = build_session_line(&s, None, false, false, 0, false, WIDE, "◐");
+        let line = session_line(&s, None, false, false, 0, false, WIDE);
         assert!(!line_text(&line).contains('\u{21c5}'));
     }
 
     #[test]
     fn line_shows_tree_prefix_for_nested_child() {
         let s = info("worker");
-        let line = build_session_line(&s, None, false, false, 1, false, WIDE, "◐");
+        let line = session_line(&s, None, false, false, 1, false, WIDE);
         assert!(line_text(&line).contains('\u{2514}')); // └
     }
 
     #[test]
     fn line_shows_arrow_for_cross_group_child() {
         let s = info("worker");
-        let line = build_session_line(&s, None, false, false, 0, true, WIDE, "◐");
+        let line = session_line(&s, None, false, false, 0, true, WIDE);
         let text = line_text(&line);
         assert!(text.contains('\u{21b3}')); // ↳
         assert!(!text.contains('\u{2514}'));
@@ -1428,9 +2238,7 @@ mod tests {
     fn line_carries_no_status_text_without_agent_report() {
         let mut s = info("quiet");
         s.status = SessionStatus::Done;
-        let text = line_text(&build_session_line(
-            &s, None, false, false, 0, false, WIDE, "◐",
-        ));
+        let text = line_text(&session_line(&s, None, false, false, 0, false, WIDE));
         assert!(!text.contains("Waiting"));
         assert!(text.trim_end().ends_with("quiet"));
     }
@@ -1440,16 +2248,14 @@ mod tests {
         let mut s = info("busy");
         s.status = SessionStatus::Working;
         s.agent_activity = Some("Compacting conversation".to_string());
-        let text = line_text(&build_session_line(
-            &s, None, false, false, 0, false, WIDE, "◐",
-        ));
+        let text = line_text(&session_line(&s, None, false, false, 0, false, WIDE));
         assert!(text.contains("busy  Compacting conversation"));
     }
 
     #[test]
     fn active_line_paints_selection_background_to_full_width() {
         let s = info("active");
-        let line = build_session_line(&s, None, true, false, 0, false, WIDE, "◐");
+        let line = session_line(&s, None, true, false, 0, false, WIDE);
         // The bar is painted on the row itself (every span), so it can't bleed
         // onto a prepended group header, and it fills the full inner width.
         assert!(line
@@ -1464,7 +2270,7 @@ mod tests {
         // Inner width smaller than the rendered row: nothing to pad, but the
         // selection background must still cover the spans (and not panic).
         let s = info("a-fairly-long-session-name");
-        let line = build_session_line(&s, None, true, false, 0, false, 4, "◐");
+        let line = session_line(&s, None, true, false, 0, false, 4);
         assert!(line
             .spans
             .iter()
@@ -1474,7 +2280,7 @@ mod tests {
     #[test]
     fn inactive_line_has_no_selection_background() {
         let s = info("idle");
-        let line = build_session_line(&s, None, false, false, 0, false, WIDE, "◐");
+        let line = session_line(&s, None, false, false, 0, false, WIDE);
         assert!(line.spans.iter().all(|sp| sp.style.bg.is_none()));
     }
 
@@ -1482,7 +2288,7 @@ mod tests {
     fn group_header_is_always_muted_without_background() {
         // The header never reflects selection: selecting a group's first row
         // must not light up its header. Always muted, never a background tint.
-        let line = group_header_line("repo", WIDE);
+        let line = header_line("repo", WIDE);
         assert!(line.spans.iter().all(|sp| sp.style.bg.is_none()));
         assert_eq!(line.spans[0].style.fg, Some(Theme::text_muted()));
         assert!(!line.spans[0].style.add_modifier.contains(Modifier::BOLD));
@@ -1491,7 +2297,7 @@ mod tests {
     #[test]
     fn group_header_starts_with_the_rule_and_carries_no_status_glyph() {
         // Status belongs to the session rows; the header is a plain rule.
-        let text = line_text(&group_header_line("repo", WIDE));
+        let text = line_text(&header_line("repo", WIDE));
         assert!(text.starts_with("\u{2500}\u{2500} repo "), "{text:?}");
         for glyph in ["\u{25c6}", "\u{25cf}", "\u{25cb}", "\u{2717}", "\u{2298}"]
             .iter()
@@ -1506,9 +2312,7 @@ mod tests {
         let mut s = info("attn");
         s.status = SessionStatus::Blocked;
         s.notification = Some("Review this diff".to_string());
-        let text = line_text(&build_session_line(
-            &s, None, false, false, 0, false, WIDE, "◐",
-        ));
+        let text = line_text(&session_line(&s, None, false, false, 0, false, WIDE));
         assert!(text.contains("attn  Review this diff"));
     }
 
@@ -1516,7 +2320,7 @@ mod tests {
     fn line_truncates_agent_status_with_ellipsis() {
         let mut s = info("busy");
         s.agent_activity = Some("a very long activity title that cannot fit".to_string());
-        let line = build_session_line(&s, None, false, false, 0, false, 20, "◐");
+        let line = session_line(&s, None, false, false, 0, false, 20);
         let text = line_text(&line);
         assert!(text.chars().count() <= 20);
         assert!(text.ends_with('\u{2026}'));
@@ -1527,9 +2331,7 @@ mod tests {
         let mut s = info("busy");
         s.agent_activity = Some("Ready".to_string());
         // used = " ● " (3) + "busy" (4) + separator (2) = 9; "Ready" fits exactly.
-        let text = line_text(&build_session_line(
-            &s, None, false, false, 0, false, 14, "◐",
-        ));
+        let text = line_text(&session_line(&s, None, false, false, 0, false, 14));
         assert!(text.ends_with("busy  Ready"));
         assert!(!text.contains('\u{2026}'));
     }
@@ -1539,13 +2341,9 @@ mod tests {
         let mut s = info("busy");
         s.agent_activity = Some("Ready".to_string());
         // avail = AGENT_STATUS_MIN_WIDTH → shown truncated; one column less → skipped.
-        let shown = line_text(&build_session_line(
-            &s, None, false, false, 0, false, 13, "◐",
-        ));
+        let shown = line_text(&session_line(&s, None, false, false, 0, false, 13));
         assert!(shown.ends_with("Rea\u{2026}"));
-        let skipped = line_text(&build_session_line(
-            &s, None, false, false, 0, false, 12, "◐",
-        ));
+        let skipped = line_text(&session_line(&s, None, false, false, 0, false, 12));
         assert!(skipped.trim_end().ends_with("busy"));
     }
 
@@ -1553,9 +2351,7 @@ mod tests {
     fn line_skips_agent_status_when_no_room() {
         let mut s = info("a-rather-long-session-name");
         s.agent_activity = Some("activity".to_string());
-        let text = line_text(&build_session_line(
-            &s, None, false, false, 0, false, 30, "◐",
-        ));
+        let text = line_text(&session_line(&s, None, false, false, 0, false, 30));
         assert!(!text.contains("activity"));
         assert!(text.trim_end().ends_with("a-rather-long-session-name"));
     }

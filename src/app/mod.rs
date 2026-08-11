@@ -7444,7 +7444,98 @@ impl App {
             tasks: self.build_tasks_snapshot(),
             files: self.build_files_snapshot(),
             review: self.build_review_snapshot(),
+            session_list: self.build_session_list_snapshot(),
         }
+    }
+
+    /// The session list's rows as the published snapshot carries them.
+    ///
+    /// Built from the same inputs `view::render_left_panel` draws from, through the
+    /// same `project_list::resolve_rows`, so the published row and the drawn one
+    /// cannot disagree about which row opens a repo group, which is nested, which
+    /// the cursor is on, or which a search dimmed. What it does *not* do is fit any
+    /// text to a column: the fit is against a resolved pane width and the plugin's
+    /// pane is a different rect (see `pane_context::SessionRowSnapshot`).
+    fn build_session_list_snapshot(&self) -> crate::session::pane_context::SessionListSnapshot {
+        use crate::session::pane_context as pc;
+
+        let all: Vec<&SessionInfo> = self.sessions.iter().map(|s| &s.info).collect();
+        if all.is_empty() {
+            return pc::SessionListSnapshot::default();
+        }
+
+        // Reuse the order the view cached when its inputs have not moved, which is
+        // the normal case — the ordering is a pure function of the grouping and
+        // nesting inputs, so publishing costs a signature compare rather than a
+        // regroup on almost every tick.
+        let signature = self.session_order_signature();
+        let computed;
+        let order = match self
+            .cached_session_order
+            .as_ref()
+            .filter(|(cached, _)| *cached == signature)
+        {
+            Some((_, order)) => order,
+            None => {
+                computed = crate::ui::project_list::compute_session_order(&all);
+                &computed
+            }
+        };
+
+        // The same two facts the pane resolves from the global search: a query
+        // dims non-matching rows, and its matched offsets emphasise the rest.
+        let query = self.global_search_query().map(str::to_string);
+        let matches: Vec<Option<crate::ui::project_list::SessionMatch>> = match &query {
+            Some(q) => self
+                .sessions
+                .iter()
+                .map(|s| view::session_fuzzy(q, &s.info))
+                .collect(),
+            None => Vec::new(),
+        };
+        let ordered = crate::ui::project_list::OrderedSessions::from_order(
+            &all,
+            order,
+            &matches,
+            self.active_index,
+        );
+
+        // The cursor is hidden while the automations context owns the central pane,
+        // where the active session is irrelevant — the same rule the pane applies.
+        let show_selection = !matches!(
+            self.focus,
+            InputFocus::Automations
+                | InputFocus::AutomationEditor
+                | InputFocus::AutomationRunHistory
+        );
+        let rows = crate::ui::project_list::resolve_rows(&crate::ui::project_list::RowInputs {
+            sessions: &ordered.sessions,
+            active_index: ordered.active_index,
+            show_selection,
+            match_positions: &ordered.match_positions,
+            search_active: query.is_some(),
+            headers: ordered.headers,
+            depths: ordered.depths,
+        });
+
+        pc::SessionListSnapshot::bounded(rows.into_iter().zip(&ordered.sessions).map(
+            |((group, row), info)| pc::SessionRowSnapshot {
+                name: row.name,
+                status: pc::StatusSnapshot::of(row.status),
+                group,
+                depth: row.depth,
+                cross_group_child: row.cross_group_child,
+                remote: row.remote,
+                worktree: row.worktree,
+                selected: row.selected,
+                dimmed: row.dimmed,
+                match_positions: row.name_matches,
+                // Both texts, unresolved: which of them a row shows is the pane's
+                // rule, and it has the status name it needs to apply it.
+                activity: info.agent_activity.clone(),
+                notification: info.notification.clone(),
+            },
+        ))
     }
 
     /// The open review's diff lines as the published snapshot carries them.

@@ -1,0 +1,33 @@
+# thurbox's session list, as a plugin.
+#
+# The fifth pane of Phase 4 and the one ADR-V1 hinges on: the design says every
+# user-visible surface is a plugin *including the session list*, so a session list
+# that could only be kernel-drawn would make the plugin surface second-class by
+# demonstration. It is also the densest and most-redrawn pane thurbox has —
+# `docs/SPIKE-SESSION-LIST.md` measured whether it could be a plugin at all and
+# answered yes, on three conditions.
+#
+# It is the first bundled pane that **animates**: a working session's status glyph
+# is declared motion (`ui.cycle`), which the kernel drives from its own clock. The
+# plugin pushes its ten frames once and never participates in a frame.
+#
+# A *reproduction*, not a replacement — the native pane is still what thurbox
+# draws, and `tests/bundled_session_list.rs` asserts this plugin builds the
+# identical view tree and paints the identical frame.
+#
+# Two capabilities, and that is the whole reach: it renders, and it reads the
+# session list thurbox already has on screen. It launches nothing, kills nothing,
+# and moves no cursor — the cursor it draws is the kernel's.
+name = "session-list"
+api_version = 1
+
+capabilities = ["render", "sessions"]
+
+[[panes]]
+id = "sessions"
+title = "Sessions (plugin)"
+slot = "right"
+# Off by default. The native session list is still what the left column shows, so
+# shipping this visible would put two session lists on screen for every user. Turn
+# it on to compare them.
+default_visible = false

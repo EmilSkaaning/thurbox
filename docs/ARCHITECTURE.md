@@ -1490,3 +1490,80 @@ to reach the pane's right edge.
   only where Rust's `char::is_uppercase` is Unicode-aware.
 - Still no formatter. After four ports `PHASE4` §7's `thurbox.format.*` case is made
   by exactly one pane.
+
+## ADR-33: The session list is a plugin; its cursor and its clock are not
+
+Numbered 33 because ADR-32 is reserved for the automations pane, whose port is in
+flight on another branch.
+
+**Context.** ADR-V1 says everything but six things is a plugin **including the
+session list**. That clause is the one the whole model rests on: the session list
+is the densest pane thurbox has, the most frequently redrawn, and the one whose
+ordering, nesting and status rules the kernel owns — so a session list that could
+only be kernel-drawn would demonstrate that the plugin surface is a second-class
+one for decorations. `docs/SPIKE-SESSION-LIST.md` measured whether it could be a
+plugin and answered *yes, on three conditions*: a styled-span line node, a cursor
+that stays kernel state, and a render triggered by events rather than a poll.
+
+**Decision.**
+
+- **The rows are a view tree; the list widget is not.** `ui::project_list` splits
+  into a geometry step (`resolve_items` — which rows exist, what a group header
+  says, how much of the agent's text fits) and a presentation step
+  (`session_item_node` / `session_list_tree`, geometry-free). The native pane
+  paints its nodes through the *same* inline walk `ui::plugin_pane` uses
+  (`line_spans`), so a `Fill`'s residue is resolved by one implementation in both
+  panes. Its ratatui `List` is left alone, because its sticky scroll offset, its
+  two-line items and its click hitboxes are derived from the offset that widget
+  actually used.
+- **The cursor stays kernel state.** Each published row says whether the cursor is
+  on it; the plugin receives no keys and owns no selection. This is the spike's
+  second condition, and it is what makes the third one survivable — see below.
+- **The whole list is read under the `sessions` grant.** No new capability: the
+  capability's sentence is already "read the sessions thurbox is running", both
+  readers answer the one question a user is asked, and a pane that draws the
+  session list must not have to demand two grants to draw one pane. The
+  capability's documentation now states that the grant covers every session and
+  not only the active one, because the disclosure widens and a capability list is
+  only honest if it says what it discloses.
+- **thurbox's own working spinner is declared motion (ADR-V18's first bundled
+  consumer), in both trees.** The native pane declares the same ten-frame,
+  8 fps, keyed `cycle` the plugin does and resolves its frame through a
+  `FrameTable` filled from the clock it already ran on. The alternative — native
+  keeps a resolved glyph, the plugin declares a motion, and the comparison is
+  "equal up to the spinner" — would have exempted the one part of the pane that
+  moves from the only oracle the port has.
+
+**Consequences.**
+
+- **The drawing surface needed nothing new.** No node kind, no style field, no
+  style token, no capability — one reader was added, under the grant that already
+  covered it, which is the shape every port has had. The pane is four node kinds — `list`, `line`, `text`,
+  `fill` — every one of which predates the port, and
+  `the_host_surface_needed_no_new_node` asserts it rather than leaving it as a
+  claim in a document. `Fill`, added by ADR-31 for a diff row's tint, is what a
+  selection bar and a group header's rule need here: its second consumer, and the
+  first evidence it was a general node rather than one pane's escape hatch.
+- **A plugin's view of kernel state is one render interval stale.** The render
+  worker polls on a fixed 1 s cycle, so the spike's third condition does *not*
+  hold and its 5 ms selection-latency bar is missed by ~200× — for the plugin's
+  copy of the cursor. The cursor a user drives is kernel state, so the highlight
+  they watch moves in the frame the key was handled; had the plugin owned its
+  cursor, that would be the only number. This is a property of the host rather
+  than of this pane, and closing it is a change to the render loop's contract with
+  a rate policy attached (`PHASE4` §13 measures both candidate closures and why
+  neither belongs to a pane port).
+- **The native pane's animation does not take a lease.** Registering it in
+  `App::motion` would put thurbox's own spinner into the bounded aggregate rate
+  that plugin leases share, letting an installed plugin degrade it. The frame
+  table gives equality without moving the budget.
+- **Two new vocabulary rows, both chrome.** The empty state is drawn *centred* and
+  no node carries an alignment; the pane's border carries a per-session status
+  strip and clipped-row indicators, and nothing describes an overlay on a pane's
+  frame. The second is the third consumer of the frame-node row `PHASE4` §9 opened.
+- **One enumerated paint divergence**, pinned in both directions: a blank cell's
+  foreground before the agent's text (a `Span::raw` leaves it unset; a token-less
+  run resolves the theme's primary). `assert_same_ink` grants the latitude only on
+  a cell with no glyph in it, and a second test fails if it stops being needed.
+- Still no formatter. After five ports `PHASE4` §7's `thurbox.format.*` case is
+  made by exactly one pane.

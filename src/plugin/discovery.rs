@@ -196,6 +196,14 @@ const BUNDLED: &[BundledPlugin] = &[
         manifest: include_str!("bundled/code-review/plugin.toml"),
         entry: include_str!("bundled/code-review/init.luau"),
     },
+    // The session list, hidden by default too — the pane ADR-V1 hinges on, and
+    // the first bundled pane that *animates*: a working row's glyph is declared
+    // motion the kernel drives.
+    BundledPlugin {
+        name: "session-list",
+        manifest: include_str!("bundled/session-list/plugin.toml"),
+        entry: include_str!("bundled/session-list/init.luau"),
+    },
 ];
 
 /// Materialize the bundled plugins and return their directories.

@@ -113,6 +113,13 @@ pub(crate) fn highlight_runs(
 /// Build spans for `text` with the bytes at `positions` highlighted over
 /// `base_style`. `positions` are UTF-8 byte offsets (as returned by
 /// [`crate::fuzzy::fuzzy_match`]).
+///
+/// Test-only since the session list stopped assembling spans: the panes that
+/// emphasise a match now build [`crate::session::view_tree`] runs from
+/// [`highlight_runs`], and the two span builders below survive as the oracles
+/// that pin those trees to what the panes drew before them. A pane reaching for
+/// one again would be a pane leaving the view tree.
+#[cfg(test)]
 pub(crate) fn highlighted_spans<'a>(
     text: &'a str,
     positions: &[usize],
@@ -133,7 +140,9 @@ pub(crate) fn highlighted_spans<'a>(
 }
 
 /// Append `text` to `out`, highlighting `match_positions` when present,
-/// otherwise pushing the whole string in `style`.
+/// otherwise pushing the whole string in `style`. Test-only, for
+/// [`highlighted_spans`]' reason.
+#[cfg(test)]
 pub(crate) fn append_highlighted<'a>(
     out: &mut Vec<Span<'a>>,
     text: &'a str,
