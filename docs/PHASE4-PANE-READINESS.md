@@ -766,7 +766,7 @@ selection pair across the pane's whole width.
 | the empty state | `No sessions yet` / `Press Ctrl+N to create one` are drawn **centred**, and no node carries an alignment. A **new** vocabulary row, below |
 | the pending-spawn placeholder row | a row for a session that does not exist yet, inserted at an index the kernel computes from the group layout, whose phase label is dropped by a width rule. A second published shape and a second geometry rule |
 | scrolling by the native pane's rule | the plugin declares its cursor's row and the kernel windows the list (ADR-30); the native pane keeps ratatui's sticky offset, which its two-line items and click hitboxes are derived from. Both keep the cursor visible; they disagree about which rows sit beside it |
-| keys and hitboxes | no `j`/`k`, no `Shift+J` reordering, no click. The cursor the pane draws is the kernel's |
+| keys and hitboxes | no `j`/`k`, no `Shift+J` reordering, no click. The cursor the pane draws is the kernel's. **Since ADR-34/35/36** a pane can declare rebindable keys, change the records those keys change, and receive a click resolved to one of its rows — so what is left for this pane is the reordering write and its own cursor, not the input model |
 
 ### The oracle is a refactor, and a two-link chain
 

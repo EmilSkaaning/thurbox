@@ -420,7 +420,7 @@ fn spawn_plugin_render_loop(
     let stop = Arc::new(AtomicBool::new(false));
     let stop_worker = Arc::clone(&stop);
     let (tx, rx) = std::sync::mpsc::channel();
-    let (key_tx, key_rx) = std::sync::mpsc::channel::<thurbox::app::PluginKeyRequest>();
+    let (key_tx, key_rx) = std::sync::mpsc::channel::<thurbox::app::PluginInputRequest>();
     app.set_plugin_channels(rx, key_tx);
 
     std::thread::Builder::new()
@@ -497,15 +497,22 @@ fn spawn_plugin_render_loop(
                     }
                     match key_rx.recv_timeout(PLUGIN_RENDER_SLICE) {
                         Ok(req) => {
-                            let consumed = host
-                                .send_key(
+                            let consumed = match &req.input {
+                                thurbox::app::PluginInput::Key { key, binding } => host.send_key(
                                     &req.plugin,
                                     &req.pane,
-                                    &req.key,
-                                    req.binding.as_deref(),
+                                    key,
+                                    binding.as_deref(),
                                     thurbox::app::PLUGIN_KEY_TIMEOUT,
-                                )
-                                .unwrap_or(false);
+                                ),
+                                thurbox::app::PluginInput::Click { row } => host.send_click(
+                                    &req.plugin,
+                                    &req.pane,
+                                    *row,
+                                    thurbox::app::PLUGIN_KEY_TIMEOUT,
+                                ),
+                            }
+                            .unwrap_or(false);
                             let _ = req.reply.send(consumed);
                         }
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}

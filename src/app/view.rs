@@ -529,9 +529,13 @@ impl App {
     /// a plugin, and could not: the view tree is pure data in `session` with no
     /// reference back to a VM.
     #[cfg(feature = "plugins")]
-    fn render_plugin_panes(&self, frame: &mut Frame, regions: &[Rect]) {
+    fn render_plugin_panes(&mut self, frame: &mut Frame, regions: &[Rect]) {
         use crate::ui::{focus_block, FocusLevel};
 
+        // What each pane painted, collected while `self` is borrowed immutably and
+        // recorded afterwards — the click registry needs `&mut self`, and a pane's
+        // hitboxes have to come from the paint that produced them.
+        let mut painted: Vec<(String, String, Rect, Vec<crate::ui::RowHitbox>)> = Vec::new();
         let visible = self.plugin_panes.iter().filter(|p| p.visible);
         for (pane, &area) in visible.zip(regions) {
             // An error is shown in the title rather than over the content, so a
@@ -552,8 +556,8 @@ impl App {
                 .table_for(&pane.plugin, &pane.id)
                 .cloned()
                 .unwrap_or_default();
-            match pane.tree() {
-                Some(tree) => crate::ui::plugin_pane::render_tree(
+            let rows = match pane.tree() {
+                Some(tree) => crate::ui::plugin_pane::render_tree_rows(
                     tree,
                     inner,
                     &palette,
@@ -586,8 +590,36 @@ impl App {
                         &frames,
                         frame.buffer_mut(),
                     );
+                    // A loading or failed pane has no rows to click, but it is
+                    // still a pane: the whole-rect fallback below focuses it.
+                    Vec::new()
                 }
+            };
+            painted.push((pane.plugin.clone(), pane.id.clone(), area, rows));
+        }
+
+        // Rows first, then the pane's whole rect — the registry's first match
+        // wins, so an on-row click reports its row and a click anywhere else in
+        // the pane only focuses it.
+        for (plugin, pane, area, rows) in painted {
+            for hit in rows {
+                self.record_click(
+                    hit.rect,
+                    ClickAction::PluginPaneRow {
+                        plugin: plugin.clone(),
+                        pane: pane.clone(),
+                        row: Some(hit.index),
+                    },
+                );
             }
+            self.record_click(
+                area,
+                ClickAction::PluginPaneRow {
+                    plugin,
+                    pane,
+                    row: None,
+                },
+            );
         }
     }
 

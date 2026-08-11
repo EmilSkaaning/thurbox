@@ -477,6 +477,17 @@ export type Plugin = {
     -- change when they do. `key` is still delivered in both cases, which is what a
     -- pane collecting text needs.
     onKey: ((paneId: string, key: string, binding: string?) -> boolean)?,
+    -- Called when one of this pane's rows is clicked, if the manifest declared
+    -- `input` (a click is input, and is gated by the same capability). `row` is the
+    -- 1-based index in your pane's **outermost list** — the same numbering
+    -- `ui.list`'s `selected` argument uses, so the row you highlight and the row a
+    -- user clicks are the same number.
+    --
+    -- You are never told *where* the click landed: no coordinate, no rect, no
+    -- width. A click below your last row, or on a pane whose tree has no list,
+    -- focuses the pane and calls nothing. Returning `true` says you handled it;
+    -- unlike a key there is nothing for thurbox to fall through to.
+    onClick: ((paneId: string, row: number) -> boolean)?,
 }
 
 -- A command's bound arguments: one entry per argument the manifest declared,

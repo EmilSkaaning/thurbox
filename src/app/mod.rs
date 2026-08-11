@@ -742,7 +742,11 @@ pub(crate) struct ScrollbarHit {
 /// What a left click on a recorded screen region does. Recorded per-frame in
 /// [`App::click_targets`] (mirroring [`App::scrollbar_hits`]) so the mouse
 /// handler can route clicks to rows and panes without re-deriving the layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Clone` rather than `Copy`: a plugin pane's row names its pane by *name*,
+/// because the pane set is replaced whenever a plugin reloads and an index
+/// recorded last frame could mean a different pane by the time it is clicked.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ClickAction {
     /// Select the session at this display-order index (resolved through
     /// `render_order_indices()` at click time, like `Ctrl+J`/`Ctrl+K`).
@@ -756,6 +760,23 @@ pub(crate) enum ClickAction {
     SelectFileRow(usize),
     /// Focus the pane — the whole-rect fallback recorded after row targets.
     FocusPane(InputFocus),
+    /// Focus a plugin pane and tell its plugin which of its rows was clicked.
+    ///
+    /// The row is the 1-based index in the pane's outermost list — the numbering
+    /// `ui.list`'s `selectedRow` uses, so a plugin's cursor and a click speak about
+    /// rows the same way. Recorded before the pane's whole-rect `FocusPane`
+    /// fallback, like every other row target.
+    #[cfg(feature = "plugins")]
+    PluginPaneRow {
+        /// The plugin that owns the pane.
+        plugin: String,
+        /// The pane within it.
+        pane: String,
+        /// Which of its rows, counted from one — `None` for the pane's whole-rect
+        /// fallback, which focuses it and reports no row (a click below the last
+        /// row, or on a pane whose tree has no list at all).
+        row: Option<usize>,
+    },
     /// Select + activate the row in the active modal's list.
     ModalRow(usize),
     /// A global footer button — dispatches `Action` (Help/Settings/Theme/Quit)
@@ -919,27 +940,50 @@ pub struct EditorInvocation {
 #[cfg(feature = "plugins")]
 pub const PLUGIN_KEY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// A key offered to a plugin, with the channel its answer comes back on.
+/// One input event offered to a plugin.
 ///
-/// The UI thread has to know *now* whether the plugin consumed the key — it
-/// cannot defer the decision without double-handling or dropping it — so this
-/// carries a reply channel and the caller waits, bounded.
+/// Two variants on one channel, because they have identical timing requirements:
+/// the UI thread has to know *now* whether the plugin consumed the event, and a
+/// second channel would double the worker's select arms and shutdown paths for no
+/// difference.
+#[cfg(feature = "plugins")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginInput {
+    /// A keypress.
+    Key {
+        /// The key, in the plugin-facing spelling.
+        key: String,
+        /// The pane binding the chord resolved to, when it resolved to one.
+        ///
+        /// Carried beside the key rather than instead of it: a pane collecting
+        /// text needs the keypress, and a plugin that declares no binding at all
+        /// must keep working unchanged. A plugin acting on the binding id rather
+        /// than on the chord is what makes a user's rebind cost no plugin change.
+        binding: Option<String>,
+    },
+    /// A click on one of the pane's rows, counted from one in the pane's
+    /// outermost list — never a coordinate, which a plugin could not interpret
+    /// and is deliberately never told.
+    Click {
+        /// Which row.
+        row: usize,
+    },
+}
+
+/// An input event offered to a plugin, with the channel its answer comes back on.
+///
+/// The UI thread has to know *now* whether the plugin consumed it — it cannot
+/// defer the decision without double-handling or dropping it — so this carries a
+/// reply channel and the caller waits, bounded.
 #[cfg(feature = "plugins")]
 #[derive(Debug)]
-pub struct PluginKeyRequest {
+pub struct PluginInputRequest {
     /// Owning plugin.
     pub plugin: String,
-    /// Pane the key was aimed at.
+    /// Pane the event was aimed at.
     pub pane: String,
-    /// The key, in the plugin-facing spelling.
-    pub key: String,
-    /// The pane binding the chord resolved to, when it resolved to one.
-    ///
-    /// Carried beside the key rather than instead of it: a pane collecting text
-    /// needs the keypress, and a plugin that declares no binding at all must keep
-    /// working unchanged. A plugin acting on the binding id rather than on the
-    /// chord is what makes a user's rebind cost no plugin change.
-    pub binding: Option<String>,
+    /// What happened.
+    pub input: PluginInput,
     /// Where the answer goes.
     pub reply: std::sync::mpsc::Sender<bool>,
 }
@@ -1017,7 +1061,14 @@ pub struct App {
     pub(crate) plugin_events: Option<std::sync::mpsc::Receiver<PluginUiEvent>>,
     /// Outbound key requests to the plugin render worker.
     #[cfg(feature = "plugins")]
-    pub(crate) plugin_keys: Option<std::sync::mpsc::Sender<PluginKeyRequest>>,
+    pub(crate) plugin_keys: Option<std::sync::mpsc::Sender<PluginInputRequest>>,
+    /// Which plugin pane holds focus, when one does.
+    ///
+    /// `InputFocus::PluginPane` cannot say *which*, so a click (which names a pane
+    /// by construction) records it here and every input the host delivers follows
+    /// it. Validated on read, so a pane that has since vanished cannot hold focus.
+    #[cfg(feature = "plugins")]
+    pub(crate) focused_plugin_pane: Option<(String, String)>,
     /// Epochs and leases for motion a plugin declared. The kernel drives every
     /// animation from here; a plugin has no way to ask for a frame.
     #[cfg(feature = "plugins")]
@@ -1419,6 +1470,8 @@ impl App {
             plugin_events: None,
             #[cfg(feature = "plugins")]
             plugin_keys: None,
+            #[cfg(feature = "plugins")]
+            focused_plugin_pane: None,
             #[cfg(feature = "plugins")]
             motion: motion_state::MotionState::default(),
             show_file_viewer: false,
@@ -3114,7 +3167,7 @@ impl App {
             .click_targets
             .iter()
             .find(|t| t.rect.contains(pos))
-            .map(|t| (t.action, t.rect))
+            .map(|t| (t.action.clone(), t.rect))
         {
             // A diff-row click carries its column so a paired side-by-side row
             // can steer a follow-up comment to the old/new side it hit.
@@ -3348,6 +3401,18 @@ impl App {
                 // Single click activates, like Enter: toggle a directory,
                 // open a file in the editor.
                 self.file_viewer_expand();
+                true
+            }
+            #[cfg(feature = "plugins")]
+            ClickAction::PluginPaneRow { plugin, pane, row } => {
+                // Focus the pane that was pointed at — not merely "a plugin pane" —
+                // so the keys after the click go where the user is looking. A pane
+                // whose plugin never declared `input` is not focused and is told
+                // nothing, exactly as focus navigation already skips it.
+                self.focus_plugin_pane(&plugin, &pane);
+                if let Some(row) = row {
+                    self.offer_click_to_plugin(row);
+                }
                 true
             }
             ClickAction::FocusPane(focus) => {
@@ -7843,7 +7908,7 @@ impl App {
     pub fn set_plugin_channels(
         &mut self,
         rx: std::sync::mpsc::Receiver<PluginUiEvent>,
-        keys: std::sync::mpsc::Sender<PluginKeyRequest>,
+        keys: std::sync::mpsc::Sender<PluginInputRequest>,
     ) {
         self.plugin_events = Some(rx);
         self.plugin_keys = Some(keys);
@@ -7865,11 +7930,10 @@ impl App {
         };
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         if tx
-            .send(PluginKeyRequest {
+            .send(PluginInputRequest {
                 plugin,
                 pane: pane_id,
-                key,
-                binding,
+                input: PluginInput::Key { key, binding },
                 reply: reply_tx,
             })
             .is_err()
@@ -7877,6 +7941,65 @@ impl App {
             return false;
         }
         reply_rx.recv_timeout(PLUGIN_KEY_TIMEOUT).unwrap_or(false)
+    }
+
+    /// Focus a plugin pane **by name**, so the keys after a click go to the pane
+    /// the user pointed at rather than to the first focusable one.
+    ///
+    /// Remembering the pane is what makes a second focusable pane usable at all:
+    /// `InputFocus::PluginPane` says *a* plugin pane holds focus and cannot say
+    /// which, and adding a payload to it would churn a `Copy` enum compared by
+    /// value in dozens of places for a distinction only the host cares about.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn focus_plugin_pane(&mut self, plugin: &str, pane: &str) {
+        let focusable = self
+            .plugin_panes
+            .iter()
+            .any(|p| p.plugin == plugin && p.id == pane && p.is_focusable());
+        if !focusable {
+            // A pane whose plugin never declared `input` is not a focus target,
+            // exactly as focus navigation already skips it.
+            return;
+        }
+        self.focused_plugin_pane = Some((plugin.to_string(), pane.to_string()));
+        if self.focus != InputFocus::PluginPane {
+            self.focus = InputFocus::PluginPane;
+            self.on_focus_changed();
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Offer a click on one of the focused pane's rows to its plugin.
+    ///
+    /// Bounded exactly as a key is, and for the same reason — this is the second
+    /// and last place the UI thread waits on plugin code. An unconsumed click has
+    /// nothing to fall through to: the pane the user pointed at is the plugin's.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn offer_click_to_plugin(&mut self, row: usize) -> bool {
+        let Some(pane) = self.focusable_plugin_pane() else {
+            return false;
+        };
+        let (plugin, pane_id) = (pane.plugin.clone(), pane.id.clone());
+        let Some(tx) = self.plugin_keys.as_ref() else {
+            return false;
+        };
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        if tx
+            .send(PluginInputRequest {
+                plugin,
+                pane: pane_id,
+                input: PluginInput::Click { row },
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        let consumed = reply_rx.recv_timeout(PLUGIN_KEY_TIMEOUT).unwrap_or(false);
+        if consumed {
+            self.needs_redraw = true;
+        }
+        consumed
     }
 
     /// Which of the focused pane's bindings a chord resolves to.
@@ -8046,9 +8169,22 @@ impl App {
     #[cfg(not(feature = "plugins"))]
     pub(crate) fn toggle_plugin_pane(&mut self) {}
 
-    /// The plugin pane that can take focus, if any.
+    /// The plugin pane that holds focus, or the first that could take it.
+    ///
+    /// The remembered pane is **validated** on every read: a pane can vanish under
+    /// the pointer (hidden, reloaded away, its plugin stopped), and a stale memory
+    /// would otherwise send a key to a pane that is not on screen.
     #[cfg(feature = "plugins")]
     pub(crate) fn focusable_plugin_pane(&self) -> Option<&crate::plugin::PluginPane> {
+        if let Some((plugin, pane)) = &self.focused_plugin_pane {
+            if let Some(p) = self
+                .plugin_panes
+                .iter()
+                .find(|p| &p.plugin == plugin && &p.id == pane && p.is_focusable())
+            {
+                return Some(p);
+            }
+        }
         self.plugin_panes.iter().find(|p| p.is_focusable())
     }
 

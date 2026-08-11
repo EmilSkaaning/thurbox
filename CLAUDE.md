@@ -1239,6 +1239,19 @@ carries no *colouring*, because `src/ui/code_review.rs` is `ui::syntax`'s only
 reader and by the publish-a-rendering-only-when-two-panes-must-agree rule the
 highlighting stays the pane's (the bundled plugin ports the lexer to Luau).
 
+A plugin pane is **clickable** (ADR-36): the pane renderer reports one hitbox per
+row of its outermost list and `App::view` records them as
+`ClickAction::PluginPaneRow` before the pane's whole-rect focus fallback, so a click
+on a row focuses that pane and calls the plugin's `onClick(paneId, row)` with the
+row's 1-based index in the *whole* list (never a coordinate — a plugin is still
+never told its geometry), while a click anywhere else in the pane only focuses it.
+Because a click names a pane, focus now records **which** plugin pane holds it
+(`App::focused_plugin_pane`, validated on read so a vanished pane cannot keep it) —
+which is what makes a second focusable pane usable; the keyboard ring still lands on
+the first focusable pane. Clicks and keys share one bounded request
+(`PluginInput::{Key, Click}`), so a wedged plugin costs the event, not the frame.
+Still open: the wheel, a list scrollbar, and a ring stop per pane.
+
 Two capabilities let a plugin **change** records rather than only read them
 (ADR-35), which is what a pane needs to reproduce a native pane's mutating keys:
 **`tasks-write`** inserts `setTaskStatus`/`deleteTask`, **`automations-write`**

@@ -513,6 +513,35 @@ impl PluginHost {
             .send_key(pane_id, key, binding, timeout)
     }
 
+    /// Offer a click on a pane row to a plugin, returning whether it consumed it.
+    ///
+    /// Gated on `input` like a key: a click is input, and a plugin that did not ask
+    /// for input is not handed one.
+    pub fn send_click(
+        &self,
+        plugin: &str,
+        pane_id: &str,
+        row: usize,
+        timeout: Duration,
+    ) -> Result<bool, RuntimeError> {
+        let slot = self
+            .slots
+            .iter()
+            .find(|s| s.plugin.name() == plugin)
+            .ok_or(RuntimeError::ThreadGone)?;
+
+        if !slot.granted.has(Capability::Input) {
+            return Err(RuntimeError::Runtime(
+                "plugin was not granted the `input` capability".to_string(),
+            ));
+        }
+
+        slot.thread
+            .as_ref()
+            .ok_or(RuntimeError::ThreadGone)?
+            .send_click(pane_id, row, timeout)
+    }
+
     /// Whether a plugin may receive keys.
     pub fn accepts_input(&self, plugin: &str) -> bool {
         self.slots
@@ -1480,6 +1509,68 @@ mod tests {
             host.send_key("old", "board", "j", Some("next"), key_timeout()),
             Ok(true)
         );
+    }
+
+    /// A click is delivered to its own handler, carrying the row and nothing about
+    /// where the pointer was.
+    #[test]
+    fn a_plugin_can_consume_a_click_on_a_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("clicks");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("plugin.toml"),
+            "name = \"clicks\"\napi_version = 1\ncapabilities = [\"render\", \"input\"]\n\
+             [[panes]]\nid = \"board\"\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join(ENTRY_FILE_NAME),
+            "return { render = function() return { kind = \"divider\" } end, \
+             onClick = function(paneId, row) return paneId == \"board\" and row == 3 end }",
+        )
+        .unwrap();
+
+        let mut host = host_over(tmp.path());
+        host.start_all();
+
+        assert_eq!(
+            host.send_click("clicks", "board", 3, key_timeout()),
+            Ok(true)
+        );
+        assert_eq!(
+            host.send_click("clicks", "board", 4, key_timeout()),
+            Ok(false)
+        );
+    }
+
+    /// A plugin that takes keys and not clicks is ordinary, so an absent handler
+    /// simply does not consume.
+    #[test]
+    fn a_plugin_without_a_click_handler_consumes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_input_plugin(tmp.path(), "keysonly", "return true");
+
+        let mut host = host_over(tmp.path());
+        host.start_all();
+        assert_eq!(
+            host.send_click("keysonly", "board", 1, key_timeout()),
+            Ok(false)
+        );
+    }
+
+    /// A click is input, and is refused for the same reason a key is.
+    #[test]
+    fn a_plugin_without_the_input_capability_is_never_handed_a_click() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_pane_plugin(tmp.path(), "mute", r#"return { kind = "divider" }"#);
+
+        let mut host = host_over(tmp.path());
+        host.start_all();
+        match host.send_click("mute", "board", 1, key_timeout()) {
+            Err(RuntimeError::Runtime(msg)) => assert!(msg.contains("input"), "{msg}"),
+            other => panic!("expected a capability refusal, got {other:?}"),
+        }
     }
 
     #[test]

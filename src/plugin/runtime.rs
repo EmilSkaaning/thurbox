@@ -405,6 +405,33 @@ impl PluginVm {
         Ok(matches!(consumed, Value::Boolean(true)))
     }
 
+    /// Offer a click on one of the pane's rows, returning whether it consumed it.
+    ///
+    /// A separate handler from [`Self::on_key`], unlike a key's *binding* (which
+    /// rides on the key that produced it): a click is a different event with no key
+    /// to report, and folding it into `onKey` would need a sentinel key name — the
+    /// shape ADR-34 rejected for bindings.
+    fn on_click(&self, pane_id: &str, row: usize) -> Result<bool, RuntimeError> {
+        let module: Table = self
+            .lua
+            .named_registry_value(MODULE_REGISTRY_KEY)
+            .map_err(|e| classify(&e))?;
+
+        let handler: Value = module.get("onClick").map_err(|e| classify(&e))?;
+        let func = match handler {
+            Value::Function(f) => f,
+            // A plugin that takes keys and not clicks is normal, so an absent
+            // handler simply does not consume.
+            _ => return Ok(false),
+        };
+
+        self.arm();
+        let consumed: Value = func
+            .call((pane_id.to_string(), row as i64))
+            .map_err(|e| classify(&e))?;
+        Ok(matches!(consumed, Value::Boolean(true)))
+    }
+
     /// Run a plugin-owned CLI verb, returning whatever it printed.
     fn run_verb(&self, verb: &str, args: &[String]) -> Result<String, RuntimeError> {
         let module: Table = self
@@ -578,6 +605,7 @@ enum Request {
         Option<String>,
         Sender<Result<bool, RuntimeError>>,
     ),
+    Click(String, usize, Sender<Result<bool, RuntimeError>>),
     Named(String, Sender<Result<bool, RuntimeError>>),
     Verb(String, Vec<String>, Sender<Result<String, RuntimeError>>),
     Command(
@@ -723,6 +751,24 @@ impl PluginThread {
         }
     }
 
+    /// Offer a click to the plugin, bounded like a key.
+    pub fn send_click(
+        &self,
+        pane_id: &str,
+        row: usize,
+        timeout: Duration,
+    ) -> Result<bool, RuntimeError> {
+        let (tx, rx) = mpsc::channel();
+        self.requests
+            .send(Request::Click(pane_id.to_string(), row, tx))
+            .map_err(|_| RuntimeError::ThreadGone)?;
+        match rx.recv_timeout(timeout) {
+            Ok(result) => result,
+            Err(RecvTimeoutError::Timeout) => Err(RuntimeError::BudgetExceeded),
+            Err(RecvTimeoutError::Disconnected) => Err(RuntimeError::ThreadGone),
+        }
+    }
+
     /// Run a plugin-owned CLI verb.
     pub fn run_verb(&self, verb: &str, args: &[String]) -> Result<String, RuntimeError> {
         let owned_verb = verb.to_string();
@@ -845,6 +891,16 @@ fn serve(vm: PluginVm, requests: Receiver<Request>) {
             Request::Key(pane_id, key, binding, reply) => {
                 let result = match vm.as_ref() {
                     Some(v) => v.on_key(&pane_id, &key, binding.as_deref()),
+                    None => Err(RuntimeError::Terminated),
+                };
+                if result.as_ref().err().is_some_and(RuntimeError::is_fatal) {
+                    vm = None;
+                }
+                let _ = reply.send(result);
+            }
+            Request::Click(pane_id, row, reply) => {
+                let result = match vm.as_ref() {
+                    Some(v) => v.on_click(&pane_id, row),
                     None => Err(RuntimeError::Terminated),
                 };
                 if result.as_ref().err().is_some_and(RuntimeError::is_fatal) {

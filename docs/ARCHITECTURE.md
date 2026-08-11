@@ -1715,3 +1715,65 @@ snapshots do not move and the teardown gate is untouched. A pane replacement can
 now reproduce `Space` and `d` (and automations' `r`); `n`, `e`, tasks' `r` and `o`
 are still open, and `docs/PHASE4-PANE-READINESS.md` §10's wall — a plugin cannot
 move the cursor, take focus or switch sessions — is unchanged.
+
+## ADR-36: A click on a plugin pane is a row, and focus names the pane it hit
+
+**Context.** Every native pane is clickable by one mechanism: a renderer returns
+`ui::RowHitbox`es, `App::view` records them as `ClickAction`s, and
+`handle_mouse_click` hit-tests them, with the pane's whole-rect `FocusPane`
+recorded after the rows. A plugin pane recorded **no click target at all** — a
+click did not focus it, did not reach the plugin, and did not even highlight under
+the pointer. `plugin-host/input` shipped with "no mouse" as a stated non-goal, and
+a replacement has to behave like the pane it replaces.
+
+**Decision.**
+
+- **A click resolves to a row of the pane's outermost list**, 1-based — the same
+  numbering `ui.list`'s `selectedRow` uses, so the number a plugin sends out to say
+  where its cursor is, is the number it gets back when a row is clicked. A nested
+  list contributes nothing (one click would have two answers) and a tree with no
+  list has no rows (a column of lines is not a list of rows).
+- **The rows come from the paint, not from a second walk.** `render_tree_rows`
+  reports the rects `render_stacked` actually drew, because the kernel windows a
+  list that names its cursor (ADR-30) and a recomputing hit-test could resolve a
+  click against a layout other than the one on screen. The reported index is
+  therefore **list-space**, not screen-space: a plugin never learns the window, so a
+  screen position would be a number it cannot interpret.
+- **A click carries a row and nothing about geometry** — no coordinate, no rect, no
+  width, no height. The model has refused a plugin its geometry four times
+  (ADR-26, ADR-29, ADR-30, ADR-31) and a click is not the reason to stop.
+- **It rides the key channel.** `PluginInput` is `Key { key, binding } | Click { row }`
+  on one bounded request, because the two have identical timing requirements: the UI
+  thread must know *now* whether the event was consumed, and a second channel would
+  double the worker's select arms and shutdown paths for no difference.
+- **`onClick` is a separate handler, unlike a key's binding.** That looks
+  inconsistent with ADR-34 and is not: a binding is *the same event* as the key that
+  produced it, while a click is a different event with no key to report — folding it
+  into `onKey` would need a sentinel key name, the shape ADR-34 rejected.
+- **Focus names the pane it landed on.** `InputFocus::PluginPane` says *a* plugin
+  pane holds focus and cannot say which, so `App::focused_plugin_pane` records the
+  pair and `focusable_plugin_pane` consults it. Two consequences: a click sends the
+  keys after it to the pane the user pointed at, and a second focusable pane becomes
+  usable at all. Rejected: **a payload on the `InputFocus` variant** — it is a
+  `Copy` enum compared by value in dozens of places, for a distinction only the host
+  cares about. The remembered pair is **validated on every read**, so a pane that
+  vanishes under the pointer (hidden, reloaded away, its plugin stopped) cannot keep
+  focus and take the keys with it.
+- **`ClickAction` gives up `Copy`.** The pane is addressed by *name*, because the
+  pane set is replaced whenever a plugin reloads and an index recorded last frame
+  could mean a different pane by the time it is clicked — the same reason every
+  other pane write is keyed by name.
+- **A pane whose plugin never declared `input` is not focused and told nothing.** A
+  click is input, gated by the capability that gates input rather than by one of its
+  own.
+
+**Consequences.** Hover highlighting follows for free, since it runs off the same
+recorded targets. What stays open is recorded rather than implied: the **wheel** (a
+plugin's list has no offset the kernel owns, only a selected row it declares, so a
+wheel tick would have to become "the plugin was asked to move its cursor" — a
+keyboard question in a mouse costume), the **scrollbar** (still no track,
+`docs/PHASE4-PANE-READINESS.md` §9), and the **focus ring visiting each pane in
+turn** (a keyboard decision that belongs with ADR-28's picker; before this change
+the distinction could not even be expressed, because nothing named a pane). No
+bundled plugin declares `input`, so no bundled pane is clickable yet and every insta
+snapshot is byte-identical.

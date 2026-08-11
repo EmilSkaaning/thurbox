@@ -2562,7 +2562,7 @@ fn clicking_the_compose_overlay_does_not_move_the_diff_selection() {
                 && t.rect.y > overlay.y
                 && t.rect.y < overlay.y + overlay.height
         })
-        .map(|t| (t.action, t.rect))
+        .map(|t| (t.action.clone(), t.rect))
         .expect("the compose box covers at least one diff row");
     let (covered_action, covered_rect) = covered;
     let selected = h.app.active_review().unwrap().selected;
@@ -4512,14 +4512,234 @@ fn a_focused_panes_binding_is_delivered_with_the_key() {
 
     h.key(KeyCode::Char('x'), KeyModifiers::NONE);
     let request = key_rx.try_recv().expect("the key was offered");
-    assert_eq!(request.key, "x");
-    assert_eq!(request.binding.as_deref(), Some("delete-row"));
+    assert_eq!(
+        request.input,
+        crate::app::PluginInput::Key {
+            key: "x".to_string(),
+            binding: Some("delete-row".to_string()),
+        }
+    );
 
     // A key nothing of that pane's holds still arrives, with no binding.
     h.key(KeyCode::Char('z'), KeyModifiers::NONE);
     let request = key_rx.try_recv().expect("the key was offered");
-    assert_eq!(request.key, "z");
-    assert_eq!(request.binding, None);
+    assert_eq!(
+        request.input,
+        crate::app::PluginInput::Key {
+            key: "z".to_string(),
+            binding: None,
+        }
+    );
+}
+
+/// A click on a plugin pane row focuses that pane and tells its plugin which row
+/// — the mouse half of behaving like a native pane.
+#[cfg(feature = "plugins")]
+#[test]
+fn clicking_a_plugin_pane_row_focuses_it_and_reports_the_row() {
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::view_tree::ViewNode;
+
+    let mut h = Harness::new(160, 40, 1);
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, true);
+    pane.accepts_input = true;
+    pane.apply(Ok(ViewNode::list(vec![
+        ViewNode::text("first"),
+        ViewNode::text("second"),
+        ViewNode::text("third"),
+    ])));
+    h.app.set_plugin_panes(vec![pane]);
+
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (key_tx, key_rx) = std::sync::mpsc::channel();
+    h.app.set_plugin_channels(event_rx, key_tx);
+    drop(event_tx);
+
+    // A frame has to be painted first: the click registry is what was rendered.
+    h.render();
+    let row = plugin_pane_row_target(&h, 2).expect("the second row is clickable");
+    h.app.update(AppMessage::MouseClick {
+        x: row.x,
+        y: row.y,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    assert_eq!(h.app.focus, InputFocus::PluginPane);
+    let request = key_rx.try_recv().expect("the click was offered");
+    assert_eq!(request.pane, "board");
+    assert_eq!(request.input, crate::app::PluginInput::Click { row: 2 });
+}
+
+/// A click on the pane outside its rows focuses it and reports no row: there is
+/// nothing for the plugin to act on, and focusing is what the user asked for.
+#[cfg(feature = "plugins")]
+#[test]
+fn clicking_a_plugin_pane_below_its_rows_only_focuses_it() {
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::view_tree::ViewNode;
+
+    let mut h = Harness::new(160, 40, 1);
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, true);
+    pane.accepts_input = true;
+    pane.apply(Ok(ViewNode::list(vec![ViewNode::text("only row")])));
+    h.app.set_plugin_panes(vec![pane]);
+
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (key_tx, key_rx) = std::sync::mpsc::channel();
+    h.app.set_plugin_channels(event_rx, key_tx);
+    drop(event_tx);
+
+    h.render();
+    let row = plugin_pane_row_target(&h, 1).expect("the row is clickable");
+    // Well below the single row, still inside the pane.
+    h.app.update(AppMessage::MouseClick {
+        x: row.x,
+        y: row.y + 10,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    assert_eq!(h.app.focus, InputFocus::PluginPane);
+    assert!(
+        key_rx.try_recv().is_err(),
+        "no row was clicked, so the plugin is told nothing"
+    );
+}
+
+/// A pane whose plugin never declared `input` is not a focus target, so a click on
+/// it changes nothing — the rule focus navigation already applies.
+#[cfg(feature = "plugins")]
+#[test]
+fn clicking_a_pane_without_the_input_capability_does_nothing() {
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::view_tree::ViewNode;
+
+    let mut h = Harness::new(160, 40, 1);
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, true);
+    pane.apply(Ok(ViewNode::list(vec![ViewNode::text(
+        "look, no touching",
+    )])));
+    h.app.set_plugin_panes(vec![pane]);
+
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (key_tx, key_rx) = std::sync::mpsc::channel();
+    h.app.set_plugin_channels(event_rx, key_tx);
+    drop(event_tx);
+
+    h.render();
+    let row = plugin_pane_row_target(&h, 1).expect("the row is still recorded");
+    let before = h.app.focus;
+    h.app.update(AppMessage::MouseClick {
+        x: row.x,
+        y: row.y,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    assert_eq!(h.app.focus, before, "focus must not land on it");
+    assert!(key_rx.try_recv().is_err(), "and nothing is delivered");
+}
+
+/// With two focusable panes on screen, the clicked one takes focus and the keys
+/// after it go there — before this the first declared pane received every key.
+#[cfg(feature = "plugins")]
+#[test]
+fn clicking_the_second_focusable_pane_sends_later_keys_to_it() {
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::view_tree::ViewNode;
+
+    let mut h = Harness::new(160, 40, 1);
+    let panes = ["first", "second"]
+        .iter()
+        .map(|name| {
+            let mut pane =
+                crate::plugin::PluginPane::loading(name, "board", "Demo", PaneSlot::Right, true);
+            pane.accepts_input = true;
+            pane.apply(Ok(ViewNode::list(vec![ViewNode::text(*name)])));
+            pane
+        })
+        .collect();
+    h.app.set_plugin_panes(panes);
+
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (key_tx, key_rx) = std::sync::mpsc::channel();
+    h.app.set_plugin_channels(event_rx, key_tx);
+    drop(event_tx);
+
+    h.render();
+    let target = h
+        .app
+        .click_targets
+        .iter()
+        .find(|t| {
+            matches!(
+                &t.action,
+                crate::app::ClickAction::PluginPaneRow { plugin, row: Some(1), .. }
+                    if plugin == "second"
+            )
+        })
+        .map(|t| t.rect)
+        .expect("the second pane's row is clickable");
+    h.app.update(AppMessage::MouseClick {
+        x: target.x,
+        y: target.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    // Drain the click so the next request is the key's.
+    let _ = key_rx.try_recv();
+
+    h.key(KeyCode::Char('j'), KeyModifiers::NONE);
+    let request = key_rx.try_recv().expect("the key was offered");
+    assert_eq!(
+        request.plugin, "second",
+        "the key follows the pane the user pointed at"
+    );
+}
+
+/// The remembered pane is validated on every read, so a pane that vanishes cannot
+/// keep focus and take the keys with it.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_vanished_pane_does_not_keep_focus() {
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let mut h = Harness::new(160, 40, 1);
+    let mut gone =
+        crate::plugin::PluginPane::loading("gone", "board", "Demo", PaneSlot::Right, true);
+    gone.accepts_input = true;
+    let mut stays =
+        crate::plugin::PluginPane::loading("stays", "board", "Demo", PaneSlot::Right, true);
+    stays.accepts_input = true;
+    h.app.set_plugin_panes(vec![gone, stays.clone()]);
+    h.app.focus_plugin_pane("gone", "board");
+    assert_eq!(
+        h.app.focusable_plugin_pane().map(|p| p.plugin.clone()),
+        Some("gone".to_string())
+    );
+
+    // A reload republishes without it.
+    h.app.set_plugin_panes(vec![stays]);
+    assert_eq!(
+        h.app.focusable_plugin_pane().map(|p| p.plugin.clone()),
+        Some("stays".to_string()),
+        "the stale memory must not survive its pane"
+    );
+}
+
+/// Every clickable row of a plugin pane, resolved from the recorded targets.
+#[cfg(feature = "plugins")]
+fn plugin_pane_row_target(h: &Harness, row: usize) -> Option<ratatui::layout::Rect> {
+    h.app
+        .click_targets
+        .iter()
+        .find(|t| {
+            matches!(
+                &t.action,
+                crate::app::ClickAction::PluginPaneRow { row: Some(r), .. } if *r == row
+            )
+        })
+        .map(|t| t.rect)
 }
 
 /// A pane's binding is an F1 row like any other: selectable, capturable, and

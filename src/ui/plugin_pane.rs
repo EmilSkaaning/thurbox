@@ -21,6 +21,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 use unicode_width::UnicodeWidthStr;
 
+use super::RowHitbox;
 use crate::session::motion::FrameTable;
 use crate::session::theme_config::ThemePalette;
 use crate::session::view_tree::{DiffTint, StyleToken, TextStyle, ViewNode};
@@ -448,7 +449,9 @@ fn render_stacked(
     palette: &ThemePalette,
     frames: &FrameTable,
     buf: &mut ratatui::buffer::Buffer,
-) {
+    rows: &mut Option<RowSink>,
+) -> Vec<Rect> {
+    let mut drawn = Vec::new();
     let mut y = area.y;
     let bottom = area.y.saturating_add(area.height);
     for child in children {
@@ -458,22 +461,38 @@ fn render_stacked(
         let want = height_of(child, area.width, palette, frames);
         let height = want.min(bottom - y);
         if height == 0 {
-            continue;
-        }
-        render_tree(
-            child,
-            Rect {
+            // A child with no height is not drawn, so it has no rect — and the
+            // returned list is positional, so a placeholder would misalign every
+            // row after it against its own index.
+            drawn.push(Rect {
                 x: area.x,
                 y,
                 width: area.width,
-                height,
-            },
-            palette,
-            frames,
-            buf,
-        );
+                height: 0,
+            });
+            continue;
+        }
+        let rect = Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height,
+        };
+        paint(child, rect, palette, frames, buf, rows);
+        drawn.push(rect);
         y = y.saturating_add(height);
     }
+    drawn
+}
+
+/// Collects the rects of the **outermost** list's rows while painting.
+///
+/// Outermost, and claimed once: a nested list's rows would give one click two
+/// answers, and the pane's rows are what a user points at.
+#[derive(Default)]
+struct RowSink {
+    rows: Vec<RowHitbox>,
+    claimed: bool,
 }
 
 /// Draw a view tree into `area`.
@@ -488,6 +507,43 @@ pub fn render_tree(
     palette: &ThemePalette,
     frames: &FrameTable,
     buf: &mut ratatui::buffer::Buffer,
+) {
+    paint(node, area, palette, frames, buf, &mut None);
+}
+
+/// Draw a view tree and report its clickable rows: one hitbox per row of the
+/// **outermost** list, carrying that row's **1-based index in the whole list**.
+///
+/// Derived from what was painted rather than recomputed afterwards: the kernel
+/// windows a list that names its cursor (ADR-30), so a second walk would have to
+/// reproduce that arithmetic and could resolve a click against a layout other than
+/// the one on screen. The index is list-space for the same reason — a plugin never
+/// learns the window, so a screen position would be a number it cannot interpret.
+///
+/// A tree with no list has no rows. A column of lines is not a list of rows, and
+/// guessing otherwise would let a click select something the plugin does not model.
+pub fn render_tree_rows(
+    node: &ViewNode,
+    area: Rect,
+    palette: &ThemePalette,
+    frames: &FrameTable,
+    buf: &mut ratatui::buffer::Buffer,
+) -> Vec<RowHitbox> {
+    let mut sink = Some(RowSink::default());
+    paint(node, area, palette, frames, buf, &mut sink);
+    sink.map(|s| s.rows).unwrap_or_default()
+}
+
+/// The painter both entry points share; `rows` is `Some` only when the caller
+/// wants the outermost list's hitboxes, so an ordinary paint allocates nothing
+/// extra.
+fn paint(
+    node: &ViewNode,
+    area: Rect,
+    palette: &ThemePalette,
+    frames: &FrameTable,
+    buf: &mut ratatui::buffer::Buffer,
+    rows: &mut Option<RowSink>,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -545,7 +601,7 @@ pub fn render_tree(
             // Equal shares: a plugin cannot specify widths, so the kernel does
             // not have to arbitrate between competing requests.
             for (child, cell) in children.iter().zip(row_cells(children, area.width).iter()) {
-                render_tree(
+                paint(
                     child,
                     Rect {
                         x: area.x.saturating_add(cell.x),
@@ -556,11 +612,12 @@ pub fn render_tree(
                     palette,
                     frames,
                     buf,
+                    rows,
                 );
             }
         }
         ViewNode::Column(children) => {
-            render_stacked(children, area, palette, frames, buf);
+            render_stacked(children, area, palette, frames, buf, rows);
         }
         ViewNode::List { children, selected } => {
             // The one place the kernel resolves a *height* on a plugin's behalf.
@@ -573,7 +630,24 @@ pub fn render_tree(
                 super::file_viewer::visible_window(children.len(), selected, area.height as usize)
             });
             let (start, end) = window.unwrap_or((0, children.len()));
-            render_stacked(&children[start..end], area, palette, frames, buf);
+            let drawn = render_stacked(&children[start..end], area, palette, frames, buf, rows);
+            if let Some(sink) = rows.as_mut() {
+                if !sink.claimed {
+                    // Claimed even when the list is empty, so a *nested* list can
+                    // never become the pane's rows by being the first one with
+                    // children in it.
+                    sink.claimed = true;
+                    sink.rows = drawn
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, rect)| rect.height > 0)
+                        .map(|(i, rect)| RowHitbox {
+                            rect: *rect,
+                            index: start + i + 1,
+                        })
+                        .collect();
+                }
+            }
         }
         ViewNode::Motion { key, motion, .. } => {
             // Frame 0 is the answer for a motion the kernel is not animating
@@ -583,7 +657,7 @@ pub fn render_tree(
                 .frame(key)
                 .min(motion.frames().len().saturating_sub(1));
             if let Some(frame) = motion.frames().get(index) {
-                render_tree(frame, area, palette, frames, buf);
+                paint(frame, area, palette, frames, buf, rows);
             }
         }
     }
@@ -1140,5 +1214,158 @@ mod tests {
         ]);
         // 1 + 3 + max(1, 1)
         assert_eq!(height_of(&tree, 10, &palette(), &FrameTable::default()), 5);
+    }
+
+    // ── clickable rows (ADR-36) ──────────────────────────────────────────────
+
+    /// Paint into a `w × h` area and return the rows a click could hit.
+    fn row_hits(node: &ViewNode, w: u16, h: u16) -> Vec<RowHitbox> {
+        let rect = area(w, h);
+        let mut buf = Buffer::empty(rect);
+        render_tree_rows(node, rect, &palette(), &FrameTable::default(), &mut buf)
+    }
+
+    #[test]
+    fn a_list_reports_one_hitbox_per_row_one_based() {
+        let list = ViewNode::list(vec![
+            ViewNode::text("first"),
+            ViewNode::text("second"),
+            ViewNode::text("third"),
+        ]);
+        let hits = row_hits(&list, 20, 5);
+        assert_eq!(hits.len(), 3);
+        // One-based, matching the index a list uses to name its cursor.
+        assert_eq!(hits[0].index, 1);
+        assert_eq!(hits[0].rect.y, 0);
+        assert_eq!(hits[1].index, 2);
+        assert_eq!(hits[1].rect.y, 1);
+        assert_eq!(hits[2].index, 3);
+    }
+
+    /// A row taller than one line owns every line it drew, so a click anywhere in
+    /// it hits the same row.
+    #[test]
+    fn a_multi_line_row_owns_its_whole_rect() {
+        let list = ViewNode::list(vec![
+            ViewNode::Column(vec![ViewNode::text("a"), ViewNode::text("b")]),
+            ViewNode::text("next"),
+        ]);
+        let hits = row_hits(&list, 20, 5);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].rect.height, 2);
+        assert_eq!(hits[1].rect.y, 2);
+    }
+
+    /// The kernel windows a list that names its cursor, and the reported index is
+    /// the row's place in the *whole* list — a plugin never learns the window, so a
+    /// screen position would be a number it could not interpret.
+    #[test]
+    fn a_scrolled_list_reports_list_space_indices() {
+        let children: Vec<ViewNode> = (0..10)
+            .map(|i| ViewNode::text(format!("row {i}")))
+            .collect();
+        // Cursor on the last row, three lines of pane: the window ends at row 10.
+        let list = ViewNode::selectable_list(children, Some(9));
+        let hits = row_hits(&list, 20, 3);
+        assert_eq!(hits.len(), 3);
+        assert_eq!(
+            hits.iter().map(|h| h.index).collect::<Vec<_>>(),
+            vec![8, 9, 10],
+            "the top visible row is row 8, not row 1"
+        );
+        assert_eq!(hits[0].rect.y, 0, "and it is drawn at the pane's top");
+    }
+
+    #[test]
+    fn a_list_inside_a_column_is_still_the_panes_rows() {
+        let tree = ViewNode::Column(vec![
+            ViewNode::text("header"),
+            ViewNode::list(vec![ViewNode::text("one"), ViewNode::text("two")]),
+        ]);
+        let hits = row_hits(&tree, 20, 5);
+        assert_eq!(hits.len(), 2);
+        // Offset by the header, because the rects come from what was painted.
+        assert_eq!(hits[0].rect.y, 1);
+        assert_eq!(hits[0].index, 1);
+    }
+
+    /// One click must not have two answers, so only the outermost list's rows are
+    /// clickable.
+    #[test]
+    fn a_nested_list_contributes_no_rows() {
+        let tree = ViewNode::list(vec![
+            ViewNode::text("outer one"),
+            ViewNode::list(vec![ViewNode::text("inner a"), ViewNode::text("inner b")]),
+        ]);
+        let hits = row_hits(&tree, 20, 6);
+        assert_eq!(
+            hits.iter().map(|h| h.index).collect::<Vec<_>>(),
+            vec![1, 2],
+            "the outer list has two rows; the inner one adds none"
+        );
+    }
+
+    /// The rows belong to the first list that is **drawn**, not the first that
+    /// appears in the tree: an empty list has no height, so it is never painted and
+    /// claims nothing. Pinned because it is the one case where "outermost" and
+    /// "first" differ, and the honest answer is the drawn one — a pane's rows are
+    /// what a user can point at.
+    #[test]
+    fn the_rows_belong_to_the_first_drawn_list() {
+        let tree = ViewNode::Column(vec![
+            ViewNode::list(Vec::new()),
+            ViewNode::list(vec![ViewNode::text("the only rows on screen")]),
+        ]);
+        let hits = row_hits(&tree, 20, 4);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].index, 1);
+    }
+
+    /// A list clipped entirely away likewise claims nothing, for the same reason.
+    #[test]
+    fn a_list_with_no_room_reports_nothing() {
+        let list = ViewNode::list(vec![ViewNode::text("no room")]);
+        assert!(row_hits(&list, 20, 0).is_empty());
+    }
+
+    #[test]
+    fn a_tree_with_no_list_has_no_rows() {
+        let tree = ViewNode::Column(vec![ViewNode::text("a"), ViewNode::text("b")]);
+        assert!(
+            row_hits(&tree, 20, 4).is_empty(),
+            "a column of lines is not a list of rows"
+        );
+    }
+
+    /// A row clipped away by the pane's height is not clickable, because it was
+    /// never drawn.
+    #[test]
+    fn a_row_below_the_pane_is_not_clickable() {
+        let list = ViewNode::list(vec![ViewNode::text("visible"), ViewNode::text("clipped")]);
+        let hits = row_hits(&list, 20, 1);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].index, 1);
+    }
+
+    /// The plain painter must draw exactly what the reporting one draws — the rows
+    /// are a by-product of the paint, not a second layout.
+    #[test]
+    fn reporting_rows_does_not_change_the_paint() {
+        let tree = ViewNode::list(vec![
+            ViewNode::Line(vec![ViewNode::text("a"), ViewNode::text("b")]),
+            ViewNode::text("second"),
+        ]);
+        let rect = area(20, 4);
+        let mut plain = Buffer::empty(rect);
+        render_tree(&tree, rect, &palette(), &FrameTable::default(), &mut plain);
+        let mut reporting = Buffer::empty(rect);
+        render_tree_rows(
+            &tree,
+            rect,
+            &palette(),
+            &FrameTable::default(),
+            &mut reporting,
+        );
+        assert_eq!(plain, reporting);
     }
 }
