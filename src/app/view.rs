@@ -1809,8 +1809,13 @@ struct RebindableRows {
 }
 
 /// Build the editable keybinding section of the help overlay (one section
-/// header + one row per rebindable action), driven by `help_sections()` so the
-/// row index matches `help.selected`.
+/// header + one row per editable binding).
+///
+/// The kernel's sections come from `help_sections()`, then one section per plugin
+/// pane that registered a binding. The order is the same one
+/// `KeyBindings::editable_targets` produces, which is what `help.selected` indexes
+/// — the two must not drift, or the editor would rebind a row other than the one
+/// highlighted.
 fn build_rebindable_rows(
     keybindings: &KeyBindings,
     help: &super::modals::HelpModal,
@@ -1819,21 +1824,47 @@ fn build_rebindable_rows(
     let mut idx = 0usize;
     let mut selected_line = 0usize;
     let mut action_rows: Vec<(usize, usize)> = Vec::new();
+    // One row, appended: the three bookkeeping steps every row shares (remember
+    // where the cursor's line landed, record the row's hitbox index, advance).
+    macro_rules! push_row {
+        ($key:expr, $label:expr, $selected:expr) => {{
+            if $selected {
+                selected_line = help_lines.len();
+            }
+            action_rows.push((help_lines.len(), idx));
+            help_lines.push(help_row($key, $label, $selected));
+            idx += 1;
+        }};
+    }
     for (title, actions) in crate::session::keybindings::help_sections() {
         help_lines.push(help_section(title));
         for action in actions {
             let selected = idx == help.selected;
             let key = if selected && help.capturing {
-                "Press the new shortcut… (Esc cancels)".to_string()
+                CAPTURE_PROMPT.to_string()
             } else {
                 chords_display(keybindings.chords_for(action))
             };
-            if selected {
-                selected_line = help_lines.len();
-            }
-            action_rows.push((help_lines.len(), idx));
-            help_lines.push(help_row(key, action.label(), selected));
-            idx += 1;
+            push_row!(key, action.label(), selected);
+        }
+        help_lines.push(Line::from(""));
+    }
+    // Plugin panes, each in its own section — a pane's bindings are scoped to it,
+    // so grouping them under it is what tells a user when the key is live.
+    for (title, ids) in keybindings.pane_sections() {
+        help_lines.push(help_section(title));
+        for id in ids {
+            let selected = idx == help.selected;
+            let key = if selected && help.capturing {
+                CAPTURE_PROMPT.to_string()
+            } else {
+                chords_display(keybindings.chords_for_pane(&id))
+            };
+            let label = keybindings
+                .pane_binding(&id)
+                .map(|b| b.title.clone())
+                .unwrap_or_else(|| id.id.clone());
+            push_row!(key, &label, selected);
         }
         help_lines.push(Line::from(""));
     }
@@ -1843,6 +1874,9 @@ fn build_rebindable_rows(
         action_rows,
     }
 }
+
+/// Shown in the key column of the row whose chord is being captured.
+const CAPTURE_PROMPT: &str = "Press the new shortcut… (Esc cancels)";
 
 /// Scroll offset for the help body so the selected action row stays visible
 /// (roughly centered), clamped to the real content range. `0` when everything
@@ -2028,25 +2062,27 @@ fn chords_display(chords: &[KeyChord]) -> String {
         .join(" / ")
 }
 
-fn help_section(title: &'static str) -> Line<'static> {
-    Line::from(Span::styled(title, Theme::section_header()))
+/// A section header. Owned rather than borrowed because a plugin pane's title is
+/// composed at render time from the pane's address.
+fn help_section(title: impl Into<String>) -> Line<'static> {
+    Line::from(Span::styled(title.into(), Theme::section_header()))
 }
 
-fn help_line(key: String, desc: &'static str) -> Line<'static> {
+fn help_line(key: String, desc: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("  {key:<16}"), Theme::keybind()),
-        Span::styled(desc, Style::default().fg(Theme::text_primary())),
+        Span::styled(desc.to_string(), Style::default().fg(Theme::text_primary())),
     ])
 }
 
 /// A rebindable keybinding row in the interactive help editor. When
 /// `selected`, the row is rendered with the active-item style and a `›`
 /// marker so the user can see which action a captured chord will bind to.
-fn help_row(key: String, desc: &'static str, selected: bool) -> Line<'static> {
+fn help_row(key: String, desc: &str, selected: bool) -> Line<'static> {
     if selected {
         Line::from(vec![
             Span::styled(format!("› {key:<16}"), Theme::selected_item()),
-            Span::styled(desc, Theme::selected_item()),
+            Span::styled(desc.to_string(), Theme::selected_item()),
         ])
     } else {
         help_line(key, desc)

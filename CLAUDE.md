@@ -1129,11 +1129,24 @@ still drawn, so a `thurbox-cli` process that never publishes behaves as before.
 `scripts/dev/lint-luau.sh` type-checks the bundled plugins with `luau-analyze`
 in strict mode (wired into `just lint` and CI). A plugin that declares the
 **`input`** capability gets a focusable pane: `Ctrl+L`/`Ctrl+H` cycle onto it,
-its `onKey(paneId, key)` is offered each key and returns whether it consumed
-one, anything unconsumed falls through to thurbox, and `Esc` always leaves
-(kernel-owned, so a pane can never trap you). The UI thread waits at most
+its `onKey(paneId, key, binding)` is offered each key and returns whether it
+consumed one, anything unconsumed falls through to thurbox, and `Esc` always
+leaves (kernel-owned, so a pane can never trap you). The UI thread waits at most
 `PLUGIN_KEY_TIMEOUT` (50 ms) for that answer — the one place it depends on
-plugin code — so a wedged plugin costs a dropped key, not a freeze. Plugin
+plugin code — so a wedged plugin costs a dropped key, not a freeze. Those keys
+are **rebindable like thurbox's own** (ADR-34): a manifest `[[keybindings]]`
+entry (`{ id, pane, title?, chord? }`) becomes a real keymap entry addressed
+`<plugin>.<pane>.<id>`, scoped to that pane — so two panes may both bind `j`,
+and a plugin `j` never collides with the tasks pane's. Each appears as its own
+row in the F1 editor (one section per pane, after the kernel's) and persists to
+`keybindings.json` under a `plugin:` key. The collision rule is deliberately
+asymmetric: a **user's** rebind steals a chord in either direction, a
+**manifest default** that collides with a global action or a sibling binding is
+**dropped** and reported by `thurbox-cli plugin doctor` — installing a plugin
+must not silently move a key you already use. A kernel action always wins the
+lookup, so the chords that leave a pane cannot be shadowed. Because the chord a
+key arrived on is the user's, the host tells the plugin **which binding** fired
+rather than only which key, so a rebind costs no plugin change. Plugin
 source is **watched**: editing a loaded plugin's `init.luau` reloads it in
 place with a fresh VM, keeping its pane and visibility;
 `thurbox-cli plugin reload [<name>]` does the same on demand.

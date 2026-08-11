@@ -1567,3 +1567,75 @@ that stays kernel state, and a render triggered by events rather than a poll.
   a cell with no glyph in it, and a second test fails if it stops being needed.
 - Still no formatter. After five ports `PHASE4` §7's `thurbox.format.*` case is
   made by exactly one pane.
+
+## ADR-34: A plugin pane's keys are addressed, not enumerated
+
+**Context.** Phase 4 reproduced five native panes as plugins and every one is
+read-only, because the input model is thinner than a native pane's keyboard.
+Thurbox's own panes get scoped keys: `session::Action` carries a `KeyContext`, so
+a plain `j` means "next task" in the tasks pane and "move down" in the file
+viewer, both rebindable in the F1 editor and persisted to `keybindings.json`. A
+plugin pane received a **raw key name** and decided for itself what it meant —
+unrebindable, invisible in F1, absent from the keymap. Manifests already carried
+`[[keybindings]]` entries; nothing read them.
+
+The obvious closure is `KeyContext::Pane(String)`, and ADR-28 had already rejected
+the neighbouring idea (one generated `Action` per discovered pane) because the
+keybinding namespace, and the F1 editor's row indices, must not depend on which
+plugins are installed.
+
+**Decision.**
+
+- **The binding's address is its scope.** A keymap entry is addressed
+  `(plugin, pane, id)` and is active only while that pane is focused. No
+  `KeyContext` member is added: the enum is `Copy` and matched by value in four
+  places, no kernel action could ever carry the new variant, and the scope would
+  then be stated twice — once by the variant, once by the address — with two
+  places to drift. `contexts_overlap` is untouched; what is added is one rule in
+  one function (a pane binding overlaps a **global** action and its **own** pane's
+  bindings, nothing else). `pane:<id>` survives as the *displayed* scope: the
+  editor's section title and the persisted key's prefix.
+- **One keymap, two tables.** `KeyBindings` holds the pane bindings beside the
+  `Action` map, so the F1 editor indexes one ordered list, one file has one
+  writer, and conflict detection lives in the type that knows about conflicts.
+- **The collision rule is asymmetric, and that is the point.** A user's rebind
+  **steals** a chord in either direction. A plugin's **manifest default** that
+  collides is **dropped**, leaving the binding unbound, and reported. Installing a
+  plugin must not silently move a key the user already uses; a user asking for a
+  key is an instruction. A kernel action also wins the lookup, deterministically,
+  because those chords are how a user leaves a pane.
+- **The keymap half is ungated; only delivery is behind `plugins`.** The editor
+  rewrites the whole file on any edit, so a build with no plugin host that dropped
+  the entries it did not understand would silently discard bindings set in another
+  build. An override for a binding nothing declares is therefore *kept* rather
+  than dropped — the one direction in which this differs from `from_json`'s
+  existing treatment of an unknown action.
+- **A manifest default is never persisted.** Writing it would freeze it: a plugin
+  changing its own default would never reach a user who had once opened the
+  editor. The file holds the user's choices, and registration consults them.
+- **Delivery carries the binding id beside the raw key.** `onKey(paneId, key,
+  binding)`, `binding` nil when the chord resolved to none. Not a second handler
+  (two answers about consumption for one keypress) and not *instead* of the key (a
+  pane collecting text needs the keypress, and a plugin declaring no binding must
+  keep working). A plugin switching on `"delete-row"` rather than on `"d"` is what
+  makes a rebind cost no plugin change.
+- **Not the command registry.** ADR-V21's `{ command, key, context }` shape
+  dispatches to the plugin's **service** half — a different VM, with no pane state
+  and no "was it consumed" answer — so `j` would move a cursor living in the other
+  VM. The command surface stays the answer for a name-addressed invocation.
+- **The chord grammar is validated in the manifest.** `session::keybindings` is a
+  sibling module of the same pure-data layer, so a typo becomes a discovery error
+  naming the plugin, the binding and the chord, rather than a warning in a log no
+  plugin author reads. A binding naming an unknown pane, or declared without
+  `input`, is refused the same way `PaneWithoutRender` already refuses a pane that
+  could never draw.
+- **A dropped default is reported by `plugin doctor`, not by a toast.** It happens
+  while plugins start, before anyone is watching, and it is a property of a
+  configuration rather than an event. `doctor` re-derives it from the manifests
+  plus the user's file, starting no VM — the same rule the spawn section follows,
+  and it keeps "why does my key do nothing" answerable with no TUI running.
+
+**Consequences.** A binding still *does* nothing on its own: it tells a plugin its
+key fired, and what a plugin may change is the capability question. No bundled
+plugin declares `input` or a keybinding in this change, so every insta snapshot is
+byte-identical and no native pane moved.

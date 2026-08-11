@@ -933,6 +933,13 @@ pub struct PluginKeyRequest {
     pub pane: String,
     /// The key, in the plugin-facing spelling.
     pub key: String,
+    /// The pane binding the chord resolved to, when it resolved to one.
+    ///
+    /// Carried beside the key rather than instead of it: a pane collecting text
+    /// needs the keypress, and a plugin that declares no binding at all must keep
+    /// working unchanged. A plugin acting on the binding id rather than on the
+    /// chord is what makes a user's rebind cost no plugin change.
+    pub binding: Option<String>,
     /// Where the answer goes.
     pub reply: std::sync::mpsc::Sender<bool>,
 }
@@ -940,8 +947,18 @@ pub struct PluginKeyRequest {
 #[cfg(feature = "plugins")]
 #[derive(Debug)]
 pub enum PluginUiEvent {
-    /// The panes every running plugin declares, sent once at startup.
-    Panes(Vec<crate::plugin::PluginPane>),
+    /// What every running plugin declares: its panes, and the keymap entries its
+    /// panes bind.
+    ///
+    /// One message rather than two, because both change at exactly the same
+    /// moments — a plugin starting, reloading or stopping — and a second event
+    /// would be a second ordering to reason about.
+    Panes {
+        /// Every pane a running plugin declares.
+        panes: Vec<crate::plugin::PluginPane>,
+        /// Every keymap entry those panes bind.
+        bindings: Vec<crate::session::keybindings::PaneBindingDecl>,
+    },
     /// One pane's finished render, or why it failed.
     Rendered {
         /// Owning plugin.
@@ -7749,7 +7766,10 @@ impl App {
         let mut changed = false;
         for event in events {
             match event {
-                PluginUiEvent::Panes(panes) => changed |= self.set_plugin_panes(panes),
+                PluginUiEvent::Panes { panes, bindings } => {
+                    changed |= self.set_plugin_panes(panes);
+                    self.register_plugin_keybindings(bindings);
+                }
                 PluginUiEvent::Rendered {
                     plugin,
                     pane,
@@ -7832,7 +7852,7 @@ impl App {
     /// thread depends on plugin code, so a wedged plugin costs a single
     /// dropped frame rather than a hang.
     #[cfg(feature = "plugins")]
-    pub(crate) fn offer_key_to_plugin(&mut self, key: String) -> bool {
+    pub(crate) fn offer_key_to_plugin(&mut self, key: String, binding: Option<String>) -> bool {
         let Some(pane) = self.focusable_plugin_pane() else {
             return false;
         };
@@ -7846,6 +7866,7 @@ impl App {
                 plugin,
                 pane: pane_id,
                 key,
+                binding,
                 reply: reply_tx,
             })
             .is_err()
@@ -7853,6 +7874,23 @@ impl App {
             return false;
         }
         reply_rx.recv_timeout(PLUGIN_KEY_TIMEOUT).unwrap_or(false)
+    }
+
+    /// Which of the focused pane's bindings a chord resolves to.
+    ///
+    /// `None` when no pane is focused or nothing of that pane's holds the chord.
+    /// The caller resolves the kernel's actions first, so an action a user needs to
+    /// leave the pane can never be shadowed by a plugin's binding.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn focused_pane_binding(
+        &self,
+        code: KeyCode,
+        mods: KeyModifiers,
+    ) -> Option<crate::session::keybindings::PaneBindingId> {
+        let pane = self.focusable_plugin_pane()?;
+        self.keybindings
+            .lookup_pane_binding(&pane.plugin, &pane.id, code, mods)
+            .cloned()
     }
 
     /// Decide which plugin panes are on screen.
@@ -8048,6 +8086,29 @@ impl App {
         }
         self.plugin_panes = panes;
         true
+    }
+
+    /// Wire what the plugins declare into the keymap.
+    ///
+    /// Runs on every publication — startup and each hot reload — because a reload
+    /// may add, remove or re-chord a binding, and a pane that no longer exists
+    /// must stop resolving. It writes nothing to disk: the user's own choices are
+    /// what `keybindings.json` holds, so re-registering identical declarations
+    /// cannot rewrite the user's file, and a plugin cannot make the kernel write
+    /// to it.
+    ///
+    /// A dropped default is logged rather than toasted: it happens while plugins
+    /// start, before anyone is looking, and it is a property of a configuration
+    /// rather than an event. `thurbox-cli plugin doctor` re-derives the same
+    /// report on demand, which is where a user debugging a dead key is.
+    #[cfg(feature = "plugins")]
+    fn register_plugin_keybindings(
+        &mut self,
+        bindings: Vec<crate::session::keybindings::PaneBindingDecl>,
+    ) {
+        for dropped in self.keybindings.register_pane_bindings(bindings) {
+            tracing::warn!("{dropped}");
+        }
     }
 
     /// Re-read the stored per-pane visibility, reporting whether the screen

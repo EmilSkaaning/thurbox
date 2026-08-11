@@ -425,7 +425,16 @@ export type Thurbox = {
 export type Plugin = {
     init: (() -> ())?,
     render: ((paneId: string) -> ViewNode)?,
-    onKey: ((paneId: string, key: string) -> boolean)?,
+    -- Called for each key while one of this plugin's panes is focused, if the
+    -- manifest declared the `input` capability. Return `true` to consume the key;
+    -- anything else falls through to thurbox, so a pane can never trap the user.
+    --
+    -- `binding` is the id of the `[[keybindings]]` entry the keypress resolved to,
+    -- or `nil` when it resolved to none. Switch on it rather than on `key`: the
+    -- user may rebind the chord in the F1 editor, and the binding's id does not
+    -- change when they do. `key` is still delivered in both cases, which is what a
+    -- pane collecting text needs.
+    onKey: ((paneId: string, key: string, binding: string?) -> boolean)?,
 }
 
 -- A command's bound arguments: one entry per argument the manifest declared,

@@ -405,6 +405,26 @@ impl PluginHost {
             .collect()
     }
 
+    /// Every keymap entry the running plugins declare, in the host's stable
+    /// order.
+    ///
+    /// Read from each slot's **granted** set rather than from its manifest's
+    /// request, because the grant is what delivery will enforce: registering a
+    /// binding whose plugin would then be refused a key would put a chord in the
+    /// keymap that does nothing.
+    pub fn pane_bindings(&self) -> Vec<crate::session::keybindings::PaneBindingDecl> {
+        self.slots
+            .iter()
+            .filter(|s| s.state.is_running())
+            .flat_map(|s| {
+                super::keymap::pane_bindings_for(
+                    &s.plugin.manifest,
+                    s.granted.has(Capability::Input),
+                )
+            })
+            .collect()
+    }
+
     /// Render every pane the kernel is showing, returning each result.
     ///
     /// Runs on the caller's thread — a plugin-render worker, never the UI
@@ -438,6 +458,7 @@ impl PluginHost {
         plugin: &str,
         pane_id: &str,
         key: &str,
+        binding: Option<&str>,
         timeout: Duration,
     ) -> Result<bool, RuntimeError> {
         let slot = self
@@ -455,7 +476,7 @@ impl PluginHost {
         slot.thread
             .as_ref()
             .ok_or(RuntimeError::ThreadGone)?
-            .send_key(pane_id, key, timeout)
+            .send_key(pane_id, key, binding, timeout)
     }
 
     /// Whether a plugin may receive keys.
@@ -1330,13 +1351,18 @@ mod tests {
 
     /// A plugin declaring input, whose key handler is the given Luau body.
     fn write_input_plugin(root: &Path, name: &str, on_key: &str) {
+        write_input_plugin_with(root, name, on_key, "");
+    }
+
+    /// The same, plus extra manifest lines (a `[[keybindings]]` block).
+    fn write_input_plugin_with(root: &Path, name: &str, on_key: &str, manifest_extra: &str) {
         let dir = root.join(name);
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("plugin.toml"),
             format!(
                 "name = \"{name}\"\napi_version = 1\ncapabilities = [\"render\", \"input\"]\n\
-                 [[panes]]\nid = \"board\"\n"
+                 [[panes]]\nid = \"board\"\n{manifest_extra}"
             ),
         )
         .unwrap();
@@ -1344,7 +1370,7 @@ mod tests {
             dir.join(ENTRY_FILE_NAME),
             format!(
                 "return {{ render = function() return {{ kind = \"divider\" }} end, \
-                 onKey = function(paneId, key) {on_key} end }}"
+                 onKey = function(paneId, key, binding) {on_key} end }}"
             ),
         )
         .unwrap();
@@ -1362,11 +1388,88 @@ mod tests {
         let mut host = host_over(tmp.path());
         host.start_all();
 
-        assert_eq!(host.send_key("keys", "board", "j", key_timeout()), Ok(true));
         assert_eq!(
-            host.send_key("keys", "board", "k", key_timeout()),
+            host.send_key("keys", "board", "j", None, key_timeout()),
+            Ok(true)
+        );
+        assert_eq!(
+            host.send_key("keys", "board", "k", None, key_timeout()),
             Ok(false)
         );
+    }
+
+    /// The point of a binding: the plugin acts on the *name* it declared, so the
+    /// chord a user has bound is not part of its code.
+    #[test]
+    fn a_key_carries_the_binding_it_resolved_to() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_input_plugin(tmp.path(), "keys", "return binding == \"delete-row\"");
+
+        let mut host = host_over(tmp.path());
+        host.start_all();
+
+        assert_eq!(
+            host.send_key("keys", "board", "x", Some("delete-row"), key_timeout()),
+            Ok(true),
+            "the plugin should see the binding, whatever chord delivered it"
+        );
+        assert_eq!(
+            host.send_key("keys", "board", "x", None, key_timeout()),
+            Ok(false),
+            "a chord that resolved to no binding reports none"
+        );
+    }
+
+    /// A plugin written before bindings existed takes two arguments; the third
+    /// must cost it nothing.
+    #[test]
+    fn a_two_argument_key_handler_still_works() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("old");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("plugin.toml"),
+            "name = \"old\"\napi_version = 1\ncapabilities = [\"render\", \"input\"]\n\
+             [[panes]]\nid = \"board\"\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join(ENTRY_FILE_NAME),
+            "return { render = function() return { kind = \"divider\" } end, \
+             onKey = function(paneId, key) return key == \"j\" end }",
+        )
+        .unwrap();
+
+        let mut host = host_over(tmp.path());
+        host.start_all();
+        assert_eq!(
+            host.send_key("old", "board", "j", Some("next"), key_timeout()),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn declared_keybindings_reach_the_keymap_from_running_plugins() {
+        use crate::session::keybindings::{KeyChord, PaneBindingId};
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_input_plugin_with(
+            tmp.path(),
+            "keys",
+            "return false",
+            "[[keybindings]]\nid = \"next\"\npane = \"board\"\nchord = \"j\"\n",
+        );
+
+        let mut host = host_over(tmp.path());
+        // Nothing is running yet, so nothing is published — a pane's keys arrive
+        // with its pane, and a plugin that never started has neither.
+        assert!(host.pane_bindings().is_empty());
+
+        host.start_all();
+        let decls = host.pane_bindings();
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0].id, PaneBindingId::new("keys", "board", "next"));
+        assert_eq!(decls[0].chord, KeyChord::parse("j"));
     }
 
     #[test]
@@ -1384,7 +1487,7 @@ mod tests {
         let mut host = host_over(tmp.path());
         host.start_all();
         assert_eq!(
-            host.send_key("quiet", "board", "j", key_timeout()),
+            host.send_key("quiet", "board", "j", None, key_timeout()),
             Ok(false)
         );
     }
@@ -1403,7 +1506,7 @@ mod tests {
         host.start_all();
 
         assert!(!host.accepts_input("mute"));
-        match host.send_key("mute", "board", "j", key_timeout()) {
+        match host.send_key("mute", "board", "j", None, key_timeout()) {
             Err(RuntimeError::Runtime(msg)) => assert!(msg.contains("input"), "{msg}"),
             other => panic!("expected a capability refusal, got {other:?}"),
         }
@@ -1416,7 +1519,9 @@ mod tests {
 
         let mut host = host_over(tmp.path());
         host.start_all();
-        assert!(host.send_key("angry", "board", "j", key_timeout()).is_err());
+        assert!(host
+            .send_key("angry", "board", "j", None, key_timeout())
+            .is_err());
         // Still alive for the next key.
         assert!(host.status("angry").unwrap().state.is_running());
     }
@@ -1430,7 +1535,9 @@ mod tests {
         host.start_all();
 
         let started = std::time::Instant::now();
-        assert!(host.send_key("hangs", "board", "j", key_timeout()).is_err());
+        assert!(host
+            .send_key("hangs", "board", "j", None, key_timeout())
+            .is_err());
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "a wedged key handler must not hang the caller"

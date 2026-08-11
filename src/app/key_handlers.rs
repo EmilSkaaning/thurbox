@@ -256,16 +256,21 @@ impl App {
     /// the help modal is open (returns `true`).
     ///
     /// Navigation mode: `j`/`k` (or arrows) move the selection, `Enter`/`r`
-    /// begins capturing a new chord for the selected action, `d` resets the
-    /// selected action to its default(s), `Shift+D` resets *all* actions, and
-    /// `F1`/`Esc` close the overlay.
+    /// begins capturing a new chord for the selected row, `d` resets that row to
+    /// what it was declared with, `Shift+D` resets *everything*, and `F1`/`Esc`
+    /// close the overlay.
     ///
     /// Capture mode: the next keypress (any chord, including `ctrl+q` or `f1`)
-    /// becomes the action's sole binding; `Esc` cancels without rebinding.
+    /// becomes the row's sole binding; `Esc` cancels without rebinding.
+    ///
+    /// A row is a [`BindingTarget`](crate::session::BindingTarget): one of the
+    /// kernel's actions, or one plugin pane's binding. Both are edited through the
+    /// same three operations, so a plugin key is as rebindable as a built-in one
+    /// rather than being a second thing with its own editor.
     pub(super) fn handle_help_key(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
-        use crate::session::{Action, KeyChord};
+        use crate::session::KeyChord;
 
-        let actions = Action::rebindable_in_order();
+        let targets = self.keybindings.editable_targets();
         let super::modals::Modal::Help(ref mut help) = self.modal else {
             return true;
         };
@@ -279,17 +284,16 @@ impl App {
             // modifiers, canonical Shift+letter) — `rebind` normalizes again
             // for storage.
             let chord = KeyChord::normalized(mods, code);
-            let selected = help.selected.min(actions.len().saturating_sub(1));
+            let selected = help.selected.min(targets.len().saturating_sub(1));
             help.capturing = false;
-            let action = actions[selected];
-            let stolen = self.keybindings.rebind(action, chord);
+            let Some(target) = targets.get(selected) else {
+                return true;
+            };
+            let stolen = self.keybindings.rebind_target(target, chord);
             self.persist_keybindings();
             if let Some(other) = stolen {
-                self.set_info(format!(
-                    "{} reassigned from '{}'",
-                    chord.display(),
-                    other.label()
-                ));
+                let label = other.label(&self.keybindings);
+                self.set_info(format!("{} reassigned from '{label}'", chord.display()));
             }
             return true;
         }
@@ -297,30 +301,36 @@ impl App {
         match code {
             KeyCode::Esc | KeyCode::F(1) => self.modal.close(),
             KeyCode::Char('j') | KeyCode::Down => {
-                help.selected = (help.selected + 1).min(actions.len().saturating_sub(1));
+                help.selected = (help.selected + 1).min(targets.len().saturating_sub(1));
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 help.selected = help.selected.saturating_sub(1);
             }
             KeyCode::Enter | KeyCode::Char('r') => help.capturing = true,
             KeyCode::Char('d') => {
-                let selected = help.selected.min(actions.len().saturating_sub(1));
-                let action = actions[selected];
-                self.keybindings.reset(action);
-                self.persist_keybindings();
+                let selected = help.selected.min(targets.len().saturating_sub(1));
+                if let Some(target) = targets.get(selected) {
+                    self.keybindings.reset_target(target);
+                    self.persist_keybindings();
+                }
             }
-            // Shift+D resets every action to its built-in default.
+            // Shift+D resets every binding to what it was declared with.
             KeyCode::Char('D') => self.reset_all_keybindings(),
             _ => {}
         }
         true
     }
 
-    /// Restore every keybinding to its compiled-in default and remove the
-    /// user override file so defaults remain authoritative. Surfaces failures
-    /// via the status bar; the in-memory map is reset regardless.
+    /// Restore every keybinding to what it was declared with and remove the user
+    /// override file so declarations remain authoritative. Surfaces failures via
+    /// the status bar; the in-memory map is reset regardless.
+    ///
+    /// Resets in place rather than rebuilding from `Default`: the pane bindings
+    /// registered from the running plugins are declarations, not user choices, and
+    /// discarding them here would leave every plugin key dead until the next
+    /// reload republished it.
     fn reset_all_keybindings(&mut self) {
-        self.keybindings = crate::session::KeyBindings::default();
+        self.keybindings.reset_all();
         if let Err(e) = crate::storage::keybindings::delete_keybindings_json() {
             self.set_error(format!("Failed to reset keybindings: {e}"));
         } else {
@@ -1395,10 +1405,13 @@ impl App {
             self.focus = InputFocus::SessionList;
             return;
         }
+        let binding = self
+            .focused_pane_binding(code, mods)
+            .map(|id| id.id.clone());
         let Some(key) = plugin_key_name(code, mods) else {
             return;
         };
-        if self.offer_key_to_plugin(key) {
+        if self.offer_key_to_plugin(key, binding) {
             self.needs_redraw = true;
         }
         // Unconsumed keys simply fall through: this handler is reached after

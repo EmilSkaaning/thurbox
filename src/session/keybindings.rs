@@ -864,15 +864,164 @@ pub fn compact_shortcut(chords: &[KeyChord]) -> Option<String> {
         .map(KeyChord::compact)
 }
 
-/// A user-editable map from `Action` to one or more chords.
+/// A key a plugin pane binds, addressed the way every other plugin surface is.
+///
+/// The address *is* the scope: a binding is active only while its own pane is
+/// focused. That is why there is no `KeyContext` member for a plugin pane — the
+/// set of panes depends on which plugins are installed, so a closed enumeration
+/// cannot name them, and stating the scope twice (once in an enum, once here)
+/// would give it two places to drift.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PaneBindingId {
+    /// The plugin that declared it.
+    pub plugin: String,
+    /// The pane it is scoped to.
+    pub pane: String,
+    /// The binding's own id, unique within its manifest.
+    pub id: String,
+}
+
+impl PaneBindingId {
+    /// Build an address from its three parts.
+    pub fn new(plugin: &str, pane: &str, id: &str) -> Self {
+        Self {
+            plugin: plugin.to_string(),
+            pane: pane.to_string(),
+            id: id.to_string(),
+        }
+    }
+
+    /// `<plugin>.<pane>.<id>` — the one spelling the log, the persisted key and
+    /// the editor's section titles all read from.
+    pub fn qualified(&self) -> String {
+        format!("{}.{}.{}", self.plugin, self.pane, self.id)
+    }
+
+    /// Parse [`qualified`](Self::qualified) back. `None` unless it is exactly
+    /// three non-empty parts — no declared identifier may contain a dot, so the
+    /// split is unambiguous.
+    pub fn parse(s: &str) -> Option<Self> {
+        let parts: Vec<&str> = s.split('.').collect();
+        let [plugin, pane, id] = parts[..] else {
+            return None;
+        };
+        (!plugin.is_empty() && !pane.is_empty() && !id.is_empty())
+            .then(|| Self::new(plugin, pane, id))
+    }
+}
+
+/// One registered pane binding, as the keymap holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneBinding {
+    /// Human-readable name for the editor's row.
+    pub title: String,
+    /// What the manifest asked for, kept so a reset can restore it.
+    pub default: Option<KeyChord>,
+    /// What it is bound to now — empty when the manifest declared no chord, or
+    /// when the one it declared was already taken.
+    pub chords: Vec<KeyChord>,
+}
+
+/// A manifest default the keymap could not bind, and what holds the chord.
+///
+/// Returned rather than logged so the same fact reaches two places without being
+/// parsed back out of a sentence: the TUI logs it, and `thurbox-cli plugin doctor`
+/// prints it against the binding it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DroppedBinding {
+    /// The binding left unbound.
+    pub id: PaneBindingId,
+    /// The chord its manifest asked for.
+    pub chord: KeyChord,
+    /// What already holds that chord.
+    pub holder: String,
+}
+
+impl std::fmt::Display for DroppedBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "plugin binding {} declares {} but it is already bound to {} — left unbound",
+            self.id.qualified(),
+            self.chord.display(),
+            self.holder
+        )
+    }
+}
+
+/// What one discovered plugin contributes to the keymap.
+///
+/// Built from manifests (never from a running VM), so the keymap knows a
+/// plugin's keys before any of its code runs — the same property that lets the
+/// command registry list a plugin that has never started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneBindingDecl {
+    /// Where it lives.
+    pub id: PaneBindingId,
+    /// Human-readable name.
+    pub title: String,
+    /// The chord it would like, if any.
+    pub chord: Option<KeyChord>,
+}
+
+/// What a chord resolves to: one of the kernel's actions, or one pane's binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindingTarget {
+    /// A kernel action.
+    Action(Action),
+    /// A plugin pane's binding.
+    Pane(PaneBindingId),
+}
+
+impl BindingTarget {
+    /// Label for the editor's row and for a reassignment message.
+    ///
+    /// A pane binding's label carries its plugin, because two plugins may both
+    /// have a binding called `delete` and a toast saying only "delete" would not
+    /// say what lost its key.
+    pub fn label(&self, bindings: &KeyBindings) -> String {
+        match self {
+            BindingTarget::Action(action) => action.label().to_string(),
+            BindingTarget::Pane(id) => {
+                let title = bindings
+                    .pane_binding(id)
+                    .map(|b| b.title.clone())
+                    .unwrap_or_else(|| id.id.clone());
+                format!("{} ({})", title, id.plugin)
+            }
+        }
+    }
+}
+
+/// Prefix distinguishing a pane binding's key in the persisted JSON from an
+/// action name. Action names are PascalCase Rust identifiers and a plugin
+/// address is lowercase with dots, so the two could not collide even without
+/// it — the prefix is there so a human editing the file can see which is which.
+const PANE_BINDING_PREFIX: &str = "plugin:";
+
+/// A user-editable map from `Action` to one or more chords, plus the bindings
+/// plugin panes contribute.
 ///
 /// JSON shape:
 /// ```json
-/// { "QuitApp": ["ctrl+q"], "NewSession": ["ctrl+n"] }
+/// { "QuitApp": ["ctrl+q"], "plugin:notes.board.delete": ["d"] }
 /// ```
+///
+/// The plugin half is compiled in every build, including one without the plugin
+/// host: the file is the user's, the editor rewrites all of it on any edit, and
+/// a build that dropped the entries it did not understand would silently discard
+/// bindings the user set in another build.
 #[derive(Debug, Clone)]
 pub struct KeyBindings {
     map: HashMap<Action, Vec<KeyChord>>,
+    /// Registered pane bindings, in address order.
+    panes: std::collections::BTreeMap<PaneBindingId, PaneBinding>,
+    /// Chords the user chose for a pane binding.
+    ///
+    /// Held apart from `panes` so they survive re-registration (a hot reload
+    /// replaces the declared set) and so an override for a plugin that is not
+    /// installed right now is kept rather than thrown away.
+    pane_overrides: std::collections::BTreeMap<PaneBindingId, Vec<KeyChord>>,
 }
 
 impl Default for KeyBindings {
@@ -881,7 +1030,11 @@ impl Default for KeyBindings {
             .iter()
             .map(|a| (*a, a.default_chords()))
             .collect();
-        Self { map }
+        Self {
+            map,
+            panes: std::collections::BTreeMap::new(),
+            pane_overrides: std::collections::BTreeMap::new(),
+        }
     }
 }
 
@@ -959,24 +1112,38 @@ impl KeyBindings {
     /// the caller can report the reassignment. Bindings in non-overlapping
     /// scopes are left untouched, so e.g. `j` can drive both the session list
     /// and the file viewer.
-    pub fn rebind(&mut self, action: Action, chord: KeyChord) -> Option<Action> {
+    pub fn rebind(&mut self, action: Action, chord: KeyChord) -> Option<BindingTarget> {
         let chord = KeyChord::normalized(chord.mods, chord.code);
-        let stolen = self.map.iter().find_map(|(a, chords)| {
-            if *a != action
-                && contexts_overlap(a.context(), action.context())
-                && chords
-                    .iter()
-                    .any(|c| c.code == chord.code && c.mods == chord.mods)
-            {
-                Some(*a)
-            } else {
-                None
+        let stolen = self
+            .map
+            .iter()
+            .find_map(|(a, chords)| {
+                (*a != action
+                    && contexts_overlap(a.context(), action.context())
+                    && holds(chords, chord))
+                .then_some(BindingTarget::Action(*a))
+            })
+            // A global action and every pane binding overlap, so an action being
+            // rebound onto a pane's chord steals it in that direction too — the
+            // asymmetry the plugin side has is about a *manifest default*, not
+            // about which table the loser is in.
+            .or_else(|| {
+                (action.context() == KeyContext::Global)
+                    .then(|| {
+                        self.panes.iter().find_map(|(id, binding)| {
+                            holds(&binding.chords, chord).then(|| BindingTarget::Pane(id.clone()))
+                        })
+                    })
+                    .flatten()
+            });
+        match &stolen {
+            Some(BindingTarget::Action(other)) => {
+                if let Some(v) = self.map.get_mut(other) {
+                    v.retain(|c| !same_chord(*c, chord));
+                }
             }
-        });
-        if let Some(other) = stolen {
-            if let Some(v) = self.map.get_mut(&other) {
-                v.retain(|c| !(c.code == chord.code && c.mods == chord.mods));
-            }
+            Some(BindingTarget::Pane(id)) => self.unbind_pane_chord(&id.clone(), chord),
+            None => {}
         }
         self.map.insert(action, vec![chord]);
         stolen
@@ -987,7 +1154,281 @@ impl KeyBindings {
         self.map.insert(action, action.default_chords());
     }
 
+    /// Restore every binding — kernel and plugin — to what it was declared with.
+    ///
+    /// A pane's registered set is *kept*: the declarations came from the running
+    /// plugins, and rebuilding the whole keymap from `Default` would leave every
+    /// plugin key dead until the next reload republished them. Only the user's
+    /// choices are dropped.
+    pub fn reset_all(&mut self) {
+        for action in Action::all() {
+            self.map.insert(*action, action.default_chords());
+        }
+        self.pane_overrides.clear();
+        let ids: Vec<PaneBindingId> = self.panes.keys().cloned().collect();
+        for id in ids {
+            self.rebuild_pane_chords(&id);
+        }
+    }
+
+    /// Register what the discovered plugins declare, replacing the previous set.
+    ///
+    /// Replacement rather than merging, because a reload may remove a binding and
+    /// a pane that no longer exists must stop resolving. Returns one message per
+    /// declared chord that had to be **dropped** because something overlapping
+    /// already held it — a plugin default never steals a key the user is already
+    /// using, unlike a rebind the user asked for.
+    ///
+    /// Registering writes nothing to disk: only a user edit persists, so running
+    /// this on every reload cannot rewrite the user's file.
+    pub fn register_pane_bindings(&mut self, decls: Vec<PaneBindingDecl>) -> Vec<DroppedBinding> {
+        let mut dropped = Vec::new();
+        let mut next: std::collections::BTreeMap<PaneBindingId, PaneBinding> =
+            std::collections::BTreeMap::new();
+        for decl in decls {
+            let chords = match self.pane_overrides.get(&decl.id) {
+                // The user's choice wins over whatever the manifest now says.
+                Some(user) => user.clone(),
+                None => match decl.chord {
+                    Some(chord) => match self.chord_owner_in(&decl.id, chord, &next) {
+                        Some(holder) => {
+                            dropped.push(DroppedBinding {
+                                id: decl.id.clone(),
+                                chord,
+                                holder: self.holder_label(&holder),
+                            });
+                            Vec::new()
+                        }
+                        None => vec![chord],
+                    },
+                    None => Vec::new(),
+                },
+            };
+            next.insert(
+                decl.id,
+                PaneBinding {
+                    title: decl.title,
+                    default: decl.chord,
+                    chords,
+                },
+            );
+        }
+        self.panes = next;
+        dropped
+    }
+
+    /// Every registered pane binding, in address order.
+    pub fn pane_bindings(&self) -> impl Iterator<Item = (&PaneBindingId, &PaneBinding)> {
+        self.panes.iter()
+    }
+
+    /// One registered pane binding.
+    pub fn pane_binding(&self, id: &PaneBindingId) -> Option<&PaneBinding> {
+        self.panes.get(id)
+    }
+
+    /// Chords bound to a pane binding; empty when it is unbound or unknown.
+    pub fn chords_for_pane(&self, id: &PaneBindingId) -> &[KeyChord] {
+        self.panes
+            .get(id)
+            .map(|b| b.chords.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The registered bindings grouped per pane, in the order the editor shows
+    /// them: address order, which groups a pane's bindings together.
+    pub fn pane_sections(&self) -> Vec<(String, Vec<PaneBindingId>)> {
+        let mut sections: Vec<(String, Vec<PaneBindingId>)> = Vec::new();
+        for id in self.panes.keys() {
+            let title = format!("{} · {} (when focused)", id.plugin, id.pane);
+            match sections.last_mut() {
+                Some((last, ids)) if *last == title => ids.push(id.clone()),
+                _ => sections.push((title, vec![id.clone()])),
+            }
+        }
+        sections
+    }
+
+    /// Everything the keybinding editor can edit, in render order: the kernel's
+    /// actions, then each pane's bindings.
+    pub fn editable_targets(&self) -> Vec<BindingTarget> {
+        Action::rebindable_in_order()
+            .into_iter()
+            .map(BindingTarget::Action)
+            .chain(
+                self.pane_sections()
+                    .into_iter()
+                    .flat_map(|(_, ids)| ids)
+                    .map(BindingTarget::Pane),
+            )
+            .collect()
+    }
+
+    /// Chords bound to a target, whichever table it lives in.
+    pub fn chords_for_target(&self, target: &BindingTarget) -> &[KeyChord] {
+        match target {
+            BindingTarget::Action(action) => self.chords_for(*action),
+            BindingTarget::Pane(id) => self.chords_for_pane(id),
+        }
+    }
+
+    /// Rebind a target to a single chord, reporting what lost it.
+    pub fn rebind_target(
+        &mut self,
+        target: &BindingTarget,
+        chord: KeyChord,
+    ) -> Option<BindingTarget> {
+        match target {
+            BindingTarget::Action(action) => self.rebind(*action, chord),
+            BindingTarget::Pane(id) => self.rebind_pane(id, chord),
+        }
+    }
+
+    /// Restore a target to what it was declared with.
+    pub fn reset_target(&mut self, target: &BindingTarget) {
+        match target {
+            BindingTarget::Action(action) => self.reset(*action),
+            BindingTarget::Pane(id) => self.reset_pane(id),
+        }
+    }
+
+    /// Which binding a chord resolves to while `plugin`'s `pane` is focused.
+    ///
+    /// Only that pane's bindings are considered: another pane's binding on the
+    /// same chord is not a candidate, because the two panes are never focused at
+    /// once. The caller resolves the kernel's actions first, so an action a user
+    /// needs to leave the pane can never be shadowed.
+    pub fn lookup_pane_binding(
+        &self,
+        plugin: &str,
+        pane: &str,
+        code: KeyCode,
+        mods: KeyModifiers,
+    ) -> Option<&PaneBindingId> {
+        let target = KeyChord::normalized(mods, code);
+        self.panes
+            .iter()
+            .find(|(id, binding)| {
+                id.plugin == plugin && id.pane == pane && holds(&binding.chords, target)
+            })
+            .map(|(id, _)| id)
+    }
+
+    /// Bind one pane binding to `chord`, stealing it from an overlapping holder
+    /// and returning what lost it. The choice is remembered as the user's, so it
+    /// survives re-registration and a plugin changing its own default.
+    pub fn rebind_pane(&mut self, id: &PaneBindingId, chord: KeyChord) -> Option<BindingTarget> {
+        let chord = KeyChord::normalized(chord.mods, chord.code);
+        let stolen = self.chord_owner(id, chord);
+        match &stolen {
+            Some(BindingTarget::Action(other)) => {
+                if let Some(v) = self.map.get_mut(other) {
+                    v.retain(|c| !same_chord(*c, chord));
+                }
+            }
+            Some(BindingTarget::Pane(other)) => self.unbind_pane_chord(&other.clone(), chord),
+            None => {}
+        }
+        self.pane_overrides.insert(id.clone(), vec![chord]);
+        if let Some(binding) = self.panes.get_mut(id) {
+            binding.chords = vec![chord];
+        }
+        stolen
+    }
+
+    /// Drop the user's choice for a pane binding, returning it to its manifest
+    /// default — or to nothing, when the manifest declared no chord.
+    pub fn reset_pane(&mut self, id: &PaneBindingId) {
+        self.pane_overrides.remove(id);
+        self.rebuild_pane_chords(id);
+    }
+
+    /// Re-derive one binding's chords from its default, dropping it if something
+    /// overlapping now holds that chord — the same rule registration applies.
+    fn rebuild_pane_chords(&mut self, id: &PaneBindingId) {
+        let Some(default) = self.panes.get(id).and_then(|b| b.default) else {
+            if let Some(binding) = self.panes.get_mut(id) {
+                binding.chords.clear();
+            }
+            return;
+        };
+        let free = self.chord_owner(id, default).is_none();
+        if let Some(binding) = self.panes.get_mut(id) {
+            binding.chords = if free { vec![default] } else { Vec::new() };
+        }
+    }
+
+    /// Remove `chord` from one pane binding, including from the user's stored
+    /// choice — otherwise the next registration would hand it back.
+    fn unbind_pane_chord(&mut self, id: &PaneBindingId, chord: KeyChord) {
+        if let Some(binding) = self.panes.get_mut(id) {
+            binding.chords.retain(|c| !same_chord(*c, chord));
+        }
+        if let Some(chords) = self.pane_overrides.get_mut(id) {
+            chords.retain(|c| !same_chord(*c, chord));
+            if chords.is_empty() {
+                self.pane_overrides.remove(id);
+            }
+        }
+    }
+
+    /// What currently holds `chord` against a pane binding's scope: a global
+    /// action, or a sibling binding of the same pane. `None` when it is free.
+    ///
+    /// A pane binding overlaps a global action (those chords are the user's way
+    /// out of the pane) and its own pane's bindings, and nothing else — an action
+    /// scoped to another pane is never active at the same time.
+    fn chord_owner(&self, id: &PaneBindingId, chord: KeyChord) -> Option<BindingTarget> {
+        self.chord_owner_in(id, chord, &self.panes)
+    }
+
+    /// [`Self::chord_owner`] over a given pane table, so registration can consult
+    /// the set it is building rather than the one it is replacing.
+    fn chord_owner_in(
+        &self,
+        id: &PaneBindingId,
+        chord: KeyChord,
+        panes: &std::collections::BTreeMap<PaneBindingId, PaneBinding>,
+    ) -> Option<BindingTarget> {
+        if let Some(action) = self.global_action_holding(chord) {
+            return Some(BindingTarget::Action(action));
+        }
+        panes
+            .iter()
+            .find(|(other, binding)| {
+                *other != id
+                    && other.plugin == id.plugin
+                    && other.pane == id.pane
+                    && holds(&binding.chords, chord)
+            })
+            .map(|(other, _)| BindingTarget::Pane(other.clone()))
+    }
+
+    /// The global action holding `chord`, if any. Deterministic: the earliest in
+    /// [`Action::all`], matching how `lookup_in` breaks a tie.
+    fn global_action_holding(&self, chord: KeyChord) -> Option<Action> {
+        Action::all()
+            .iter()
+            .copied()
+            .find(|a| a.context() == KeyContext::Global && holds(self.chords_for(*a), chord))
+    }
+
+    /// How a chord's current holder is named in a dropped-default message.
+    fn holder_label(&self, target: &BindingTarget) -> String {
+        match target {
+            BindingTarget::Action(action) => action.label().to_string(),
+            BindingTarget::Pane(id) => id.qualified(),
+        }
+    }
+
     /// Serialize to the JSON shape `~/.config/thurbox/keybindings.json` uses.
+    ///
+    /// Pane bindings are written from the user's **overrides** only, never from
+    /// what a manifest declared: a default that landed in the file would freeze
+    /// it, so a plugin changing its own default would never reach a user who had
+    /// once opened the editor. Overrides for a plugin that is not installed right
+    /// now are written too, so switching builds or reinstalling a plugin does not
+    /// cost the user their choice.
     pub fn to_json(&self) -> Result<String, String> {
         let mut out: HashMap<String, Vec<String>> = HashMap::new();
         for (action, chords) in &self.map {
@@ -996,6 +1437,12 @@ impl KeyBindings {
                     .map_err(|e| e.to_string())?
                     .trim_matches('"')
                     .to_string(),
+                chords.iter().map(KeyChord::display).collect(),
+            );
+        }
+        for (id, chords) in &self.pane_overrides {
+            out.insert(
+                format!("{PANE_BINDING_PREFIX}{}", id.qualified()),
                 chords.iter().map(KeyChord::display).collect(),
             );
         }
@@ -1020,13 +1467,6 @@ impl KeyBindings {
         let mut warnings = Vec::new();
         let mut bindings = KeyBindings::default();
         for (key, chord_strs) in parsed {
-            let action: Action = match serde_json::from_str::<Action>(&format!("\"{key}\"")) {
-                Ok(a) => a,
-                Err(_) => {
-                    warnings.push(format!("unknown action \"{key}\""));
-                    continue;
-                }
-            };
             let mut chords: Vec<KeyChord> = Vec::new();
             for s in &chord_strs {
                 match KeyChord::parse(s) {
@@ -1034,12 +1474,60 @@ impl KeyBindings {
                     None => warnings.push(format!("invalid chord \"{s}\" for {key}")),
                 }
             }
+            // A plugin binding's entry is kept even when no plugin declares it:
+            // the plugin may be uninstalled, failing to load, or absent from this
+            // build, and discarding the entry would silently lose a choice the
+            // user made. It applies the moment that binding is registered.
+            if let Some(address) = key.strip_prefix(PANE_BINDING_PREFIX) {
+                match PaneBindingId::parse(address) {
+                    Some(id) if !chords.is_empty() => {
+                        bindings.pane_overrides.insert(id, chords);
+                    }
+                    Some(_) => {}
+                    None => warnings.push(format!(
+                        "\"{key}\" is not a plugin binding address \
+                         (expected {PANE_BINDING_PREFIX}<plugin>.<pane>.<id>)"
+                    )),
+                }
+                continue;
+            }
+            let action: Action = match serde_json::from_str::<Action>(&format!("\"{key}\"")) {
+                Ok(a) => a,
+                Err(_) => {
+                    warnings.push(format!("unknown action \"{key}\""));
+                    continue;
+                }
+            };
             if !chords.is_empty() {
                 bindings.map.insert(action, chords);
             }
         }
         warnings.extend(bindings.conflict_warnings());
         Ok((bindings, warnings))
+    }
+
+    /// Chords a **global** action and a pane binding both hold. Reported like an
+    /// action-vs-action conflict, but the outcome is not a coin toss: the action
+    /// wins, because those chords are how a user leaves a pane.
+    ///
+    /// Only computed over registered bindings, so a file loaded before the
+    /// plugins started warns about nothing — registration reports its own
+    /// collisions.
+    fn pane_conflict_warnings(&self) -> Vec<String> {
+        self.panes
+            .iter()
+            .flat_map(|(id, binding)| binding.chords.iter().map(move |c| (id, *c)))
+            .filter_map(|(id, chord)| {
+                let action = self.global_action_holding(chord)?;
+                Some(format!(
+                    "chord \"{}\" is bound to both {} and the plugin binding {} \
+                     (the action wins)",
+                    chord.display(),
+                    action.label(),
+                    id.qualified(),
+                ))
+            })
+            .collect()
     }
 
     /// Chords bound to more than one action whose contexts overlap. The F1
@@ -1065,8 +1553,21 @@ impl KeyBindings {
                 }
             }
         }
+        warnings.extend(self.pane_conflict_warnings());
         warnings
     }
+}
+
+/// Whether `chords` holds `chord`, comparing the parts a lookup compares.
+fn holds(chords: &[KeyChord], chord: KeyChord) -> bool {
+    chords.iter().any(|c| same_chord(*c, chord))
+}
+
+/// Whether two chords are the same key. Compared field-wise rather than by
+/// `PartialEq` so a future field on `KeyChord` cannot silently change what a
+/// collision means.
+fn same_chord(a: KeyChord, b: KeyChord) -> bool {
+    a.code == b.code && a.mods == b.mods
 }
 
 #[cfg(test)]
@@ -1458,7 +1959,10 @@ mod tests {
         let mut kb = KeyBindings::default();
         // ctrl+q is QuitApp's default; reassign it to NewSession.
         let chord = KeyChord::ctrl('q');
-        assert_eq!(kb.rebind(Action::NewSession, chord), Some(Action::QuitApp));
+        assert_eq!(
+            kb.rebind(Action::NewSession, chord),
+            Some(BindingTarget::Action(Action::QuitApp))
+        );
         assert_eq!(
             kb.lookup(KeyCode::Char('q'), KeyModifiers::CONTROL),
             Some(Action::NewSession)
@@ -1643,7 +2147,7 @@ mod tests {
         // Bind FileViewerUp to `j` — already FileViewerDown's chord (same scope).
         assert_eq!(
             kb.rebind(Action::FileViewerUp, KeyChord::plain('j')),
-            Some(Action::FileViewerDown)
+            Some(BindingTarget::Action(Action::FileViewerDown))
         );
     }
 
@@ -1653,7 +2157,7 @@ mod tests {
         // A scoped action grabbing a global chord steals it from the global action.
         assert_eq!(
             kb.rebind(Action::FileViewerDown, KeyChord::ctrl('q')),
-            Some(Action::QuitApp)
+            Some(BindingTarget::Action(Action::QuitApp))
         );
     }
 
@@ -1710,7 +2214,10 @@ mod tests {
             .iter()
             .map(|a| (*a, a.default_chords_for(true)))
             .collect();
-        let kb = KeyBindings { map };
+        let kb = KeyBindings {
+            map,
+            ..KeyBindings::default()
+        };
         let warnings = kb.conflict_warnings();
         assert!(warnings.is_empty(), "macOS defaults conflict: {warnings:?}");
     }
@@ -1721,12 +2228,15 @@ mod tests {
             .iter()
             .map(|a| (*a, a.default_chords_for(true)))
             .collect();
-        let mut kb = KeyBindings { map };
+        let mut kb = KeyBindings {
+            map,
+            ..KeyBindings::default()
+        };
         // cmd+j belongs to the global NextSession; a scoped action grabbing it
         // steals it like any other chord.
         assert_eq!(
             kb.rebind(Action::FileViewerDown, KeyChord::cmd('j')),
-            Some(Action::NextSession)
+            Some(BindingTarget::Action(Action::NextSession))
         );
         assert!(!kb
             .chords_for(Action::NextSession)
@@ -1811,5 +2321,310 @@ mod tests {
         );
         // No binding → no hint.
         assert_eq!(compact_shortcut(&[]), None);
+    }
+
+    // ── pane bindings (a plugin pane's keys) ─────────────────────────────────
+
+    fn decl(plugin: &str, pane: &str, id: &str, chord: Option<&str>) -> PaneBindingDecl {
+        PaneBindingDecl {
+            id: PaneBindingId::new(plugin, pane, id),
+            title: id.to_string(),
+            chord: chord.and_then(KeyChord::parse),
+        }
+    }
+
+    #[test]
+    fn pane_binding_address_round_trips() {
+        let id = PaneBindingId::new("notes", "board", "next");
+        assert_eq!(id.qualified(), "notes.board.next");
+        assert_eq!(PaneBindingId::parse("notes.board.next"), Some(id));
+        // Anything but three non-empty parts is not an address.
+        assert_eq!(PaneBindingId::parse("notes.board"), None);
+        assert_eq!(PaneBindingId::parse("notes.board.next.extra"), None);
+        assert_eq!(PaneBindingId::parse("notes..next"), None);
+    }
+
+    #[test]
+    fn a_pane_binding_resolves_only_for_its_own_pane() {
+        let mut kb = KeyBindings::default();
+        assert!(kb
+            .register_pane_bindings(vec![
+                decl("notes", "board", "next", Some("j")),
+                decl("other", "list", "down", Some("j")),
+            ])
+            .is_empty());
+
+        // Both keep the chord: two panes are never focused at once, so the same
+        // letter means one thing in each.
+        assert_eq!(
+            kb.lookup_pane_binding("notes", "board", KeyCode::Char('j'), KeyModifiers::NONE),
+            Some(&PaneBindingId::new("notes", "board", "next"))
+        );
+        assert_eq!(
+            kb.lookup_pane_binding("other", "list", KeyCode::Char('j'), KeyModifiers::NONE),
+            Some(&PaneBindingId::new("other", "list", "down"))
+        );
+        // And neither resolves for a pane that did not declare it.
+        assert!(kb
+            .lookup_pane_binding(
+                "notes",
+                "other-pane",
+                KeyCode::Char('j'),
+                KeyModifiers::NONE
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn a_pane_binding_may_share_a_chord_with_another_panes_action() {
+        let mut kb = KeyBindings::default();
+        // `j` is the tasks pane's "next item" and the file viewer's "move down".
+        assert!(kb
+            .register_pane_bindings(vec![decl("notes", "board", "next", Some("j"))])
+            .is_empty());
+        assert_eq!(
+            kb.chords_for_pane(&PaneBindingId::new("notes", "board", "next"))
+                .len(),
+            1
+        );
+        assert!(kb
+            .chords_for(Action::TasksNext)
+            .contains(&KeyChord::plain('j')));
+    }
+
+    #[test]
+    fn a_declared_chord_a_global_action_holds_is_dropped_not_stolen() {
+        let mut kb = KeyBindings::default();
+        let warnings =
+            kb.register_pane_bindings(vec![decl("notes", "board", "quit", Some("ctrl+q"))]);
+
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].id, PaneBindingId::new("notes", "board", "quit"));
+        assert_eq!(warnings[0].holder, "Quit");
+        assert!(
+            warnings[0].to_string().contains("left unbound"),
+            "{warnings:?}"
+        );
+        // The action keeps its key, and the binding has none.
+        assert_eq!(kb.chords_for(Action::QuitApp), &[KeyChord::ctrl('q')]);
+        assert!(kb
+            .chords_for_pane(&PaneBindingId::new("notes", "board", "quit"))
+            .is_empty());
+    }
+
+    #[test]
+    fn two_bindings_of_one_pane_cannot_share_a_chord() {
+        let mut kb = KeyBindings::default();
+        let warnings = kb.register_pane_bindings(vec![
+            decl("notes", "board", "aaa", Some("d")),
+            decl("notes", "board", "bbb", Some("d")),
+        ]);
+
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(
+            kb.chords_for_pane(&PaneBindingId::new("notes", "board", "aaa")),
+            &[KeyChord::plain('d')]
+        );
+        assert!(kb
+            .chords_for_pane(&PaneBindingId::new("notes", "board", "bbb"))
+            .is_empty());
+    }
+
+    #[test]
+    fn a_users_rebind_steals_from_a_global_action_and_back() {
+        let mut kb = KeyBindings::default();
+        kb.register_pane_bindings(vec![decl("notes", "board", "del", Some("d"))]);
+        let id = PaneBindingId::new("notes", "board", "del");
+
+        // A rebind — unlike a manifest default — takes the chord.
+        assert_eq!(
+            kb.rebind_pane(&id, KeyChord::ctrl('q')),
+            Some(BindingTarget::Action(Action::QuitApp))
+        );
+        assert!(!kb
+            .chords_for(Action::QuitApp)
+            .contains(&KeyChord::ctrl('q')));
+        assert_eq!(kb.chords_for_pane(&id), &[KeyChord::ctrl('q')]);
+
+        // And in the other direction: an action rebound onto the pane's chord.
+        assert_eq!(
+            kb.rebind(Action::NewSession, KeyChord::ctrl('q')),
+            Some(BindingTarget::Pane(id.clone()))
+        );
+        assert!(kb.chords_for_pane(&id).is_empty());
+    }
+
+    #[test]
+    fn a_stored_override_survives_re_registration() {
+        let mut kb = KeyBindings::default();
+        kb.register_pane_bindings(vec![decl("notes", "board", "next", Some("j"))]);
+        let id = PaneBindingId::new("notes", "board", "next");
+        kb.rebind_pane(&id, KeyChord::plain('n'));
+
+        // A reload republishes the declarations — with a different default, even.
+        kb.register_pane_bindings(vec![decl("notes", "board", "next", Some("k"))]);
+        assert_eq!(
+            kb.chords_for_pane(&id),
+            &[KeyChord::plain('n')],
+            "the user's choice outranks what the manifest now says"
+        );
+
+        // Reset drops the override and takes the manifest's current default.
+        kb.reset_pane(&id);
+        assert_eq!(kb.chords_for_pane(&id), &[KeyChord::plain('k')]);
+    }
+
+    #[test]
+    fn registration_replaces_the_declared_set() {
+        let mut kb = KeyBindings::default();
+        kb.register_pane_bindings(vec![
+            decl("notes", "board", "next", Some("j")),
+            decl("notes", "board", "prev", Some("k")),
+        ]);
+        // A reload that dropped one binding must stop resolving it.
+        kb.register_pane_bindings(vec![decl("notes", "board", "next", Some("j"))]);
+
+        assert!(kb
+            .lookup_pane_binding("notes", "board", KeyCode::Char('k'), KeyModifiers::NONE)
+            .is_none());
+        assert_eq!(kb.pane_bindings().count(), 1);
+    }
+
+    #[test]
+    fn reset_all_keeps_the_declarations_and_drops_the_choices() {
+        let mut kb = KeyBindings::default();
+        kb.register_pane_bindings(vec![decl("notes", "board", "next", Some("j"))]);
+        let id = PaneBindingId::new("notes", "board", "next");
+        kb.rebind_pane(&id, KeyChord::plain('n'));
+        kb.rebind(Action::QuitApp, KeyChord::ctrl('a'));
+
+        kb.reset_all();
+
+        assert_eq!(kb.chords_for(Action::QuitApp), &[KeyChord::ctrl('q')]);
+        assert_eq!(
+            kb.chords_for_pane(&id),
+            &[KeyChord::plain('j')],
+            "the plugin's declaration is not a user choice, so it survives"
+        );
+    }
+
+    #[test]
+    fn a_pane_binding_round_trips_through_json() {
+        let mut kb = KeyBindings::default();
+        kb.register_pane_bindings(vec![decl("notes", "board", "next", Some("j"))]);
+        let id = PaneBindingId::new("notes", "board", "next");
+        kb.rebind_pane(&id, KeyChord::plain('n'));
+
+        let json = kb.to_json().unwrap();
+        assert!(json.contains("plugin:notes.board.next"), "{json}");
+
+        // The reloaded keymap knows nothing about plugins until they register, so
+        // the override applies at registration — which is what makes the file
+        // survive a build with no plugin host.
+        let (mut parsed, warnings) = KeyBindings::from_json_with_warnings(&json).unwrap();
+        // Scoped to the plugin entry: a full round trip also re-reads the kernel's
+        // own defaults, one of which (the bare space) does not survive `parse`.
+        // That is a pre-existing quirk of the chord grammar, not this entry's.
+        assert!(
+            !warnings.iter().any(|w| w.contains("plugin:")),
+            "{warnings:?}"
+        );
+        assert!(parsed.chords_for_pane(&id).is_empty());
+        parsed.register_pane_bindings(vec![decl("notes", "board", "next", Some("j"))]);
+        assert_eq!(parsed.chords_for_pane(&id), &[KeyChord::plain('n')]);
+    }
+
+    #[test]
+    fn a_manifest_default_is_never_written_to_the_file() {
+        let mut kb = KeyBindings::default();
+        kb.register_pane_bindings(vec![decl("notes", "board", "next", Some("j"))]);
+        // Writing the default would freeze it: a plugin changing its own default
+        // would then never reach a user who once opened the editor.
+        assert!(!kb.to_json().unwrap().contains("plugin:notes.board.next"));
+    }
+
+    #[test]
+    fn an_override_for_an_absent_plugin_is_kept() {
+        let json = r#"{ "plugin:gone.board.next": ["ctrl+alt+g"] }"#;
+        let (mut kb, warnings) = KeyBindings::from_json_with_warnings(json).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // Nothing declares it, so it resolves to nothing — but it is still written
+        // back, and applies the moment that plugin appears.
+        assert!(kb.to_json().unwrap().contains("plugin:gone.board.next"));
+        kb.register_pane_bindings(vec![decl("gone", "board", "next", Some("j"))]);
+        assert_eq!(
+            kb.chords_for_pane(&PaneBindingId::new("gone", "board", "next")),
+            &[KeyChord::parse("ctrl+alt+g").unwrap()]
+        );
+    }
+
+    #[test]
+    fn a_malformed_plugin_key_is_reported() {
+        let json = r#"{ "plugin:notes.board": ["j"] }"#;
+        let (_, warnings) = KeyBindings::from_json_with_warnings(json).unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("plugin:notes.board"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_hand_edited_conflict_with_a_global_action_is_reported() {
+        let mut kb = KeyBindings::default();
+        // Reached only by hand-editing: registration drops such a default, and a
+        // rebind steals. Bypassed here by overriding first, then registering.
+        let json = r#"{ "plugin:notes.board.quit": ["ctrl+q"] }"#;
+        let (mut loaded, _) = KeyBindings::from_json_with_warnings(json).unwrap();
+        loaded.register_pane_bindings(vec![decl("notes", "board", "quit", None)]);
+        let warnings = loaded.conflict_warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("the action wins"), "{warnings:?}");
+
+        // With nothing registered there is nothing to warn about.
+        kb.register_pane_bindings(Vec::new());
+        assert!(kb.conflict_warnings().is_empty());
+    }
+
+    #[test]
+    fn the_editor_lists_pane_bindings_after_the_kernels_actions() {
+        let mut kb = KeyBindings::default();
+        let kernel = kb.editable_targets().len();
+        kb.register_pane_bindings(vec![
+            decl("notes", "board", "next", Some("j")),
+            decl("notes", "board", "prev", Some("k")),
+            decl("other", "list", "down", Some("j")),
+        ]);
+
+        let targets = kb.editable_targets();
+        assert_eq!(targets.len(), kernel + 3);
+        assert!(matches!(targets[kernel - 1], BindingTarget::Action(_)));
+        assert_eq!(
+            targets[kernel],
+            BindingTarget::Pane(PaneBindingId::new("notes", "board", "next"))
+        );
+
+        // One section per pane, in the same order the targets are listed.
+        let sections = kb.pane_sections();
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].0, "notes · board (when focused)");
+        assert_eq!(sections[0].1.len(), 2);
+        assert_eq!(sections[1].0, "other · list (when focused)");
+    }
+
+    #[test]
+    fn a_binding_declared_without_a_chord_is_registered_unbound() {
+        let mut kb = KeyBindings::default();
+        assert!(kb
+            .register_pane_bindings(vec![decl("notes", "board", "next", None)])
+            .is_empty());
+        let id = PaneBindingId::new("notes", "board", "next");
+        assert!(kb.chords_for_pane(&id).is_empty());
+        // Still editable: this is how a plugin ships an action without a key.
+        assert!(kb
+            .editable_targets()
+            .contains(&BindingTarget::Pane(id.clone())));
+        kb.rebind_pane(&id, KeyChord::plain('z'));
+        assert_eq!(kb.chords_for_pane(&id), &[KeyChord::plain('z')]);
+        // And resetting it returns it to having none.
+        kb.reset_pane(&id);
+        assert!(kb.chords_for_pane(&id).is_empty());
     }
 }

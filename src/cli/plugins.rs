@@ -48,8 +48,12 @@ pub fn run(action: Action) -> Result<CommandOutput, String> {
             // manifests, which the report does not carry.
             let outcome = crate::plugin::discovery::discover();
             let registry = crate::plugin::spawn::registry_for(outcome.loadable.iter());
+            let keys = keybinding_report(
+                user_keybindings(),
+                crate::plugin::keymap::declarations_for(outcome.loadable.iter()),
+            );
             let report = crate::plugin::PluginHost::from_discovery(outcome, bounds).report();
-            Ok(render_doctor(&report, &registry))
+            Ok(render_doctor(&report, &registry, &keys))
         }
         Action::Reload { name } => reload(bounds, name.as_deref()),
     }
@@ -263,6 +267,7 @@ fn human_status(status: &crate::plugin::PluginStatus) -> String {
 fn render_doctor(
     report: &crate::plugin::PluginReport,
     registry: &crate::session::spawn_contribution::Registry,
+    keys: &[KeybindingReport],
 ) -> CommandOutput {
     let spawn = resolve_for_report(registry);
     let accepted: Vec<String> = spawn.env.keys().cloned().collect();
@@ -275,6 +280,15 @@ fn render_doctor(
             "env": accepted,
             "refused": refused,
         },
+        "keybindings": keys
+            .iter()
+            .map(|k| json!({
+                "binding": k.binding,
+                "title": k.title,
+                "chord": k.chord,
+                "unbound_because": k.unbound_because,
+            }))
+            .collect::<Vec<_>>(),
     });
 
     let mut human = if report.problems.is_empty() {
@@ -290,6 +304,25 @@ fn render_doctor(
         s.trim_end().to_string()
     };
 
+    if !keys.is_empty() {
+        human.push_str("\n\nPane keybindings:");
+        for key in keys {
+            match (&key.chord, &key.unbound_because) {
+                (Some(chord), _) => {
+                    human.push_str(&format!("\n  {chord:<12} {} ({})", key.title, key.binding))
+                }
+                (None, Some(reason)) => human.push_str(&format!(
+                    "\n  {:<12} {} ({}) — {reason}",
+                    "unbound", key.title, key.binding
+                )),
+                (None, None) => human.push_str(&format!(
+                    "\n  {:<12} {} ({}) — declares no chord",
+                    "unbound", key.title, key.binding
+                )),
+            }
+        }
+    }
+
     if !registry.is_empty() {
         human.push_str("\n\nSpawn contributions:");
         for key in &accepted {
@@ -304,6 +337,56 @@ fn render_doctor(
     }
 
     CommandOutput::new(json, human)
+}
+
+/// One declared pane binding and the chord it actually has.
+///
+/// Re-derived from the manifests plus the user's keybindings file, for the same
+/// reason the spawn section is re-derived from the manifests: "why does my key do
+/// nothing" has to be answerable with no TUI running and no VM started. A chord a
+/// manifest declared can be missing for two reasons a user cannot otherwise tell
+/// apart — something overlapping already held it, or the manifest never named one
+/// — so both are printed.
+struct KeybindingReport {
+    binding: String,
+    title: String,
+    chord: Option<String>,
+    unbound_because: Option<String>,
+}
+
+/// The user's keymap, or the defaults when there is no override file.
+fn user_keybindings() -> crate::session::KeyBindings {
+    match crate::storage::keybindings::load_keybindings_json() {
+        Ok(Some(json)) => crate::session::KeyBindings::from_json(&json).unwrap_or_default(),
+        _ => crate::session::KeyBindings::default(),
+    }
+}
+
+/// Register the declarations against a keymap, so the reported chord is the one
+/// that would resolve — a user's rebind included.
+///
+/// Takes the keymap rather than loading it, so the report is testable without
+/// depending on whatever is in the developer's own keybindings file.
+fn keybinding_report(
+    mut bindings: crate::session::KeyBindings,
+    decls: Vec<crate::session::keybindings::PaneBindingDecl>,
+) -> Vec<KeybindingReport> {
+    let mut dropped: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for drop in bindings.register_pane_bindings(decls) {
+        dropped.insert(drop.id.qualified(), drop.to_string());
+    }
+    bindings
+        .pane_bindings()
+        .map(|(id, binding)| KeybindingReport {
+            binding: id.qualified(),
+            title: binding.title.clone(),
+            chord: binding
+                .chords
+                .first()
+                .map(crate::session::KeyChord::display),
+            unbound_because: dropped.get(&id.qualified()).cloned(),
+        })
+        .collect()
 }
 
 /// Resolve the published contributions the way a spawn would.
@@ -423,8 +506,14 @@ mod tests {
     fn doctor_over(root: &Path) -> CommandOutput {
         let outcome = crate::plugin::discovery::discover_in(&[], Some(root));
         let registry = crate::plugin::spawn::registry_for(outcome.loadable.iter());
+        // The real path registers against the *user's* keymap; a test must not
+        // depend on what is in the developer's own keybindings file.
+        let keys = keybinding_report(
+            crate::session::KeyBindings::default(),
+            crate::plugin::keymap::declarations_for(outcome.loadable.iter()),
+        );
         let report = crate::plugin::PluginHost::from_discovery(outcome, bounds()).report();
-        render_doctor(&report, &registry)
+        render_doctor(&report, &registry, &keys)
     }
 
     #[test]
@@ -534,6 +623,59 @@ mod tests {
     }
 
     #[test]
+    fn doctor_reports_each_pane_binding_and_why_one_is_unbound() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(
+            tmp.path(),
+            "notes",
+            "capabilities = [\"render\", \"input\"]\n[[panes]]\nid = \"board\"\n\
+             [[keybindings]]\nid = \"next\"\npane = \"board\"\nchord = \"j\"\n\
+             [[keybindings]]\nid = \"quit\"\npane = \"board\"\nchord = \"ctrl+q\"\n\
+             [[keybindings]]\nid = \"spare\"\npane = \"board\"\n",
+            "return { render = function() return { kind = \"divider\" } end }",
+        );
+
+        let out = doctor_over(tmp.path());
+        let keys = out.json["keybindings"].as_array().expect("section present");
+        assert_eq!(keys.len(), 3);
+
+        let row = |binding: &str| {
+            keys.iter()
+                .find(|k| k["binding"] == format!("notes.board.{binding}"))
+                .cloned()
+                .expect(binding)
+        };
+        assert_eq!(row("next")["chord"], "j");
+        // The kernel's quit chord is not stolen by a manifest, and the row says so.
+        assert!(row("quit")["chord"].is_null());
+        assert!(row("quit")["unbound_because"]
+            .as_str()
+            .unwrap()
+            .contains("Quit"));
+        // A binding that declared no chord is unbound for a different reason, and
+        // the two must be distinguishable.
+        assert!(row("spare")["chord"].is_null());
+        assert!(row("spare")["unbound_because"].is_null());
+        assert!(out.human.contains("Pane keybindings:"), "{}", out.human);
+    }
+
+    #[test]
+    fn doctor_starts_nothing_to_report_a_keybinding() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(
+            tmp.path(),
+            "notes",
+            "capabilities = [\"render\", \"input\"]\n[[panes]]\nid = \"board\"\n\
+             [[keybindings]]\nid = \"next\"\npane = \"board\"\nchord = \"j\"\n",
+            // Would fail loudly if the plugin were ever run.
+            "error('must not run')",
+        );
+
+        let out = doctor_over(tmp.path());
+        assert_eq!(out.json["keybindings"][0]["chord"], "j");
+    }
+
+    #[test]
     fn doctor_reports_an_override() {
         let tmp = tempfile::tempdir().unwrap();
         let bundled_root = tmp.path().join("bundled");
@@ -549,6 +691,7 @@ mod tests {
         let out = render_doctor(
             &host.report(),
             &crate::session::spawn_contribution::Registry::default(),
+            &[],
         );
 
         let problems = out.json["problems"].as_array().unwrap();

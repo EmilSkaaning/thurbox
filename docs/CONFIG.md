@@ -520,6 +520,21 @@ Maps `Action` names to one or more chord strings:
   action to a key that isn't a bare `Ctrl+<letter>` makes it work in the
   terminal too. Navigation/quit chords (`Ctrl+H/J/K/L`, `Ctrl+Q`, `Ctrl+N`) are
   **never** forwarded — they're how you leave the terminal.
+- **Plugin pane keys** (builds with the `plugins` feature) live in the same file
+  under a `plugin:<plugin>.<pane>.<binding>` key:
+
+  ```json
+  { "plugin:notes.board.delete": ["d"] }
+  ```
+
+  A plugin declares its own default in its `plugin.toml` `[[keybindings]]`, and
+  that default is **never written here** — this file holds only *your* choices,
+  so a plugin changing its default still reaches you. A binding is active only
+  while its own pane is focused, so two panes may use the same letter. An entry
+  naming a plugin that is not installed (or a build without the plugin host) is
+  **kept**, not discarded, and applies again as soon as that plugin is back.
+  A chord a plugin asks for that something overlapping already holds is left
+  unbound rather than stolen; `thurbox-cli plugin doctor` says which and why.
 - Action names and defaults: see the table in CLAUDE.md / README, or
   `src/session/keybindings.rs`.
 

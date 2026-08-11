@@ -370,7 +370,17 @@ impl PluginVm {
     ///
     /// A plugin with no key handler simply does not consume — so declaring the
     /// capability and not using it is harmless rather than an error.
-    fn on_key(&self, pane_id: &str, key: &str) -> Result<bool, RuntimeError> {
+    ///
+    /// `binding` is the id of the pane binding the chord resolved to, or `None`.
+    /// Passed as a third argument rather than in place of the key: a pane that
+    /// collects text needs the keypress, and a plugin written before bindings
+    /// existed keeps working because it simply ignores an extra argument.
+    fn on_key(
+        &self,
+        pane_id: &str,
+        key: &str,
+        binding: Option<&str>,
+    ) -> Result<bool, RuntimeError> {
         let module: Table = self
             .lua
             .named_registry_value(MODULE_REGISTRY_KEY)
@@ -384,7 +394,11 @@ impl PluginVm {
 
         self.arm();
         let consumed: Value = func
-            .call((pane_id.to_string(), key.to_string()))
+            .call((
+                pane_id.to_string(),
+                key.to_string(),
+                binding.map(str::to_string),
+            ))
             .map_err(|e| classify(&e))?;
         // Anything truthy consumes; a plugin returning nothing has not.
         Ok(matches!(consumed, Value::Boolean(true)))
@@ -557,7 +571,12 @@ enum Request {
     Init(Sender<Result<bool, RuntimeError>>),
     Eval(String, Sender<Result<String, RuntimeError>>),
     Render(String, Sender<Result<ViewNode, RuntimeError>>),
-    Key(String, String, Sender<Result<bool, RuntimeError>>),
+    Key(
+        String,
+        String,
+        Option<String>,
+        Sender<Result<bool, RuntimeError>>,
+    ),
     Named(String, Sender<Result<bool, RuntimeError>>),
     Verb(String, Vec<String>, Sender<Result<String, RuntimeError>>),
     Command(
@@ -674,11 +693,17 @@ impl PluginThread {
         &self,
         pane_id: &str,
         key: &str,
+        binding: Option<&str>,
         timeout: Duration,
     ) -> Result<bool, RuntimeError> {
         let (tx, rx) = mpsc::channel();
         self.requests
-            .send(Request::Key(pane_id.to_string(), key.to_string(), tx))
+            .send(Request::Key(
+                pane_id.to_string(),
+                key.to_string(),
+                binding.map(str::to_string),
+                tx,
+            ))
             .map_err(|_| RuntimeError::ThreadGone)?;
         match rx.recv_timeout(timeout) {
             Ok(result) => result,
@@ -806,9 +831,9 @@ fn serve(vm: PluginVm, requests: Receiver<Request>) {
                 }
                 let _ = reply.send(result);
             }
-            Request::Key(pane_id, key, reply) => {
+            Request::Key(pane_id, key, binding, reply) => {
                 let result = match vm.as_ref() {
-                    Some(v) => v.on_key(&pane_id, &key),
+                    Some(v) => v.on_key(&pane_id, &key, binding.as_deref()),
                     None => Err(RuntimeError::Terminated),
                 };
                 if result.as_ref().err().is_some_and(RuntimeError::is_fatal) {

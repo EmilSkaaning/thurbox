@@ -22,6 +22,9 @@
 //! - [`commands`] turns manifests into the command registry every surface
 //!   resolves through — likewise with no VM, so a plugin that never started
 //!   still lists what it offers — and bounds a command result on its way out.
+//! - [`keymap`] turns manifests into the keymap entries a pane's keys resolve
+//!   through — no VM either, so a plugin whose code faults still has its keys
+//!   reportable and rebindable.
 //! - [`spawn`] turns manifests into the spawn-contribution registry the kernel
 //!   reads when it launches an agent — the one plugin surface that involves no
 //!   VM at all, because the spawn path must not enter one.
@@ -32,6 +35,7 @@ pub mod capabilities;
 pub mod commands;
 pub mod discovery;
 pub mod kernel_state;
+pub mod keymap;
 pub mod lifecycle;
 pub mod pane;
 pub mod runtime;

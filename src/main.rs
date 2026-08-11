@@ -423,7 +423,10 @@ fn spawn_plugin_render_loop(
                 return;
             };
             if tx
-                .send(thurbox::app::PluginUiEvent::Panes(host.panes()))
+                .send(thurbox::app::PluginUiEvent::Panes {
+                    panes: host.panes(),
+                    bindings: host.pane_bindings(),
+                })
                 .is_err()
             {
                 return;
@@ -451,7 +454,10 @@ fn spawn_plugin_render_loop(
                     stamps = host.source_stamps();
                     // Panes may have appeared or vanished with the reload.
                     if tx
-                        .send(thurbox::app::PluginUiEvent::Panes(host.panes()))
+                        .send(thurbox::app::PluginUiEvent::Panes {
+                            panes: host.panes(),
+                            bindings: host.pane_bindings(),
+                        })
                         .is_err()
                     {
                         host.stop_all();
@@ -487,6 +493,7 @@ fn spawn_plugin_render_loop(
                                     &req.plugin,
                                     &req.pane,
                                     &req.key,
+                                    req.binding.as_deref(),
                                     thurbox::app::PLUGIN_KEY_TIMEOUT,
                                 )
                                 .unwrap_or(false);

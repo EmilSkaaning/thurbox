@@ -4480,6 +4480,149 @@ fn a_hidden_plugin_pane_is_not_focusable() {
     assert!(h.app.focusable_plugin_pane().is_none());
 }
 
+/// A key that resolves to one of the focused pane's bindings reaches the plugin
+/// with the binding's name on it, which is what makes a rebind cost no plugin
+/// change.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_focused_panes_binding_is_delivered_with_the_key() {
+    use crate::session::keybindings::{PaneBindingDecl, PaneBindingId};
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let mut h = Harness::new(160, 40, 1);
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, true);
+    pane.accepts_input = true;
+    h.app.set_plugin_panes(vec![pane]);
+    h.app.focus = InputFocus::PluginPane;
+    h.app
+        .keybindings
+        .register_pane_bindings(vec![PaneBindingDecl {
+            id: PaneBindingId::new("demo", "board", "delete-row"),
+            title: "Delete row".to_string(),
+            chord: crate::session::KeyChord::parse("x"),
+        }]);
+
+    // A channel with no worker on the far end: the request is what is asserted,
+    // and the bounded wait times out to "not consumed".
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (key_tx, key_rx) = std::sync::mpsc::channel();
+    h.app.set_plugin_channels(event_rx, key_tx);
+    drop(event_tx);
+
+    h.key(KeyCode::Char('x'), KeyModifiers::NONE);
+    let request = key_rx.try_recv().expect("the key was offered");
+    assert_eq!(request.key, "x");
+    assert_eq!(request.binding.as_deref(), Some("delete-row"));
+
+    // A key nothing of that pane's holds still arrives, with no binding.
+    h.key(KeyCode::Char('z'), KeyModifiers::NONE);
+    let request = key_rx.try_recv().expect("the key was offered");
+    assert_eq!(request.key, "z");
+    assert_eq!(request.binding, None);
+}
+
+/// A pane's binding is an F1 row like any other: selectable, capturable, and
+/// resettable — which is the whole difference between a plugin key and a
+/// hard-coded one.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_pane_binding_is_editable_in_the_f1_editor() {
+    use crate::session::keybindings::{PaneBindingDecl, PaneBindingId};
+
+    let mut h = Harness::new(160, 40, 1);
+    let id = PaneBindingId::new("demo", "board", "delete-row");
+    h.app
+        .keybindings
+        .register_pane_bindings(vec![PaneBindingDecl {
+            id: id.clone(),
+            title: "Delete row".to_string(),
+            chord: crate::session::KeyChord::parse("x"),
+        }]);
+
+    // The editor's last row is the pane's binding, after every kernel action.
+    let last = h.app.keybindings.editable_targets().len() - 1;
+    h.key(KeyCode::F(1), KeyModifiers::NONE);
+    if let crate::app::modals::Modal::Help(ref mut help) = h.app.modal {
+        help.selected = last;
+    } else {
+        panic!("F1 should open the keybinding editor");
+    }
+
+    // `r` then a chord rebinds it, exactly as for a kernel action.
+    h.key(KeyCode::Char('r'), KeyModifiers::NONE);
+    h.key(KeyCode::Char('z'), KeyModifiers::NONE);
+    assert_eq!(
+        h.app.keybindings.chords_for_pane(&id),
+        &[crate::session::KeyChord::plain('z')]
+    );
+
+    // And `d` returns it to what the manifest declared.
+    h.key(KeyCode::Char('d'), KeyModifiers::NONE);
+    assert_eq!(
+        h.app.keybindings.chords_for_pane(&id),
+        &[crate::session::KeyChord::plain('x')]
+    );
+
+    // The row is rendered, with its title and its section.
+    let frame = h.render();
+    assert!(frame.contains("Delete row"), "{frame}");
+    assert!(frame.contains("demo · board"), "{frame}");
+}
+
+/// A pane binding never shadows the chords a user leaves the pane with: the
+/// global action is resolved first, so the plugin is not even offered the key.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_global_action_wins_over_a_panes_binding() {
+    use crate::session::keybindings::{PaneBindingDecl, PaneBindingId};
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let mut h = Harness::new(160, 40, 1);
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, true);
+    pane.accepts_input = true;
+    h.app.set_plugin_panes(vec![pane]);
+    h.app.focus = InputFocus::PluginPane;
+    // Reached only by hand-editing the keymap — registration drops such a default
+    // — which is exactly the case whose outcome must be defined.
+    h.app
+        .keybindings
+        .register_pane_bindings(vec![PaneBindingDecl {
+            id: PaneBindingId::new("demo", "board", "steal"),
+            title: "Steal".to_string(),
+            chord: None,
+        }]);
+    h.app.keybindings.rebind_pane(
+        &PaneBindingId::new("demo", "board", "steal"),
+        crate::session::KeyChord::ctrl('j'),
+    );
+    // Put the action back on the chord the binding just took, as a hand-edited
+    // file would leave it.
+    h.app.keybindings.rebind(
+        crate::session::Action::NextSession,
+        crate::session::KeyChord::ctrl('j'),
+    );
+    h.app
+        .keybindings
+        .register_pane_bindings(vec![PaneBindingDecl {
+            id: PaneBindingId::new("demo", "board", "steal"),
+            title: "Steal".to_string(),
+            chord: Some(crate::session::KeyChord::ctrl('j')),
+        }]);
+
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (key_tx, key_rx) = std::sync::mpsc::channel();
+    h.app.set_plugin_channels(event_rx, key_tx);
+    drop(event_tx);
+
+    h.key(KeyCode::Char('j'), KeyModifiers::CONTROL);
+    assert!(
+        key_rx.try_recv().is_err(),
+        "the escape route must not reach the plugin"
+    );
+}
+
 /// With no worker attached, offering a key must report "not consumed" rather
 /// than blocking — the fallback that keeps a missing plugin host harmless.
 #[cfg(feature = "plugins")]
@@ -4494,7 +4637,7 @@ fn offering_a_key_without_a_worker_does_not_block() {
     h.app.set_plugin_panes(vec![pane]);
 
     let started = std::time::Instant::now();
-    assert!(!h.app.offer_key_to_plugin("j".to_string()));
+    assert!(!h.app.offer_key_to_plugin("j".to_string(), None));
     assert!(started.elapsed() < std::time::Duration::from_millis(500));
 }
 

@@ -445,17 +445,40 @@ pub struct CliVerbDecl {
     pub about: Option<String>,
 }
 
-/// A keybinding a plugin contributes.
+/// A keybinding a plugin contributes to one of its panes.
+///
+/// Scoped to a pane rather than global: a binding fires only while that pane is
+/// focused, which is what lets every pane have the whole single-letter alphabet
+/// (the property `session::KeyContext` gives thurbox's own panes).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeybindingDecl {
-    /// Unique within this manifest's keybindings.
+    /// Unique within this manifest's keybindings. Also the name the host reports
+    /// to the plugin when the binding fires, so a rebind needs no plugin change.
     pub id: String,
-    /// Chord string, parsed by the keymap when bindings are wired up. Left
-    /// unvalidated here: the manifest layer is pure data and does not own the
-    /// chord grammar.
+    /// The pane it is scoped to. Must name a pane the same manifest declares.
+    pub pane: String,
+    /// Human-readable name for the keybinding editor's row. Defaults to the id.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Default chord, in the grammar `keybindings.json` uses. A binding may
+    /// declare none: that ships the action without claiming a key, leaving the
+    /// user to bind one.
+    ///
+    /// Validated here against [`crate::session::keybindings::KeyChord::parse`].
+    /// The grammar lives in a sibling module of the same pure-data layer, so
+    /// checking it costs no layering and turns a typo into a discovery error
+    /// naming the plugin and the binding — rather than a key that looks declared
+    /// and silently does nothing.
     #[serde(default)]
     pub chord: Option<String>,
+}
+
+impl KeybindingDecl {
+    /// Title for a keybinding, falling back to its id.
+    pub fn display_title(&self) -> &str {
+        self.title.as_deref().unwrap_or(&self.id)
+    }
 }
 
 /// Which half of a plugin a grant or an entry point belongs to.
@@ -673,6 +696,27 @@ pub enum ManifestErrorKind {
     /// A spawn contribution is declared without the capability that permits
     /// it.
     SpawnWithoutCapability,
+    /// A keybinding names a pane the manifest does not declare, so it would be
+    /// scoped to nothing.
+    KeybindingUnknownPane {
+        /// The offending binding.
+        binding: String,
+        /// The pane it named.
+        pane: String,
+    },
+    /// A keybinding's chord is not in the keymap's grammar.
+    KeybindingChord {
+        /// The offending binding.
+        binding: String,
+        /// The chord it declared.
+        chord: String,
+    },
+    /// A keybinding is declared without the capability that would let the host
+    /// deliver it.
+    KeybindingWithoutInput {
+        /// The first binding declared without it.
+        binding: String,
+    },
     /// The plugin targets an API version this build does not implement.
     ApiVersion {
         /// What the manifest asked for.
@@ -760,6 +804,20 @@ impl fmt::Display for ManifestError {
             ManifestErrorKind::SpawnWithoutCapability => write!(
                 f,
                 "a `[spawn]` contribution is declared without the `spawn` capability, so it would never be applied"
+            ),
+            ManifestErrorKind::KeybindingUnknownPane { binding, pane } => write!(
+                f,
+                "keybinding `{binding}` is scoped to pane `{pane}`, which this manifest does not declare"
+            ),
+            ManifestErrorKind::KeybindingChord { binding, chord } => write!(
+                f,
+                "keybinding `{binding}` declares chord `{chord}`, which is not a key chord \
+                 (examples: `d`, `ctrl+d`, `shift+j`, `f7`)"
+            ),
+            ManifestErrorKind::KeybindingWithoutInput { binding } => write!(
+                f,
+                "keybinding `{binding}` is declared without the `input` capability, so it could \
+                 never be delivered"
             ),
             ManifestErrorKind::ApiVersion {
                 declared,
@@ -874,6 +932,33 @@ impl PluginManifest {
         check_ids("pane", self.panes.iter().map(|p| p.id.as_str()))?;
         check_ids("command", self.commands.iter().map(|c| c.id.as_str()))?;
         check_ids("keybinding", self.keybindings.iter().map(|k| k.id.as_str()))?;
+
+        // Same rule as a pane without `render`: a declaration the host would never
+        // act on is caught here, where the error names its own fix, rather than as
+        // a key that does nothing. `input` is checked against the *shared* set
+        // only — a keybinding is delivered to the view half, so a grant made to the
+        // service half would not reach it.
+        for binding in &self.keybindings {
+            if !self.capabilities.contains(&Capability::Input) {
+                return Err(ManifestErrorKind::KeybindingWithoutInput {
+                    binding: binding.id.clone(),
+                });
+            }
+            if !self.panes.iter().any(|p| p.id == binding.pane) {
+                return Err(ManifestErrorKind::KeybindingUnknownPane {
+                    binding: binding.id.clone(),
+                    pane: binding.pane.clone(),
+                });
+            }
+            if let Some(chord) = &binding.chord {
+                if crate::session::keybindings::KeyChord::parse(chord).is_none() {
+                    return Err(ManifestErrorKind::KeybindingChord {
+                        binding: binding.id.clone(),
+                        chord: chord.clone(),
+                    });
+                }
+            }
+        }
 
         for command in &self.commands {
             command.validate_args()?;
@@ -1333,6 +1418,117 @@ mod tests {
             }
         );
         assert!(e.to_string().contains("render"), "{e}");
+    }
+
+    #[test]
+    fn a_keybinding_declares_its_pane_its_title_and_its_chord() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            capabilities = ["render", "input"]
+            [[panes]]
+            id = "board"
+            [[keybindings]]
+            id = "next"
+            pane = "board"
+            title = "Next row"
+            chord = "ctrl+j"
+            [[keybindings]]
+            id = "later"
+            pane = "board"
+        "#;
+        let m = parse(text).expect("valid");
+        assert_eq!(m.keybindings[0].pane, "board");
+        assert_eq!(m.keybindings[0].display_title(), "Next row");
+        assert_eq!(m.keybindings[0].chord.as_deref(), Some("ctrl+j"));
+        // A binding with no chord ships the action without claiming a key.
+        assert_eq!(m.keybindings[1].chord, None);
+        assert_eq!(m.keybindings[1].display_title(), "later");
+    }
+
+    #[test]
+    fn a_keybinding_scoped_to_an_unknown_pane_is_rejected() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            capabilities = ["render", "input"]
+            [[panes]]
+            id = "board"
+            [[keybindings]]
+            id = "next"
+            pane = "ghost"
+        "#;
+        let e = parse(text).expect_err("a binding scoped to nothing is a mistake");
+        assert_eq!(
+            e.kind,
+            ManifestErrorKind::KeybindingUnknownPane {
+                binding: "next".to_string(),
+                pane: "ghost".to_string(),
+            }
+        );
+        assert!(e.to_string().contains("ghost"), "{e}");
+    }
+
+    #[test]
+    fn a_keybinding_with_an_unparsable_chord_is_rejected() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            capabilities = ["render", "input"]
+            [[panes]]
+            id = "board"
+            [[keybindings]]
+            id = "next"
+            pane = "board"
+            chord = "ctrl+shift"
+        "#;
+        let e = parse(text).expect_err("the grammar is the keymap's");
+        assert_eq!(
+            e.kind,
+            ManifestErrorKind::KeybindingChord {
+                binding: "next".to_string(),
+                chord: "ctrl+shift".to_string(),
+            }
+        );
+        assert!(e.to_string().contains("ctrl+shift"), "{e}");
+    }
+
+    #[test]
+    fn a_keybinding_without_the_input_capability_is_rejected() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            capabilities = ["render"]
+            [[panes]]
+            id = "board"
+            [[keybindings]]
+            id = "next"
+            pane = "board"
+            chord = "j"
+        "#;
+        let e = parse(text).expect_err("a key that could never arrive is a mistake");
+        assert_eq!(
+            e.kind,
+            ManifestErrorKind::KeybindingWithoutInput {
+                binding: "next".to_string()
+            }
+        );
+        assert!(e.to_string().contains("input"), "{e}");
+    }
+
+    #[test]
+    fn the_input_capability_without_a_keybinding_is_fine() {
+        // A plugin may take raw keys and declare no binding at all — which is
+        // every plugin written before bindings existed.
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            capabilities = ["render", "input"]
+            [[panes]]
+            id = "board"
+        "#;
+        let m = parse(text).expect("valid");
+        assert!(m.keybindings.is_empty());
     }
 
     #[test]
