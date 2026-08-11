@@ -22,6 +22,36 @@
 //! that must see both `ui::file_viewer` and `plugin::PluginHost`, and an
 //! integration test is not part of the library's module graph, so
 //! `tests/architecture_rules.rs` stays untouched.
+//!
+//! ## Two edges, because a handover deletes one of them
+//!
+//! The equality is **differential** — it names `file_tree`, which lives in
+//! `src/ui/file_viewer.rs`, the module a handover removes. On that day the
+//! comparison has nothing on its right-hand side, and the repair that compiles is
+//! to drop it: what remains is a test that the plugin renders without erroring,
+//! satisfied equally by a pane drawing one wrong row and by one drawing twenty.
+//! The acceptance snapshots do not cover the gap either — every one is captured
+//! with no active session, so none holds a row of this pane.
+//!
+//! So each case asserts **both** edges while both sides exist (ADR-42):
+//!
+//! * `native == snapshot` — the recording in `tests/snapshots/` is the *native
+//!   pane's* tree. This is the edge that gives it provenance, and it is
+//!   establishable only while the native builder is here.
+//! * `plugin == native` — the port's original proof, unchanged.
+//!
+//! Their conjunction is what a handover inherits (`plugin == snapshot`) with a
+//! baseline that was proven rather than assumed. Recording from the plugin instead
+//! would invert it: a plugin defect would become the expectation, and the test
+//! could never fail for the reason it exists.
+//!
+//! The two frame-equality tests carry no recording: their claim is that the
+//! *kernel* resolved the same window and reserved the same track, which the two
+//! trees cannot show — they are equal at every size, which is the point of moving
+//! the window into the renderer. Only a paint says it, so a recorded tree there
+//! would restate the per-case equality and prove nothing new. The search bar's
+//! test asserts an **absence** rather than a tree, for the same reason a divergence
+//! carries no expectation.
 
 #![cfg(feature = "plugins")]
 
@@ -39,6 +69,14 @@ use thurbox::ui::file_viewer::{file_tree, FileRow};
 /// The process-wide snapshot slot is global, so every case here runs one at a
 /// time — otherwise one case's publication would answer another's reader.
 static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The recorder that turns a view tree into the checked-in expectation.
+///
+/// Shared across every recorded pane rather than copied: its exhaustiveness over
+/// the view tree is what stops a compact recording from omitting a fact, and that
+/// property is worth as much as the number of copies of it. See the module's own
+/// note.
+mod view_tree_record;
 
 /// One comparison case. Both sides are derived from the same rows, so an equality
 /// failure is a statement about the plugin rather than about two hand-written
@@ -97,6 +135,14 @@ impl Case {
             },
             ..PaneContext::default()
         }
+    }
+
+    /// The recording's name: the case name, slugified.
+    ///
+    /// Derived from the name rather than written twice, so a renamed case cannot
+    /// keep asserting against another case's recording.
+    fn snapshot_name(&self) -> String {
+        self.name.replace(' ', "-")
     }
 }
 
@@ -248,6 +294,10 @@ fn paint(tree: &ViewNode, width: u16, height: u16) -> Buffer {
 
 /// The headline claim: for every case, the plugin's tree equals the native pane's.
 /// Equal trees paint identically, so this is byte-identity of the pane.
+///
+/// The recorded edge is asserted **first**, so a run in which both edges break
+/// reports the recording — the fact about the pane — rather than only that two
+/// implementations disagree.
 #[test]
 fn the_plugin_builds_the_native_panes_view_tree() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
@@ -257,6 +307,19 @@ fn the_plugin_builds_the_native_panes_view_tree() {
         thurbox::session::pane_context::publish(case.context());
         let plugin = render(&host);
         let native = case.native_tree();
+        // Edge one: the checked-in expectation is the native pane's tree. It is
+        // what survives the handover, and the only moment its baseline can be
+        // shown to come from the pane rather than from the plugin is while
+        // `file_tree` is still here to generate it.
+        insta::assert_snapshot!(case.snapshot_name(), view_tree_record::tree(&native));
+        // Edge two: the plugin reproduces that recording. Asserted through the
+        // records rather than the trees, because a failure here has to be
+        // readable — the structural equality below says the same thing in two
+        // thousand-character dumps a reader has to diff by eye.
+        view_tree_record::assert_matches(case.name, &plugin, &native);
+        // Edge three: the port's original claim, exact rather than legible. Kept
+        // beneath the readable one so a divergence reports itself twice, most
+        // useful form first.
         assert_eq!(
             plugin, native,
             "the plugin's tree diverges from the native pane for `{}`",

@@ -35,6 +35,40 @@
 //! that must see both `ui::code_review` and `plugin::PluginHost`, and an
 //! integration test is not part of the library's module graph, so
 //! `tests/architecture_rules.rs` stays untouched.
+//!
+//! ## A third link, because a handover deletes the second one
+//!
+//! Link 1 above is **differential** — it names `review_stream_tree`, which lives
+//! in `src/ui/code_review.rs`, the module a handover removes, and link 2 is that
+//! module's own test. So a handover takes both links at once: what is left is a
+//! test that the plugin renders without erroring, satisfied equally by a pane
+//! drawing one wrong row and by one drawing twenty. The acceptance snapshots do
+//! not cover the gap either — every one is captured with no active session, so
+//! none holds a row of this pane.
+//!
+//! So each case asserts a **recorded** edge as well, while both sides exist
+//! (ADR-42):
+//!
+//! * `native == snapshot` — the recording in `tests/snapshots/` is the *kernel
+//!   builder's* tree, pinned by link 2 to the untouched native renderer. This is
+//!   the edge that gives it provenance, and it is establishable only while that
+//!   builder is here.
+//! * `plugin == native` — link 1, unchanged.
+//!
+//! Their conjunction is what a handover inherits (`plugin == snapshot`) with a
+//! baseline that was proven rather than assumed. Recording from the plugin instead
+//! would invert it: a plugin defect would become the expectation, and the test
+//! could never fail for the reason it exists.
+//!
+//! Three of this file's tests carry no recording.
+//! [`the_out_of_scope_surface_is_absent_rather_than_approximated`] asserts an
+//! **absence**, and an expectation states what a pane should be.
+//! [`the_plugin_paints_the_native_frame_when_the_pane_scrolls`] compares a painted
+//! frame, because the two trees are equal at every height and only a paint shows
+//! the window was resolved the same way. And
+//! [`the_hosts_bounds_are_reached_by_an_ordinary_diff`] measures host budgets on
+//! several-thousand-node fixtures, which is the unreviewable dump a compact
+//! recording exists to avoid.
 
 #![cfg(feature = "plugins")]
 
@@ -55,6 +89,14 @@ use thurbox::ui::code_review::review_stream_tree;
 /// The process-wide snapshot slot is global, so every case here runs one at a
 /// time — otherwise one case's publication would answer another's reader.
 static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The recorder that turns a view tree into the checked-in expectation.
+///
+/// Shared across every recorded pane rather than copied: its exhaustiveness over
+/// the view tree is what stops a compact recording from omitting a fact, and that
+/// property is worth as much as the number of copies of it. See the module's own
+/// note.
+mod view_tree_record;
 
 /// One comparison case. Both sides are derived from the **same published rows**, so
 /// an equality failure is a statement about the plugin rather than about two
@@ -157,6 +199,16 @@ impl Case {
             },
             ..PaneContext::default()
         }
+    }
+
+    /// The recording's name: the case name, slugified.
+    ///
+    /// Derived from the name rather than written twice, so a renamed case cannot
+    /// keep asserting against another case's recording.
+    fn snapshot_name(&self) -> String {
+        // The comma goes before the spaces do, so a case named with a list records
+        // as one hyphen between words rather than a hyphen after a comma.
+        self.name.replace(", ", " ").replace(' ', "-")
     }
 }
 
@@ -467,6 +519,10 @@ fn text_of(node: &ViewNode) -> String {
 /// Equal trees paint identically, and the kernel's builder is pinned to the
 /// untouched native renderer in `ui::code_review`'s own tests — so this is the
 /// review's document, reproduced from two declared capabilities.
+///
+/// The recorded edge is asserted **first**, so a run in which both edges break
+/// reports the recording — the fact about the pane — rather than only that two
+/// implementations disagree.
 #[test]
 fn the_plugin_builds_the_native_panes_view_tree() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
@@ -476,6 +532,19 @@ fn the_plugin_builds_the_native_panes_view_tree() {
         thurbox::session::pane_context::publish(case.context());
         let plugin = render(&host);
         let native = case.native_tree();
+        // Edge one: the checked-in expectation is the kernel builder's tree. It is
+        // what survives the handover, and the only moment its baseline can be
+        // shown to come from the pane rather than from the plugin is while
+        // `review_stream_tree` is still here to generate it.
+        insta::assert_snapshot!(case.snapshot_name(), view_tree_record::tree(&native));
+        // Edge two: the plugin reproduces that recording. Asserted through the
+        // records rather than the trees, because a failure here has to be
+        // readable — the structural equality below says the same thing in two
+        // thousand-character dumps a reader has to diff by eye.
+        view_tree_record::assert_matches(case.name, &plugin, &native);
+        // Edge three: the port's original claim, exact rather than legible. Kept
+        // beneath the readable one so a divergence reports itself twice, most
+        // useful form first.
         assert_eq!(
             plugin, native,
             "the plugin's tree diverges from the native stream for `{}`",

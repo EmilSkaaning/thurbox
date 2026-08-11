@@ -1,0 +1,14 @@
+---
+source: tests/bundled_file_viewer.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=1 scrollbar=true
+  line
+    text "\u{f07c} " muted
+    text "repo" accent bold
+  line
+    text "  \u{f07b} " selected
+    text "src" bold selected
+  line
+    text "  \u{f15b} " muted
+    text "main.rs"

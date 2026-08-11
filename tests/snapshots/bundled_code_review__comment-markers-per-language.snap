@@ -1,0 +1,25 @@
+---
+source: tests/bundled_code_review.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=none scrollbar=false
+  line
+    text "  1   1   " muted
+    text "# a hash comment" muted
+    fill ' '
+  line
+    text "  1   1   " muted
+    text "-- a dash one" muted
+    fill ' '
+  line
+    text "  1   1   " muted
+    text "#["
+    text "derive"
+    text "("
+    text "Debug" accent_bright
+    text ")]"
+    fill ' '
+  line
+    text "      2 + " muted tint=added
+    text "# shell" muted tint=added
+    fill ' ' tint=added

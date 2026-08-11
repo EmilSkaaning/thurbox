@@ -1,0 +1,6 @@
+---
+source: tests/bundled_file_viewer.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=none scrollbar=false
+  text "No folders" muted

@@ -1,0 +1,17 @@
+---
+source: tests/bundled_file_viewer.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=3 scrollbar=true
+  line
+    text "▾ " muted
+    text "a" accent bold
+  line
+    text "  ▾ " muted
+    text "b" accent bold
+  line
+    text "    ▾ " muted
+    text "c" accent bold
+  line
+    text "        " selected
+    text "d.rs" bold selected

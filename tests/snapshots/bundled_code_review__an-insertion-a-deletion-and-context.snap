@@ -1,0 +1,38 @@
+---
+source: tests/bundled_code_review.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=2 scrollbar=false
+  line
+    text "11 11   " muted
+    text "fn" accent
+    text " "
+    text "build"
+    text "() {"
+    fill ' '
+  line
+    text "12    - " muted tint=removed
+    text "    " tint=removed
+    text "let" accent tint=removed
+    text " " tint=removed
+    text "total" tint=removed
+    text " = " tint=removed
+    text "sum" tint=removed
+    text ";" tint=removed
+    fill ' ' tint=removed
+  line
+    text "   12 + " muted selected tint=added
+    text "    " selected tint=added
+    text "let" accent selected tint=added
+    text " " selected tint=added
+    text "total" selected tint=added
+    text " = " selected tint=added
+    text "sum" selected tint=added
+    text " + " selected tint=added
+    text "1" status_working selected tint=added
+    text ";" selected tint=added
+    fill ' ' selected tint=added
+  line
+    text "13 13   " muted
+    text "}"
+    fill ' '

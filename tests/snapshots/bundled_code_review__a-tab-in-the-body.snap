@@ -1,0 +1,15 @@
+---
+source: tests/bundled_code_review.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=none scrollbar=false
+  line
+    text "    1 + " muted tint=added
+    text "    " tint=added
+    text "fmt" tint=added
+    text "." tint=added
+    text "Println" accent_bright tint=added
+    text "(" tint=added
+    text "x" tint=added
+    text ")" tint=added
+    fill ' ' tint=added

@@ -2043,3 +2043,103 @@ and the settings-file poll both apply without a plugin reload.
 - **Focus** is still untouched, as §21 said. A handed-over pane can now be shown,
   hidden and gated exactly like the native one — and the moment it holds focus its
   scoped keyboard still does not resolve.
+
+## 23. The oracle, owed by the port rather than by an attempt (ADR-48)
+
+ADR-42 established what a durable oracle is and applied it to the info panel;
+`left-column-pane-oracles` applied it to the session list and the automations pane
+and made the recorder shared. Three panes were still purely differential — the
+tasks pane against `ui::tasks_panel::tasks_tree`, the file viewer against
+`ui::file_viewer::file_tree`, the code review against
+`ui::code_review::review_stream_tree` — and all three of those builders live in the
+module their handover deletes.
+
+They are recorded now, on the pattern the other three use: the recorded edge first
+(`native == snapshot`), then the legible comparison, then the exact one. 39 new
+recordings, generated from the native builders, read individually before being
+checked in.
+
+### The rule fired for nobody, which is the finding
+
+The requirement that should have caught this already existed: *a pane whose
+handover is attempted is owed its recording before the attempt concludes*. Every
+one of these three panes had an attempt — §15 the tasks pane, §16 the file viewer,
+§20 the code review — and every one concluded without a recording. Two reasons, and
+they compound:
+
+- **The trigger fires too late.** All three attempts concluded before the rule was
+  written, so the rule's own backlog was half the panes it governed. A rule whose
+  first act is to describe a debt it cannot collect is a rule about the past.
+- **The trigger is unobservable.** "An attempt concluded" leaves no artefact in the
+  tree. Nothing could fail, so the rule was a convention — and it is the third time
+  in this phase that a convention held for exactly as long as the person who wrote
+  it was the person doing the next change (§10's write-shaped binding, §11's node
+  named `Fill`, §14's two-condition handover are the probe-side versions of the
+  same lesson).
+
+So the trigger moved to **reproduction**, which is observable (a bundled plugin
+directory plus an oracle file) and is the earliest moment the recording is both
+owed and provable: the plugin exists, so there is something to constrain, and the
+native builder exists, so the baseline can be shown to be the pane's. Waiting for
+an attempt gains nothing, since both sides are present at either moment, and risks
+everything, since an attempt may never come.
+
+### The gate carries it now
+
+`tests/teardown_gate.rs`'s `pane()` probe has a **fourth** conjunct: a pane is
+handed over only when its oracle holds a recorded expectation. It is re-derived
+from the tree like the other three — the oracle file names the shared recorder and
+asserts a snapshot, and at least one recording is checked in — so it is a fact
+about this tree rather than a promise.
+
+Condition 4 differs from the other three in *what* it protects. Conditions 1–3
+protect the pane: violate one and a column is empty, which someone eventually
+notices. Condition 4 protects the **evidence**: violate it and the pane looks
+perfect while nothing constrains it any more. That makes it the quietest of the
+four, and the only one whose window closes — the recording is provable only while
+the native builder is present, so a handover that skips it cannot be repaired
+afterwards. The repair that *compiles* is to delete the assertion, which is the
+failure mode ADR-42 named.
+
+Two tests, deliberately separate:
+
+- `a_pane_whose_oracle_is_differential_is_not_handed_over` — pure over the four
+  conditions, because the tree cannot exhibit the case (a native renderer that is
+  no longer drawn is one someone already deleted); and
+- `every_reproduced_pane_records_its_native_tree` — positive, per reproduced pane,
+  so a missing recording fails **now**. The conjunct alone only fires once someone
+  also stops drawing the native pane, which is the change least able to add a
+  recording.
+
+Global search names no oracle. It is recorded structurally unportable and has no
+bundled plugin, so there is no reproduction to constrain; its row stays blocked by
+condition 1, and the field is `None` rather than a fabricated path.
+
+### What the gate cannot check, stated rather than implied
+
+Whether a recording came from the *native* builder or from the plugin. The tree
+holds a `.snap` file and a call site; it does not hold the provenance of the bytes.
+Two things cover it, and neither is the gate: the recorded edge is asserted against
+the native tree in the same loop, so a recording taken from the plugin fails the
+moment the two disagree — which is when it matters; and each pane's *native* side
+was perturbed and observed to fail the recorded edge, which is what makes the
+recording a statement about the pane rather than a copy of the plugin.
+
+All six perturbations were run and observed, two per pane:
+
+| Pane | Plugin side | Native side |
+|---|---|---|
+| tasks | `MATCHED` loses its underline → `a running search`, line 4 | `tasks_tree`'s glyph gains a space → the recording diffs on three rows |
+| file viewer | the expanded marker becomes `▿` → `an expanded tree…`, line 3 | the indent widens → the recording diffs on every nested row |
+| code review | `issue` badges take `warning` → `each comment classification`, line 3 | the badge arrow becomes `»` → the recording diffs on all five badges |
+
+And the gate's own condition: moving the tasks pane's eleven recordings aside makes
+`every_reproduced_pane_records_its_native_tree` fail naming `tasks-plugin`.
+
+### What this leaves
+
+Six panes reproduced, six with recorded oracles, none handed over. Of §14's five
+handover requirements, four are closed — the seat (§21), the toggle and the flag
+(§22), the oracle (here, generalised), and the build (Stage B) — and the fifth,
+**render latency**, is the last. Focus remains the open input gap that §21 and §22
+both name.

@@ -1,0 +1,6 @@
+---
+source: tests/bundled_tasks_panel.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=none scrollbar=false
+  text "no tasks" muted

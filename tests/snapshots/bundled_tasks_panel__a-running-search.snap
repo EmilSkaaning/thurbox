@@ -1,0 +1,22 @@
+---
+source: tests/bundled_tasks_panel.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=2 scrollbar=false
+  line
+    text "☐ "
+    text "h" accent bold underline
+    text "ost "
+    text "t" accent bold underline
+    text "ests"
+  line
+    text "☑ " muted dim
+    text "nothing matched here" muted dim
+  line
+    text "◐ " accent bold
+    text "s" accent bold underline
+    text "el" accent bold
+    text "e" accent bold underline
+    text "cted " accent bold
+    text "a" accent bold underline
+    text "nd matched" accent bold

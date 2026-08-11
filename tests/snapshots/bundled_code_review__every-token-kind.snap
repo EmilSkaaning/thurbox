@@ -1,0 +1,48 @@
+---
+source: tests/bundled_code_review.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=0 scrollbar=false
+  line
+    text " 1  1   " muted selected
+    text "pub" accent selected
+    text " " selected
+    text "struct" accent selected
+    text " " selected
+    text "Row" accent_bright selected
+    text " {" selected
+    fill ' ' selected
+  line
+    text " 2  2   " muted
+    text "    "
+    text "label"
+    text ": "
+    text "Vec" accent_bright
+    text "<"
+    text "String" accent_bright
+    text ">,"
+    fill ' '
+  line
+    text "    3 + " muted tint=added
+    text "    " tint=added
+    text "count" tint=added
+    text ": " tint=added
+    text "0x1F_u32" status_working tint=added
+    text "," tint=added
+    fill ' ' tint=added
+  line
+    text "    4 + " muted tint=added
+    text "    " tint=added
+    text "name" tint=added
+    text ": " tint=added
+    text "\"a string\"" branch tint=added
+    text "," tint=added
+    fill ' ' tint=added
+  line
+    text " 5  5   " muted
+    text "// why, not what" muted
+    fill ' '
+  line
+    text " 6  6   " muted
+    text "}"
+    fill ' '

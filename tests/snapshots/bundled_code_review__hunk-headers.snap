@@ -1,0 +1,8 @@
+---
+source: tests/bundled_code_review.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=2 scrollbar=false
+  text "  @@ -11,4 +11,5 @@ fn build" accent dim
+  text "  @@ -11,4 +11,5 @@ fn build ✓" accent dim
+  text "  @@ -11,4 +11,5 @@ " accent dim selected

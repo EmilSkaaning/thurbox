@@ -1,0 +1,6 @@
+---
+source: tests/bundled_code_review.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=none scrollbar=false
+  text "No changes to show for this target." muted

@@ -1,0 +1,20 @@
+---
+source: tests/bundled_code_review.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=0 scrollbar=false
+  line
+    text "  ▸ [Issue] " danger bold selected
+    text "this is wrong" secondary selected
+  line
+    text "  ▸ [Suggestion] " accent bold
+    text "extract a helper" secondary
+  line
+    text "  ▸ [Note] " secondary bold
+    text "for later" secondary
+  line
+    text "  ▸ [Praise] " status_done bold
+    text "nicely done" secondary
+  line
+    text "  ▸ [Note] " secondary bold
+    text "overall: …" secondary

@@ -1,0 +1,40 @@
+---
+source: tests/bundled_code_review.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=3 scrollbar=false
+  line
+    text "▾ " accent_bright bold
+    text "M" status_working bold
+    text " src/build.rs  " accent_bright bold
+    text "+3" diff_added
+    text " -1" diff_removed
+    text " " accent_bright bold
+    fill '─' accent_bright bold
+  line
+    text "  ▸ [Issue] " danger bold
+    text "this file does two things" secondary
+  text "  @@ -11,4 +11,5 @@ fn build" accent dim
+  line
+    text "11 11   " muted selected
+    text "fn" accent selected
+    text " " selected
+    text "build" selected
+    text "() {" selected
+    fill ' ' selected
+  line
+    text "   12 + " muted tint=added
+    text "    " tint=added
+    text "let" accent tint=added
+    text " " tint=added
+    text "total" tint=added
+    text " = " tint=added
+    text "sum" tint=added
+    text " + " tint=added
+    text "1" status_working tint=added
+    text ";" tint=added
+    fill ' ' tint=added
+  line
+    text "  ▸ [Suggestion] " accent bold
+    text "extract a helper" secondary
+  text "── Review summary (s to add) ──" accent bold

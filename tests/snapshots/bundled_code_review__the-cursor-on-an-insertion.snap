@@ -1,0 +1,13 @@
+---
+source: tests/bundled_code_review.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=1 scrollbar=false
+  line
+    text " 1  1   " muted
+    text "a"
+    fill ' '
+  line
+    text "    2 + " muted selected tint=added
+    text "b" selected tint=added
+    fill ' ' selected tint=added

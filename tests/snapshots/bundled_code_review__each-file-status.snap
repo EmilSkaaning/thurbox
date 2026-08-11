@@ -1,0 +1,37 @@
+---
+source: tests/bundled_code_review.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=none scrollbar=false
+  line
+    text "▾ " accent_bright bold
+    text "M" status_working bold
+    text " src/modified.rs  " accent_bright bold
+    text "+3" diff_added
+    text " -1" diff_removed
+    text " " accent_bright bold
+    fill '─' accent_bright bold
+  line
+    text "▾ " accent_bright bold
+    text "A" diff_added bold
+    text " src/new.rs  " accent_bright bold
+    text "+3" diff_added
+    text " -1" diff_removed
+    text " " accent_bright bold
+    fill '─' accent_bright bold
+  line
+    text "▾ " accent_bright bold
+    text "D" diff_removed bold
+    text " src/gone.rs  " accent_bright bold
+    text "+3" diff_added
+    text " -1" diff_removed
+    text " " accent_bright bold
+    fill '─' accent_bright bold
+  line
+    text "▾ " accent_bright bold
+    text "R" accent bold
+    text " src/moved.rs  " accent_bright bold
+    text "+3" diff_added
+    text " -1" diff_removed
+    text " " accent_bright bold
+    fill '─' accent_bright bold

@@ -1,0 +1,27 @@
+---
+source: tests/bundled_code_review.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=1 scrollbar=false
+  line
+    text "    1 + " muted tint=added
+    text "let" accent tint=added
+    text " " tint=added
+    text "s" tint=added
+    text " = " tint=added
+    text "\"日本語のテキスト\"" branch tint=added
+    text ";" tint=added
+    fill ' ' tint=added
+  line
+    text " 2  2   " muted selected
+    text "let" accent selected
+    text " " selected
+    text "répertoire" selected
+    text " = " selected
+    text "1" status_working selected
+    text ";" selected
+    fill ' ' selected
+  line
+    text " 3  3   " muted
+    text "// commentaire accentué" muted
+    fill ' '

@@ -46,6 +46,17 @@ struct Replacement {
     /// `src/app/view.rs` means the pane has not been handed over. `None` for the
     /// capability rows, which have no pane.
     native_module: Option<&'static str>,
+    /// For a pane a bundled plugin reproduces, the stem of the integration test
+    /// that is that pane's equality oracle — `bundled_tasks_panel` for
+    /// `tests/bundled_tasks_panel.rs` and `tests/snapshots/bundled_tasks_panel__*`.
+    ///
+    /// Named rather than derived because it is not derivable: `tasks-plugin`'s
+    /// oracle is `bundled_tasks_panel`, `session-list-plugin`'s is
+    /// `bundled_session_list`, and guessing across the spellings would turn a
+    /// renamed test into a "file not found" instead of the verdict this row wants.
+    /// `None` for the capability rows and for a pane recorded structurally
+    /// unportable, which has no reproduction to constrain.
+    oracle: Option<&'static str>,
 }
 
 /// A thing the teardown deletes as one piece, and what must exist first.
@@ -66,11 +77,10 @@ struct TeardownUnit {
 ///
 /// The pane rows are the bundled-plugin half of the same question: a native pane
 /// may only be deleted once a plugin renders it **in the build a user installs**,
-/// and today none does — five panes have a plugin that reproduces them, and none
-/// is what the interface draws. Since Stage B (ADR-40) the runtime behind them is
-/// in the default feature set, so what remains blocking is per-pane rather than
-/// shared. See [`pane`] for the three conditions and which mistake each rules
-/// out.
+/// and today none does — six panes have a plugin that reproduces them, and none is
+/// what the interface draws. Since Stage B (ADR-40) the runtime behind them is in
+/// the default feature set, so what remains blocking is per-pane rather than
+/// shared. See [`pane`] for the four conditions and which mistake each rules out.
 const REPLACEMENTS: &[Replacement] = &[
     Replacement {
         id: "hooks-in-kernel",
@@ -83,6 +93,7 @@ const REPLACEMENTS: &[Replacement] = &[
             !source(root, "src/session_ops/builtin_hooks.rs").contains("install_extension(")
         },
         native_module: None,
+        oracle: None,
     },
     Replacement {
         id: "agent-registration",
@@ -91,6 +102,7 @@ const REPLACEMENTS: &[Replacement] = &[
         ready: false,
         probe: |root, _| manifest_field(root, "pub struct PluginManifest", "pub agents:"),
         native_module: None,
+        oracle: None,
     },
     Replacement {
         id: "resource-seeding",
@@ -99,6 +111,7 @@ const REPLACEMENTS: &[Replacement] = &[
         ready: false,
         probe: |root, _| manifest_field(root, "pub struct PluginManifest", "pub automations:"),
         native_module: None,
+        oracle: None,
     },
     Replacement {
         id: "agent-config-files",
@@ -109,6 +122,7 @@ const REPLACEMENTS: &[Replacement] = &[
         // so this row flips only on a deliberate capability decision.
         probe: |root, _| manifest_field(root, "pub enum Capability", "Fs,"),
         native_module: None,
+        oracle: None,
     },
     Replacement {
         id: "spawn-arg-contribution",
@@ -117,6 +131,7 @@ const REPLACEMENTS: &[Replacement] = &[
         ready: false,
         probe: |root, _| manifest_field(root, "pub struct SpawnDecl", "pub args"),
         native_module: None,
+        oracle: None,
     },
     Replacement {
         id: "self-heal",
@@ -125,6 +140,7 @@ const REPLACEMENTS: &[Replacement] = &[
         ready: true,
         probe: |root, _| source(root, "src/plugin/discovery.rs").contains("pub fn discover("),
         native_module: None,
+        oracle: None,
     },
     Replacement {
         id: "plugin-update",
@@ -136,35 +152,73 @@ const REPLACEMENTS: &[Replacement] = &[
             actions.contains("Update") || actions.contains("Install")
         },
         native_module: None,
+        oracle: None,
     },
     // One row per pane MIGRATION §2 schedules for the bundled-plugin phase. The
-    // second argument is the pane's native renderer module, which is how the
-    // probe below asks whether the handover happened.
-    pane("info-panel-plugin", "the info panel", "info_panel"),
-    pane("tasks-plugin", "the tasks pane", "tasks_panel"),
+    // third argument is the pane's native renderer module, which is how the probe
+    // below asks whether the handover happened; the fourth is the oracle that has
+    // to hold a recording before the handover may take that module away.
+    pane(
+        "info-panel-plugin",
+        "the info panel",
+        "info_panel",
+        Some("bundled_info_panel"),
+    ),
+    pane(
+        "tasks-plugin",
+        "the tasks pane",
+        "tasks_panel",
+        Some("bundled_tasks_panel"),
+    ),
     pane(
         "automations-plugin",
         "the automations pane",
         "automations_panel",
+        Some("bundled_automations_panel"),
     ),
-    pane("file-viewer-plugin", "the file viewer", "file_viewer"),
-    pane("global-search-plugin", "global search", "global_search"),
-    pane("code-review-plugin", "the code review view", "code_review"),
-    pane("session-list-plugin", "the session list", "project_list"),
+    pane(
+        "file-viewer-plugin",
+        "the file viewer",
+        "file_viewer",
+        Some("bundled_file_viewer"),
+    ),
+    // Global search is recorded structurally unportable and has no bundled plugin,
+    // so it has no reproduction for an oracle to constrain: condition 1 already
+    // holds its row blocked, and naming an oracle would be inventing one.
+    pane(
+        "global-search-plugin",
+        "global search",
+        "global_search",
+        None,
+    ),
+    pane(
+        "code-review-plugin",
+        "the code review view",
+        "code_review",
+        Some("bundled_code_review"),
+    ),
+    pane(
+        "session-list-plugin",
+        "the session list",
+        "project_list",
+        Some("bundled_session_list"),
+    ),
 ];
 
 /// A pane's replacement row, ready only on **handover**.
 ///
-/// Three conditions, and neither of the last two is "does a plugin exist":
+/// Four conditions, and only the first is "does a plugin exist":
 ///
 /// 1. a bundled plugin directory named after the pane — the id minus its
 ///    `-plugin` suffix, in either spelling, since the eventual plugin's name is
 ///    not this gate's to fix;
 /// 2. that `src/app/view.rs` no longer names the pane's native renderer module.
 ///    Every one of the seven renderers is referenced from that one file, so the
-///    rule is uniform across the panes rather than seven special cases; and
+///    rule is uniform across the panes rather than seven special cases;
 /// 3. that the runtime which draws a bundled pane reaches the build a user
-///    installs.
+///    installs; and
+/// 4. that the pane's equality oracle holds a **recorded** expectation, and not
+///    only a comparison against the native builder this deletion takes away.
 ///
 /// Condition 2 rules out the loud mistake. A bundled plugin that *reproduces* a
 /// pane while the native one is still what the interface draws has replaced
@@ -189,10 +243,24 @@ const REPLACEMENTS: &[Replacement] = &[
 /// seven rows carry it. That was the real dependency structure while it blocked:
 /// one release decision unblocked them together, and stating it once stopped it
 /// reading as seven independent pane problems.
+///
+/// Condition 4 (ADR-48) guards the **evidence**, and it is the only one whose
+/// violation is invisible in a running binary: the pane looks right and is no
+/// longer constrained. Each pane's oracle compares its plugin's view tree against
+/// the native builder — `ui::tasks_panel::tasks_tree` and the like — which is in
+/// the module the same deletion removes. With the right-hand side gone the repair
+/// that compiles is to drop the comparison, leaving a test that the plugin renders
+/// without erroring: satisfied equally by a pane drawing one wrong row and by one
+/// drawing twenty. A recording taken while the native builder is present is what
+/// survives it, and it cannot be produced afterwards, so the ordering is the
+/// condition. `a_pane_whose_oracle_is_differential_is_not_handed_over` pins it,
+/// and `every_reproduced_pane_records_its_native_tree` fails *now* rather than at
+/// deletion time.
 const fn pane(
     id: &'static str,
     v1_capability: &'static str,
     native_module: &'static str,
+    oracle: Option<&'static str>,
 ) -> Replacement {
     Replacement {
         id,
@@ -204,24 +272,67 @@ const fn pane(
                 bundled_plugin_exists(root, id),
                 view_draws_native_pane(root, id),
                 plugin_host_reaches_the_installed_build(root),
+                pane_oracle_records_the_native_tree(root, id),
             )
         },
         native_module: Some(native_module),
+        oracle,
     }
 }
 
-/// Handover, from its three conditions.
+/// Handover, from its four conditions.
 ///
 /// Pure over the conditions rather than over the tree, because the interesting
-/// case cannot be exhibited by the tree the test runs against: a native renderer
+/// cases cannot be exhibited by the tree the test runs against: a native renderer
 /// that is no longer drawn is one someone already deleted. Mirrors [`blockers`],
 /// which is pure over the table for the same reason.
 fn pane_is_handed_over(
     plugin_exists: bool,
     native_still_drawn: bool,
     host_in_installed_build: bool,
+    oracle_records: bool,
 ) -> bool {
-    plugin_exists && !native_still_drawn && host_in_installed_build
+    plugin_exists && !native_still_drawn && host_in_installed_build && oracle_records
+}
+
+/// Whether `id`'s pane has a **recorded** expectation, rather than only a
+/// comparison against the builder its handover deletes.
+///
+/// Three facts, all read as source text so the answer is the same in either build
+/// configuration (every pane oracle is `#![cfg(feature = "plugins")]` and does not
+/// compile under `--no-default-features`, where this gate still runs):
+///
+/// * the row names an oracle at all — a pane with no reproduction has nothing to
+///   record, and answers `false` because it is also not handed over;
+/// * that oracle uses the shared recorder and asserts a snapshot with it; and
+/// * at least one recording is checked in, so a test that calls
+///   `insta::assert_snapshot!` and has never been run does not read as recorded.
+///
+/// A missing oracle file answers `false` rather than panicking: the loud report of
+/// a deleted or renamed oracle belongs to
+/// [`every_reproduced_pane_records_its_native_tree`], which names the pane, not to
+/// a probe whose failure would read as "read tests/…: No such file".
+fn pane_oracle_records_the_native_tree(root: &Path, id: &str) -> bool {
+    let Some(stem) = REPLACEMENTS
+        .iter()
+        .find(|r| r.id == id)
+        .and_then(|r| r.oracle)
+    else {
+        return false;
+    };
+    let Ok(text) = fs::read_to_string(root.join("tests").join(format!("{stem}.rs"))) else {
+        return false;
+    };
+    let wired = text.contains("view_tree_record") && text.contains("insta::assert_snapshot!");
+    let prefix = format!("{stem}__");
+    let recorded = fs::read_dir(root.join("tests/snapshots")).is_ok_and(|dir| {
+        dir.filter_map(Result::ok).any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(&prefix) && name.ends_with(".snap")
+        })
+    });
+    wired && recorded
 }
 
 /// Whether the runtime that draws a bundled pane is part of the build a user
@@ -597,14 +708,14 @@ fn the_build_condition_holds_and_still_gates_a_handover() {
     // plugin present, native renderer no longer drawn, runtime absent from the
     // build.
     assert!(
-        !pane_is_handed_over(true, false, false),
+        !pane_is_handed_over(true, false, false, true),
         "a pane whose replacement only runs behind a compile-time feature the \
          released binary does not enable has not been handed over — deleting its \
          renderer would remove the pane from every install"
     );
     // And it is a handover once the runtime ships, which is the state the tree is
     // in: the condition gated a release decision rather than forbidding handover.
-    assert!(pane_is_handed_over(true, false, true));
+    assert!(pane_is_handed_over(true, false, true, true));
 
     // Consequence today: with the build condition met, each pane row is blocked
     // by its own pane-level reason — the interface still draws all seven native
@@ -624,6 +735,86 @@ fn the_build_condition_holds_and_still_gates_a_handover() {
             r.id
         );
     }
+}
+
+/// The fourth condition, asserted on the case the tree cannot exhibit: a pane
+/// whose plugin is drawn instead of the native one, in a build that ships the
+/// runtime, is **not** handed over while its oracle holds no recording.
+///
+/// This is the quiet case the other three conditions permit, and it is quieter
+/// than condition 3's — that one empties a column, which someone eventually
+/// notices; this one leaves the pane looking perfect and stops constraining it.
+/// The pane oracles compare a plugin's tree against the native builder the
+/// deletion removes, so the deletion takes the right-hand side with it and the
+/// repair that compiles is to drop the assertion. A recording is only *provable*
+/// while that builder exists, which is why the gate refuses the handover rather
+/// than asking for the recording afterwards.
+#[test]
+fn a_pane_whose_oracle_is_differential_is_not_handed_over() {
+    assert!(
+        !pane_is_handed_over(true, false, true, false),
+        "a pane whose oracle only compares against the builder being deleted has \
+         no evidence that survives the deletion: the handover would leave a test \
+         that the plugin renders without erroring, which one wrong row satisfies"
+    );
+    // And the condition is not a veto on handover: with the recording present the
+    // same three conditions hand the pane over.
+    assert!(pane_is_handed_over(true, false, true, true));
+}
+
+/// Every pane a bundled plugin reproduces records its native tree — asserted
+/// positively, so a missing recording fails **now** rather than at deletion time.
+///
+/// The conjunct in [`pane`] only fires once someone also stops drawing the native
+/// pane, which is the change that can no longer add the recording. This is the
+/// half that is actionable: a pane reproduced today with no recording is a pane
+/// whose evidence has to be captured while its builder is here (ADR-42, ADR-48).
+#[test]
+fn every_reproduced_pane_records_its_native_tree() {
+    let root = repo_root();
+    let mut failures = String::new();
+
+    for r in REPLACEMENTS
+        .iter()
+        .filter(|r| r.v2_home.contains("bundled") && bundled_plugin_exists(&root, r.id))
+    {
+        let Some(stem) = r.oracle else {
+            let _ = write!(
+                failures,
+                "\n{}: a bundled plugin reproduces this pane but the row names no \
+                 oracle, so nothing checks that its expectation is recorded",
+                r.id,
+            );
+            continue;
+        };
+        if !root.join("tests").join(format!("{stem}.rs")).exists() {
+            let _ = write!(
+                failures,
+                "\n{}: names oracle `{stem}`, but tests/{stem}.rs does not exist — \
+                 either the oracle was renamed (update the row) or it was deleted \
+                 (the pane has no equality proof at all)",
+                r.id,
+            );
+            continue;
+        }
+        if !pane_oracle_records_the_native_tree(&root, r.id) {
+            let _ = write!(
+                failures,
+                "\n{}: tests/{stem}.rs does not record its native tree — it must \
+                 use tests/view_tree_record and assert an insta snapshot per case, \
+                 with the recordings checked in",
+                r.id,
+            );
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "a reproduced pane's oracle is still purely differential.\n\
+         Its right-hand side is the native builder a handover deletes, and the \
+         recording that outlives it can only be generated while that builder is \
+         present — so it is owed by the port, not by the handover.{failures}"
+    );
 }
 
 /// Every pane row must name a native renderer, or its probe would panic the first

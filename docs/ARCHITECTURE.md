@@ -2751,3 +2751,89 @@ hidden by the switch its native counterpart rides, which is what makes deleting 
 renderer a change a user does not notice. `Action::pane_toggles()` is also the list a
 later change edits when a new kernel pane gains a toggle — forgetting it means the
 pane cannot be handed over, not that something breaks silently.
+
+## ADR-48: The recorded oracle is owed by the port, and the gate enforces it
+
+**Context.** ADR-42 decided that a pane's oracle must be **recorded** — an
+expectation generated from the native builder, so the proof survives the deletion of
+that builder — and applied it to the info panel. A later change applied it to the
+session list and the automations pane and made the recorder shared. The rule it left
+in `migration/phase-4` was: *a pane whose handover is attempted is owed its recording
+before the attempt concludes, whichever way it concludes.*
+
+That rule fired for nobody. Three panes had a handover attempted and refused — the
+tasks pane, the file viewer, the code review — and all three attempts concluded with
+the oracle still purely differential, comparing the plugin's tree against
+`ui::tasks_panel::tasks_tree`, `ui::file_viewer::file_tree` and
+`ui::code_review::review_stream_tree`, every one of which lives in the module its
+handover deletes.
+
+Two properties of the trigger explain it, and they compound.
+
+It fires **too late**: all three attempts concluded before the rule was written, so
+the rule's first act was to describe a debt it could not collect. And it is
+**unobservable**: "an attempt concluded" leaves no artefact in the tree, so nothing
+can fail when it is skipped. It was a convention, and this phase has now watched a
+convention fail three times in the same shape — a probe that permitted what it was
+written to forbid (ADR-37's two-condition handover), a gate row read as agreement
+(PHASE4 §10, §11), and this.
+
+**Decision.** The obligation moves from an *attempt* to a **reproduction**, and the
+teardown gate carries it.
+
+- **Every pane a bundled plugin reproduces carries a recording**, whether or not its
+  handover has been attempted. Reproduction is observable — a bundled plugin
+  directory plus an oracle file — and it is the earliest moment the recording is both
+  owed and provable: the plugin exists, so there is something to constrain, and the
+  native builder exists, so the baseline can be shown to be the pane's.
+- **`tests/teardown_gate.rs`'s pane probe gains a fourth conjunct.** A pane is handed
+  over only when its oracle holds a recorded expectation: the oracle file uses the
+  shared `tests/view_tree_record` recorder, asserts an `insta` snapshot, and has at
+  least one recording checked in. Re-derived from the tree like the other three
+  conditions, and read as source text so the verdict is identical under
+  `--no-default-features`, where no pane oracle compiles at all.
+- **Two tests, deliberately separate.**
+  `a_pane_whose_oracle_is_differential_is_not_handed_over` is pure over the four
+  conditions, because the tree cannot exhibit the case (a native renderer that is no
+  longer drawn is one someone already deleted).
+  `every_reproduced_pane_records_its_native_tree` is positive and per pane, so a
+  missing recording fails **now** — the conjunct alone only fires once someone also
+  stops drawing the native pane, which is the change least able to add a recording.
+- **A row may name no oracle.** Global search is recorded structurally unportable and
+  has no bundled plugin, so it has no reproduction to constrain; its `oracle` is
+  `None` and condition 1 already blocks it.
+
+**Why condition 4 is not simply more of conditions 1-3.** Those protect the *pane*:
+violate one and a column is empty, which someone eventually notices. This protects
+the *evidence*: violate it and the pane looks perfect while nothing constrains it any
+more. It is therefore the quietest of the four, and the only one whose window closes
+— a recording is provable only while the native builder is present, so a handover
+that skips it cannot be repaired afterwards, and the repair that compiles is to
+delete the assertion.
+
+**Rejected alternatives.**
+
+- *Leave it a spec requirement with no probe.* That is the convention that already
+  failed for three panes; the person who reads a requirement is not reliably the
+  person who writes the handover.
+- *A separate test file for pane oracles.* It would pass while the gate permitted the
+  deletion, and the gate is what a handover author runs. Two gates disagreeing about
+  whether a pane may go is worse than one gate that is complete.
+- *Assert on the recordings' contents.* `insta` already fails when a recording moves;
+  the gate's question is structural — does a recording exist, and is the oracle wired
+  to it.
+- *Derive the oracle's path from the pane id.* It is not derivable (`tasks-plugin` →
+  `bundled_tasks_panel`, `session-list-plugin` → `bundled_session_list`), and guessing
+  would turn a renamed test into "file not found" instead of a verdict. It is a table
+  field beside `native_module`, which the row already carries for the same reason.
+- *Have the gate verify the recording's provenance.* It cannot: the tree holds a
+  `.snap` file and a call site, not where the bytes came from. That is covered by the
+  recorded edge being asserted against the native tree in the same loop, and by
+  perturbing each pane's **native** side and observing the recorded edge fail.
+
+**Consequences.** Six panes are reproduced and six carry recorded oracles; of ADR-37
+and PHASE4 §14's five handover requirements, four are closed and only the render
+latency remains. A future bundled plugin for a seventh pane fails
+`every_reproduced_pane_records_its_native_tree` until it records its tree, which is
+the intended behaviour: the gate now asks for the evidence at the moment the evidence
+is cheap to produce.

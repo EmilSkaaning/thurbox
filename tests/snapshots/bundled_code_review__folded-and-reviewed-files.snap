@@ -1,0 +1,31 @@
+---
+source: tests/bundled_code_review.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=1 scrollbar=false
+  line
+    text "▾ " accent_bright bold
+    text "M" status_working bold
+    text " src/peeked.rs  " accent_bright bold
+    text "+3" diff_added
+    text " -1" diff_removed
+    text " ✓" status_done
+    text " " accent_bright bold
+    fill '─' accent_bright bold
+  line
+    text "▸ " accent_bright bold selected
+    text "M" status_working bold selected
+    text " src/done.rs  " accent_bright bold selected
+    text "+3" diff_added selected
+    text " -1" diff_removed selected
+    text " ✓" status_done selected
+    text " " accent_bright bold selected
+    fill '─' accent_bright bold selected
+  line
+    text "▸ " accent_bright bold
+    text "M" status_working bold
+    text " src/collapsed.rs  " accent_bright bold
+    text "+3" diff_added
+    text " -1" diff_removed
+    text " " accent_bright bold
+    fill '─' accent_bright bold

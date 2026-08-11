@@ -136,7 +136,7 @@ why the distinction is load-bearing rather than pedantic: each plugin exists and
 reproduces its pane (four exactly, code review in the part it declares, the
 session list in its rows), while the native renderer is still what the interface
 draws. Deleting `src/ui/info_panel.rs` today would remove the pane every user is
-looking at. So `tests/teardown_gate.rs`'s pane probe is a conjunction, and
+looking at. So `tests/teardown_gate.rs`'s pane probe is a four-way conjunction, and
 `a_reproduced_pane_is_not_a_replaced_one` pins that reasoning so it cannot be
 "simplified" back to a directory check.
 
@@ -162,12 +162,29 @@ and that each pane row is now blocked only by its own pane-level reason, so a
 later change removing the runtime from `default` fails the gate instead of quietly
 emptying every handed-over pane.
 
+**And a fourth condition, because the first three together permit a quieter
+mistake** (ADR-48): the pane's equality oracle must hold a **recorded** expectation,
+not only a comparison against the native builder the deletion removes. Conditions
+1-3 protect the pane — violate one and a column is empty, which someone notices.
+Condition 4 protects the *evidence*: each oracle asserts the plugin's tree equals
+`ui::tasks_panel::tasks_tree` or the like, so the deletion takes the right-hand side
+with it and the repair that compiles is to drop the comparison. What survives is a
+test that the plugin renders without erroring, and the pane looks perfect while
+nothing constrains it. The recording is provable only while the native builder is
+present, so unlike the other three this condition's window closes:
+`a_pane_whose_oracle_is_differential_is_not_handed_over` refuses the handover, and
+`every_reproduced_pane_records_its_native_tree` fails now rather than then. Global
+search names no oracle — no bundled plugin, nothing to constrain, blocked by
+condition 1.
+
 Handing a pane over is therefore its own step, distinct from writing its plugin:
 it means `App::view` drawing the plugin's pane in the native one's place. Which
 needs the plugin pane to be reachable from the keyboard (PHASE4 §5, done), to be
-seatable in the native pane's region and answer its action and feature flag
-(PHASE4 §14), and to render on events rather than on a 1 s poll (PHASE4 §7 and
-§13, and the session-list spike's third condition). Only the first is done.
+seatable in the native pane's region (PHASE4 §21, done), to answer its action and
+feature flag (PHASE4 §22, done), to carry a recorded oracle (PHASE4 §23, done for
+all six reproduced panes), and to render on events rather than on a 1 s poll
+(PHASE4 §7 and §13, and the session-list spike's third condition) — which is the
+one still open.
 
 Stage B's *exit* criterion ("at least one plugin that thurbox did not write") is a
 separate matter and cannot be met until a release carrying the host has shipped —
@@ -231,14 +248,16 @@ that gates Stage C and `2.0.0`, not the handovers.
    go.
 
    **Each handover also needs its pane's oracle recorded first, in a change that
-   does not perform the handover** (ADR-42). Every bundled pane's proof is
+   does not perform the handover** (ADR-42). Every bundled pane's proof was
    *differential* — it asserts the plugin's tree equals the native builder's, and
-   the native builder is what the handover deletes — so it can fail before the
+   the native builder is what the handover deletes — so it could fail before the
    handover and not after it, leaving a test that the plugin renders without
    erroring. The recording must come from the native builder while it still exists,
-   or it freezes a plugin defect as the expectation. Done for the **info panel**
-   (`tests/snapshots/bundled_info_panel__*.snap`); still owed by the other five,
-   each inside its own handover's preparation.
+   or it freezes a plugin defect as the expectation. **Done for all six reproduced
+   panes** (`tests/snapshots/bundled_*__*.snap`), and no longer owed by a handover
+   at all: ADR-48 moved the obligation to *reproduction* and made it the pane
+   probe's fourth condition, so a pane reproduced without a recording fails the
+   gate before any handover is attempted.
 
    One of the seven carries an extra step of its own. `src/ui/file_viewer.rs` is
    the only pane module that is its pane's **model**: `FileViewerState` lives

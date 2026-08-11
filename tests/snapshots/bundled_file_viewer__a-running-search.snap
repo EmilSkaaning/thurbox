@@ -1,0 +1,17 @@
+---
+source: tests/bundled_file_viewer.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=1 scrollbar=true
+  line
+    text "▾ " muted
+    text "host" accent bold
+  line
+    text "    " selected
+    text "hosts.toml" bold selected
+  line
+    text "    " muted
+    text "unrelated.rs" muted
+  line
+    text "  ▸ " muted
+    text "also-out" muted
