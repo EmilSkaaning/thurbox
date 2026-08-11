@@ -2680,3 +2680,66 @@ with no keystroke. The `--no-default-features` binary carves nothing and says
 
 The file viewer is now the closest, and what it needs is three decisions rather than a
 capability. That is the change ADR-53's own "not done" section names.
+
+## 29. The file viewer's handover, refused — and the capability that was not needed (ADR-54)
+
+The file viewer was the other pane proposed for the work that produced §26–§28, with a
+specific brief: *widen the `files` capability the minimum this pane needs, state exactly
+what it now grants and still refuses, and do not grant unbounded file reads or process
+launch.*
+
+**The minimum is none.** That is the finding, and it is worth stating before the
+remainder, because the whole shape of this pane's file changed with it.
+
+### What the rows said, and why they stopped saying it
+
+`tests/file_viewer_pane_input_gap.rs` was written as an *input* gate (§16). Six rows,
+five structural:
+
+| Row | Was | Is |
+|-----|-----|-----|
+| `no-view-write` | all seven keys write view state | **closed**: the kernel keeps the keys (ADR-51) |
+| `no-filesystem-read` | expanding a directory reads it | **closed**, and the capability is *still narrow* |
+| `no-process-launch` | expanding a file launches the editor | **closed**, and nothing reaches a process |
+| `sub-mode-keys-are-not-rebindable` | `/` abandons the scoped context | a **property**, true before and after |
+| `no-query-write` | nothing carries a query inward | a **property**: the query is the kernel's |
+| `no-frame-node` | no node draws the search bar | the bar is **seat chrome**, which exists at one row |
+
+The three that named a grant now assert the grant is **absent**, which is the half worth
+keeping: *"the widening was unnecessary"* and *"the widening happened"* are
+indistinguishable in a table that stopped looking. `no-filesystem-read` therefore closes
+on a conjunction — the keyboard is declarable **and** `Capability::Files` still publishes
+basenames, no binding lists a directory, and the published row carries no path. Add
+`readDir` to the module surface and that row fails.
+
+### The three decisions that are left
+
+None of them is a capability, and `the_verdict_is_derived_from_the_blockers` asserts
+exactly that: **nothing outstanding is structural**.
+
+1. **The seat** — `PaneSlot` names none for this column's first occupant. One line, given
+   (3).
+2. **The module is the model and the window** — 1601 lines: the pane's state machine
+   (`FileViewerState` and its directory reads), which `App` owns, *and* `visible_window`,
+   the rule every plugin list and three native panes scroll by. Relocating both touches
+   five call sites in four modules.
+3. **The column has a second kernel occupant** — while a review is open this column holds
+   the review's *changed-files list*, with its own focus and keys, and ADR-45 records it
+   as wanting `RegionId::FileViewer` specifically. ADR-46's rule (the plugin takes the
+   seat) is the **wrong** rule here; the first seat where a claim must not simply win, and
+   the rule is unwritten.
+
+The order the gate implies is (3), (1), (2): decide the review's precedence first, because
+it is the only one that changes what the seat *means*.
+
+### Why this is a refusal rather than a to-do list
+
+Two of the three have a failure mode a green test suite would not show: an empty column
+whenever a review and the file viewer are used together, and a scroll window that stopped
+working for every *other* plugin pane. A 900-line relocation in the same change as an
+unwritten precedence rule is how one of those ships.
+
+So the verdict is recorded the way ADR-45 recorded the code review's — executable, with
+the reasons attached — and the pane stays. What is different from that refusal is the
+distance: this pane is now the **closest** of the four remaining, and what it needs is
+three decisions with known mechanisms rather than a grant with a security argument.

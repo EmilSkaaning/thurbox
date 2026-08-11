@@ -77,7 +77,7 @@ written for now has one.
 | Info panel | **deleted** (ADR-50) | `info-panel` | **the plugin** |
 | Tasks | **deleted** (ADR-53) | `tasks` | **the plugin** |
 | Automations | `src/ui/automations_panel.rs` | `automations` (its rows **and** five of its seven keys, PHASE4 §17) | the native pane |
-| File viewer | `src/ui/file_viewer.rs` | `file-viewer` | the native pane |
+| File viewer | `src/ui/file_viewer.rs` | `file-viewer` | the native pane (refused, ADR-54: three decisions, no capability) |
 | Global search | `src/ui/global_search.rs` | none possible yet (PHASE4 §10) | the native pane |
 | Code review | `src/ui/code_review.rs` | `code-review` (the diff stream only, PHASE4 §11) | the native pane |
 | Session list | `src/ui/project_list.rs` | `session-list` (its rows, PHASE4 §13) | the native pane |

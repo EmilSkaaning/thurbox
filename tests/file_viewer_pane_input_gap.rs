@@ -1,66 +1,60 @@
-//! The file viewer's **input** verdict, enforced as a test.
+//! The file viewer's **handover** verdict, enforced as a test.
 //!
-//! `docs/PHASE4-PANE-READINESS.md` §16 records that the file viewer's *rendering*
-//! is reproduced by a bundled plugin — including, since this change, its scroll
-//! track — while its **keys** cannot be. This file is that half of the verdict in
-//! executable form: [`BLOCKERS`] records one host power the pane's keys need and
-//! do not have, per row, and re-derives each from the source.
+//! `docs/PHASE4-PANE-READINESS.md` §16 records that the file viewer's *rendering* is
+//! reproduced by a bundled plugin, scroll track included, and §29 records the next
+//! step's answer: the pane is **not** handed over. This file is that half of the
+//! verdict in executable form — [`BLOCKERS`] holds one row per thing the handover
+//! still needs, each re-derived from the source.
 //!
 //! Why a test rather than only the document, in `tests/global_search_pane_gap.rs`'s
 //! words: a verdict written in markdown is a fact about a build that expires
-//! without telling anyone.
+//! without telling anyone. This file is the proof of that claim rather than an
+//! illustration of it — every row below was true when written, five of them stopped
+//! being requirements, and nothing but a probe would have said so.
 //!
-//! ## Which route this gate measures, since ADR-51 there are two
+//! ## The finding: the capability this pane was expected to need is **none**
 //!
-//! Every row below is about a pane whose **keys are the plugin's**: `input`, a
-//! binding per chord (ADR-34), and a capability per effect — which for this pane
-//! would mean a filesystem read and a process launch, the two grants ADR-39 refused.
-//! Each row is still a true statement about that route; nothing here has been
-//! granted.
+//! It began as an *input* gate. All seven of the pane's `KeyContext::FileViewer`
+//! actions write view state, and two of them need powers the vocabulary does not
+//! define — expanding a directory **reads the filesystem**, expanding a file
+//! **launches a process** — so ADR-39 refused the grant and the rows recorded the
+//! shortfall. The brief for the handover asked for the *minimum* widening of
+//! `Capability::Files` that would close them.
 //!
-//! ADR-51 added a second: a pane may declare that it **is** thurbox's file viewer,
-//! and the kernel then resolves `KeyContext::FileViewer` and performs those actions
-//! itself while the pane holds focus. On that route the two dangerous grants are
-//! not needed — the kernel reads the directory and launches the editor, as it always
-//! did — so a blocked row here says "this pane's keys cannot be ported **to a
-//! plugin**", never "this pane cannot be handed over". What the second route leaves
-//! untouched is the last two rows and the structural fact below: the search bar is
-//! still drawn outside any pane's tree, and the module a handover deletes is still
-//! this pane's model.
+//! ADR-51 answered a different question. A pane may declare that it **is** thurbox's
+//! file viewer, and the kernel then resolves those seven actions and performs them
+//! itself: `FileViewerState::activate` keeps doing the read, `App::file_viewer_expand`
+//! keeps launching the editor, and the plugin draws. So five rows close — and the three
+//! that named a grant now assert that the grant is **still absent**, because "the
+//! widening was unnecessary" and "the widening happened" are indistinguishable in a
+//! table that stopped looking.
 //!
-//! **What is different about this pane**, and why it needed its own gate rather
-//! than a line in the tasks pane's (`tests/tasks_pane_input_gap.rs`): the tasks
-//! pane had two keys that needed no new host power and failed for a second reason.
-//! This pane has none. All seven of its `KeyContext::FileViewer` actions write
-//! view state, and two of them need powers the vocabulary does not define at all —
-//! expanding a directory **reads the filesystem**, and expanding a file **launches
-//! a process**. On top of that its `/` sub-mode cannot meet the parity bar even in
-//! principle: while it is active the pane's scoped key context is abandoned so
-//! every character types into the query, which is the opposite of "rebindable, and
-//! in the F1 editor".
+//! What is left is three decisions, none of them a capability, and
+//! [`the_verdict_is_derived_from_the_blockers`] asserts exactly that: **nothing
+//! outstanding is structural**.
 //!
-//! And one structural fact this pane is the first to have: **the module a handover
-//! would delete is the pane's model, not only its renderer.** `FileViewerState`
-//! lives in `src/ui/file_viewer.rs`, `App` owns one, and the published section is
-//! derived from it — as is `visible_window`, the rule every *plugin* list is
-//! scrolled by. [`the_module_a_handover_deletes_is_the_panes_model`] pins that.
+//! 1. the **seat** — `PaneSlot` names none for this column's first occupant;
+//! 2. the **module** — `src/ui/file_viewer.rs` is the pane's *model* and the home of
+//!    `visible_window`, the rule every plugin list scrolls by;
+//! 3. the **column's second kernel occupant** — the code review's changed-files list,
+//!    which ADR-45 records as wanting this exact region, so the seat is the first where
+//!    a plugin claim must *not* simply win.
 //!
 //! Three things this gate is deliberately not:
 //!
-//! - it is **not** the teardown gate, which answers whether
-//!   `src/ui/file_viewer.rs` may be deleted — already no, for ADR-37's reason, and
-//!   no either way;
+//! - it is **not** the teardown gate, which answers whether `src/ui/file_viewer.rs`
+//!   may be deleted — still no, and the row there stays blocked;
 //! - it is **not** a claim that the pane's rendering is inexpressible. The plugin
 //!   builds the native pane's view tree and paints its frame, track included
 //!   (`tests/bundled_file_viewer.rs`);
-//! - it is **not** a copy of the tasks pane's verdict. The rows differ, and the
-//!   difference is the finding.
+//! - it is **not** a claim that the pane cannot be handed over. It can; three
+//!   decisions have not been taken.
 //!
-//! Its probes read the source the way a human auditor would, so this gate runs,
-//! and means the same thing, with or without the `plugins` Cargo feature. The
-//! helpers below duplicate the other two gates', because an integration test
-//! cannot import another one — the alternative is a shared crate for three
-//! readers, which is more machinery than the duplication costs.
+//! Its probes read the source the way a human auditor would, so this gate runs, and
+//! means the same thing, with or without the `plugins` Cargo feature. The helpers
+//! below duplicate the sibling gates', because an integration test cannot import
+//! another one — the alternative is a shared crate for four readers, which is more
+//! machinery than the duplication costs.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -102,37 +96,146 @@ struct Blocker {
 /// elsewhere in a file must not flip a verdict.
 const BLOCKERS: &[Blocker] = &[
     Blocker {
+        id: "no-file-viewer-seat",
+        needs: "the pane's seat: the right column's **first** occupant when no review is \
+                open, which is where the native pane draws",
+        stands: "`PaneSlot::seat()` names `RegionId::Tasks` (ADR-53) and not \
+                 `RegionId::FileViewer`. Adding it is one line of the same table — what makes \
+                 it a decision rather than a chore is the row below: this seat has a *second* \
+                 kernel occupant, so ADR-46's rule (a visible plugin pane takes the seat) is \
+                 the wrong rule here and the right one is not written",
+        gap: Gap::Vocabulary,
+        blocked: true,
+        probe: |root| {
+            !method_body(root, "src/session/plugin_manifest.rs", "pub fn seat(")
+                .contains("Some(RegionId::FileViewer)")
+        },
+    },
+    Blocker {
+        id: "the-column-has-a-second-kernel-occupant",
+        needs: "a rule for what a claim does while a **code review** owns this column: the \
+                review's changed-files list is force-shown into it, with its own focus \
+                (`InputFocus::ReviewFiles`) and its own keys",
+        stands: "`App::layout_for` forces the column present for an open review and \
+                 `App::render_file_viewer` draws the review's list into it instead of the \
+                 viewer. ADR-45 records that list as wanting `RegionId::FileViewer` \
+                 *specifically*, which is why ADR-46 gave a plugin no second seat for it. So \
+                 the seat has two kernel occupants and ADR-46's precedence rule would hand the \
+                 column to the plugin while the review needed it — the first seat where the \
+                 plugin must **not** simply win",
+        gap: Gap::Vocabulary,
+        blocked: true,
+        probe: |root| {
+            let forced = method_body(root, "src/app/mod.rs", "pub(crate) fn layout_for")
+                .contains("self.active_review().is_some()");
+            let drawn = method_body(root, "src/app/view.rs", "fn render_file_viewer")
+                .contains("render_files_list");
+            forced && drawn
+        },
+    },
+    Blocker {
+        id: "the-module-is-the-model-and-the-window",
+        needs: "deleting `src/ui/file_viewer.rs`, which is what a handover is for",
+        stands: "that module is not the pane's renderer. It is the pane's **model** — \
+                 `FileNode`, `FileRow`, `Activation`, `FileViewerState` (the expansion set, \
+                 the cursor, the search, the directory reads) and `enumerate_paths`, which \
+                 `App` owns and the published section is derived from — **and** the home of \
+                 `visible_window`, the rule every *plugin* list and three native panes scroll \
+                 by (ADR-30). Deleting the renderer means relocating both: the model into \
+                 `app`, the window into a `ui` home, at five call sites in four modules. \
+                 ADR-39 called that motion without a destination; the destination exists now, \
+                 and the move belongs in the change that uses it",
+        gap: Gap::Vocabulary,
+        blocked: true,
+        probe: |root| {
+            let module = source(root, "src/ui/file_viewer.rs");
+            let is_the_model = module.contains("pub struct FileViewerState")
+                && source(root, "src/app/mod.rs")
+                    .contains("crate::ui::file_viewer::FileViewerState");
+            let is_the_window = module.contains("fn visible_window")
+                && source(root, "src/ui/plugin_pane.rs").contains("file_viewer::visible_window");
+            is_the_model && is_the_window
+        },
+    },
+    Blocker {
+        id: "no-frame-node",
+        needs: "the search bar: a three-row bordered ` Search (2/5) ` block below the tree, \
+                with a `/ ` prefix, the query scrolled to its end, and a block cursor",
+        stands: "it is **kernel chrome**, not a node — the query, the caret and the match \
+                 counter are all kernel state, and a plugin that redrew them would be a second \
+                 renderer for one fact (the argument ADR-53 made for the tasks pane's hint \
+                 row). That mechanism now exists and is **one row deep**: `App::pane_hints` \
+                 names a hint line and `paint_plugin_pane` reserves a single row for it. Three \
+                 rows, a border and a cursor cell is the same mechanism widened, and it is not \
+                 widened yet",
+        gap: Gap::Vocabulary,
+        blocked: true,
+        probe: |root| {
+            // Two halves: the chrome hook exists (so this is a widening rather than an
+            // invention), and it is still a single row (so the bar does not fit).
+            let chrome_exists = method_body(root, "src/app/mod.rs", "pub(crate) fn pane_hints")
+                .contains("KeyContext::Tasks");
+            let one_row_only = method_body(root, "src/app/view.rs", "fn paint_plugin_pane")
+                .contains("inner.height -= 1");
+            chrome_exists && one_row_only
+        },
+    },
+    Blocker {
         id: "no-view-write",
         needs: "every one of the pane's seven keys — moving the cursor (`j`/`k`), collapsing \
                 (`h`), expanding (`l`/`Enter`), starting a search (`/`) and stepping matches \
                 (`n`/`N`) all write the cursor, the expansion set, or both",
-        stands: "no binding writes *view* state — a plugin may change records it was granted \
-                 (ADR-35), and nothing it holds moves a cursor or expands a row",
+        stands: "**closed as a handover requirement** (ADR-51), and *not* by granting the \
+                 write: no binding writes view state, and none is needed. A pane declaring \
+                 `key_context = \"FileViewer\"` is focused as `InputFocus::FileViewer`, so the \
+                 kernel resolves those seven actions and performs them against \
+                 `App::file_viewer` exactly as it does today. The plugin draws",
         gap: Gap::Structural,
-        blocked: true,
-        probe: |root| !a_view_write_binding_exists(root),
+        blocked: false,
+        probe: |root| {
+            // Three halves, because any one alone would be the wrong claim: the context
+            // must be declarable, it must map to this pane's focus, and the kernel must
+            // still resolve that focus to this context. And the write is still absent —
+            // asserted here so "closed" can never come to mean "granted".
+            let declarable =
+                method_body(root, "src/session/keybindings.rs", "pub fn pane_keyboards(")
+                    .contains("KeyContext::FileViewer");
+            let maps_to_the_focus =
+                method_body(root, "src/app/mod.rs", "pub(crate) fn focus_for_keyboard")
+                    .contains("KeyContext::FileViewer => Some(InputFocus::FileViewer)");
+            let kernel_still_dispatches =
+                method_body(root, "src/app/key_handlers.rs", "fn focus_key_context")
+                    .contains("KeyContext::FileViewer");
+            let no_write_was_granted = !a_view_write_binding_exists(root);
+            !(declarable && maps_to_the_focus && kernel_still_dispatches && no_write_was_granted)
+        },
     },
     Blocker {
         id: "no-filesystem-read",
         needs: "filling a directory the first time it is expanded (`l`/`Enter` on a folder), \
                 which the kernel does by reading it",
-        stands: "the vocabulary defines no filesystem capability — `Capability::Fs` is reserved \
-                 by the teardown inventory for v1's \"place a file in an agent's own config \
-                 dir\" power — no binding lists a directory or reads a file, and the published \
-                 rows carry no path to read",
+        stands: "**closed as a handover requirement, and the capability was not widened** — \
+                 which is the finding, because this row was written expecting the opposite. \
+                 The kernel keeps the key, so `FileViewerState::activate` keeps doing the \
+                 read; `Capability::Files` still publishes basenames and nothing else, no \
+                 binding lists a directory, and the published row still carries no path. This \
+                 row is now what stops \"the grant was unnecessary\" from quietly becoming \
+                 \"the grant happened\"",
         gap: Gap::Structural,
-        blocked: true,
+        blocked: false,
         probe: |root| {
-            // Three independent halves, because closing any one alone would not
-            // give a plugin the power: a capability to hold, a binding to call,
-            // and a path to name.
+            // The keyboard survives...
+            let the_kernel_keeps_the_key =
+                method_body(root, "src/session/keybindings.rs", "pub fn pane_keyboards(")
+                    .contains("KeyContext::FileViewer")
+                    && method_body(root, "src/app/key_handlers.rs", "fn file_viewer_expand")
+                        .contains("activate");
+            // ...and the grant it was expected to need is *still* absent. Three
+            // independent halves, because closing any one alone would give a plugin the
+            // power: a capability to hold, a binding to call, and a path to name.
             let no_capability = !capability_names(root)
                 .iter()
                 .any(|c| c == "Fs" || c == "FileSystem");
-            // Needles long enough to be the name of a filesystem reader and no
-            // shorter: `stat` would have matched `stateRead`, which is the
-            // plugin's own key/value store and the opposite of a filesystem
-            // grant.
             let no_binding = !module_bindings(root).iter().any(|b| {
                 let lower = b.to_lowercase();
                 [
@@ -146,9 +249,6 @@ const BLOCKERS: &[Blocker] = &[
                 .iter()
                 .any(|n| lower.contains(n))
             });
-            // Scoped to the published row's *fields*: the type documents that a
-            // basename is "never a path", so a probe over its prose would read
-            // the sentence stating the rule as the rule being broken.
             let no_path = !field_names(&block(
                 root,
                 "src/session/pane_context.rs",
@@ -156,25 +256,28 @@ const BLOCKERS: &[Blocker] = &[
             ))
             .iter()
             .any(|f| f.contains("path"));
-            no_capability && no_binding && no_path
+            !(the_kernel_keeps_the_key && no_capability && no_binding && no_path)
         },
     },
     Blocker {
         id: "no-process-launch",
         needs: "opening the selected file (`l`/`Enter` on a file), which launches the \
                 configured editor — detached, or in a tmux popup",
-        stands: "the write seam names five operations over tasks and automations, and even \
-                 running an automation is a *request* the kernel fulfils. `Capability::Spawn` \
-                 adds environment to spawns thurbox already makes; it is not the power to start \
-                 one",
+        stands: "**closed as a handover requirement, and no process reach was granted.** The \
+                 kernel keeps the key, so `App::file_viewer_expand` keeps calling \
+                 `open_file_in_editor`; the write seam still names five operations over tasks \
+                 and automations, nothing reaches a process, and `Capability::Spawn` still \
+                 only adds environment to spawns thurbox already makes",
         gap: Gap::Structural,
-        blocked: true,
+        blocked: false,
         probe: |root| {
-            // Signatures only, not the trait body: its prose says plainly that a
-            // plugin thread never "spawns a process, or opens a session", and a
-            // probe fooled by the sentence stating the rule would report the rule
-            // broken.
-            let seam_reaches_a_process = writer_methods(root).iter().any(|m| {
+            let the_kernel_keeps_the_key =
+                method_body(root, "src/app/key_handlers.rs", "fn file_viewer_expand")
+                    .contains("open_file_in_editor");
+            // Signatures only, not the trait body: its prose says plainly that a plugin
+            // thread never "spawns a process, or opens a session", and a probe fooled by
+            // the sentence stating the rule would report the rule broken.
+            let seam_reaches_no_process = !writer_methods(root).iter().any(|m| {
                 ["editor", "launch", "spawn", "exec", "open"]
                     .iter()
                     .any(|n| m.contains(n))
@@ -184,19 +287,23 @@ const BLOCKERS: &[Blocker] = &[
                     .iter()
                     .any(|b| b.to_lowercase().contains(needle))
             };
-            !seam_reaches_a_process && !bound("editor") && !bound("exec") && !bound("launch")
+            let no_binding = !bound("editor") && !bound("exec") && !bound("launch");
+            !(the_kernel_keeps_the_key && seam_reaches_no_process && no_binding)
         },
     },
     Blocker {
         id: "sub-mode-keys-are-not-rebindable",
-        needs: "the `/` sub-mode, whose keys a ported pane would have to expose in the \
-                keybinding editor like any other",
+        needs: "nothing, since ADR-51 — recorded as a **property** of the pane rather than a \
+                blocker, because it is equally true before and after a handover",
         stands: "while a search is active the pane's scoped key context is abandoned for the \
                  global one so that every character types into the query, and the sub-mode's \
-                 keys are matched literally rather than resolved through an action — so there \
-                 is nothing to rebind",
+                 keys are matched literally rather than resolved through an action. That is \
+                 kernel state either way: a handover moves who *draws* the pane, and these \
+                 keys are not in the keybinding editor before it or after it. Kept as a row \
+                 because it is the honest answer to \"are this pane's keys rebindable\" — the \
+                 seven scoped ones are, the sub-mode's are not, and that predates v2",
         gap: Gap::Structural,
-        blocked: true,
+        blocked: false,
         probe: |root| {
             let context_falls_back =
                 method_body(root, "src/app/key_handlers.rs", "fn focus_key_context")
@@ -207,19 +314,22 @@ const BLOCKERS: &[Blocker] = &[
                 "fn handle_file_viewer_search_key",
             )
             .contains("KeyCode::Char(c) if !ctrl => self.file_viewer.search_push(c)");
-            context_falls_back && keys_are_literal
+            // Recorded as a property: the probe asserts the *fact* still holds, and the
+            // row is not blocked, so it cannot be read as something a handover must fix.
+            !(context_falls_back && keys_are_literal)
         },
     },
     Blocker {
         id: "no-query-write",
-        needs: "a query a plugin collected doing anything — the search's effect is revealing \
-                matches by expanding directories, moving the cursor between them, and marking \
-                which rows matched",
-        stands: "a plugin declaring `input` receives the keystrokes, and nothing carries a query \
-                 it collected into the pane's search: no binding names one, and the published \
-                 section carries the search's *verdict* per row and not its text",
+        needs: "nothing, since ADR-51 — the query the search collects is the **kernel's**, \
+                and so is the bar that shows it (see `no-frame-node`)",
+        stands: "a plugin declaring `input` receives keystrokes and nothing carries a query it \
+                 collected into the pane's search: no binding names one, and the published \
+                 section carries the search's *verdict* per row rather than its text. Both \
+                 remain true, and neither is a handover requirement — the kernel keeps the \
+                 `/` key, so it keeps the query",
         gap: Gap::Structural,
-        blocked: true,
+        blocked: false,
         probe: |root| {
             let no_binding = !module_bindings(root).iter().any(|b| {
                 let lower = b.to_lowercase();
@@ -232,34 +342,7 @@ const BLOCKERS: &[Blocker] = &[
             ))
             .iter()
             .any(|f| f.contains("query"));
-            no_binding && no_query_published
-        },
-    },
-    Blocker {
-        id: "no-frame-node",
-        needs: "the search bar's own bordered block, its caret, and its place pinned to the \
-                bottom of the pane",
-        stands: "a pane's frame is the host's, drawn around whatever the plugin returned; no \
-                 node describes a border, a cursor cell, or a region anchored to the bottom of \
-                 an area",
-        gap: Gap::Vocabulary,
-        blocked: true,
-        probe: |root| {
-            let kinds = view_node_kinds(root);
-            let no_frame = !kinds
-                .iter()
-                .any(|k| k == "Block" || k == "Frame" || k == "Border" || k == "Panel");
-            // A caret is an appearance, so it would be a style field rather than a
-            // node kind. Fields, not prose: `selected`'s documentation is *about*
-            // the row the user's cursor is on.
-            let no_caret = !field_names(&block(
-                root,
-                "src/session/view_tree.rs",
-                "pub struct TextStyle",
-            ))
-            .iter()
-            .any(|f| f.contains("cursor") || f.contains("caret"));
-            no_frame && no_caret
+            !(no_binding && no_query_published)
         },
     },
 ];
@@ -409,15 +492,6 @@ fn field_names(body: &str) -> Vec<String> {
         .collect()
 }
 
-/// The node kinds the view tree defines.
-fn view_node_kinds(root: &Path) -> Vec<String> {
-    variant_names(&block(
-        root,
-        "src/session/view_tree.rs",
-        "pub enum ViewNode",
-    ))
-}
-
 /// The capabilities a manifest may declare.
 fn capability_names(root: &Path) -> Vec<String> {
     let names = variant_names(&block(
@@ -503,44 +577,53 @@ fn recorded_blockers_match_the_tree() {
 
     assert!(
         failures.is_empty(),
-        "the file viewer's input verdict disagrees with the source tree.\n\
-         A row that became available may unblock part of the pane's key surface: re-verdict it \
-         here and revisit docs/PHASE4-PANE-READINESS.md §16 in the same change.{failures}"
+        "the file viewer's handover verdict disagrees with the source tree.\n\
+         A row that closed changes what the handover costs: re-verdict it here and revisit \
+         docs/PHASE4-PANE-READINESS.md §29 in the same change.{failures}"
     );
 }
 
-/// Whether the keys are portable follows from the rows alone, so all three
-/// answers are checkable: today's, a tree where only the vocabulary row landed,
-/// and one where everything did.
+/// The verdict follows from the rows, and **this** is the headline: the handover is
+/// still refused, and nothing outstanding is structural.
+///
+/// That second half is the finding (ADR-54). Every row this gate was written around was
+/// structural — a power a plugin pane is not given — and the change that would have
+/// closed them was expected to be a widened `files` capability. It was not: ADR-51 left
+/// the keys with the kernel, so the reads and the launch stay where they were and no
+/// grant was made. What remains is three unmade decisions, and a reader who sees
+/// "blocked" must be able to tell that from "refused in principle".
 #[test]
 fn the_verdict_is_derived_from_the_blockers() {
     assert!(
         !keys_are_portable(BLOCKERS),
-        "every blocker is recorded closed — the pane's keys may now be portable, so retire this \
-         gate deliberately (and port them) rather than leaving it passing vacuously"
+        "every requirement is recorded met — the pane may now be handoverable, so hand it over \
+         deliberately (and retire this gate) rather than leaving it passing vacuously"
     );
 
-    // The load-bearing half: the reason is structural. Closing the vocabulary row
-    // would draw the search *bar* and change nothing about a single key.
+    // The headline: nothing left is structural. If a structural row comes back, the
+    // model started withholding something again and the ordering changed with it.
     let structural = structural_blockers(BLOCKERS);
     assert!(
-        structural.len() >= 5,
-        "the recorded reason is supposed to be structural, but only {structural:?} are"
-    );
-    let vocabulary_closed: Vec<Blocker> = BLOCKERS
-        .iter()
-        .map(|b| Blocker {
-            blocked: b.blocked && b.gap == Gap::Structural,
-            ..*b
-        })
-        .collect();
-    assert!(
-        !keys_are_portable(&vocabulary_closed),
-        "closing every vocabulary gap must not read as portability"
+        structural.is_empty(),
+        "a structural row is outstanding again: {structural:?}. Since ADR-51 this pane needs no \
+         power a plugin pane is denied — if that stopped being true, say what changed rather \
+         than recording it as one more row"
     );
 
-    // And the other direction: a tree where every row landed permits the port, so
-    // the gate gates rather than forbids.
+    // And the rows that closed did so **without** a grant, which is the fact the
+    // capability rows now exist to keep. Stated here too, so the gate's headline cannot
+    // be satisfied by widening the host.
+    let root = repo_root();
+    assert!(
+        !capability_names(&root)
+            .iter()
+            .any(|c| c == "Fs" || c == "FileSystem"),
+        "a filesystem capability appeared: this pane's handover was recorded as needing none, \
+         so either that record is wrong or the grant is"
+    );
+
+    // The other direction: a tree where every row landed permits the handover, so the
+    // gate gates rather than forbids.
     let all_closed: Vec<Blocker> = BLOCKERS
         .iter()
         .map(|b| Blocker {
@@ -549,6 +632,25 @@ fn the_verdict_is_derived_from_the_blockers() {
         })
         .collect();
     assert!(keys_are_portable(&all_closed));
+
+    // And it is not vacuous in the other direction either: every outstanding row is a
+    // decision the host could take (`Vocabulary`), so closing them all is a change
+    // someone can plan rather than a wall.
+    assert_eq!(
+        outstanding(BLOCKERS, Gap::Vocabulary).len(),
+        BLOCKERS.iter().filter(|b| b.blocked).count(),
+        "every outstanding row should be a decision, not a refusal"
+    );
+}
+
+/// The rows outstanding of one kind — which is how the ordering of the remaining work is
+/// read off the table rather than argued in prose.
+fn outstanding(blockers: &[Blocker], gap: Gap) -> Vec<&'static str> {
+    blockers
+        .iter()
+        .filter(|b| b.blocked && b.gap == gap)
+        .map(|b| b.id)
+        .collect()
 }
 
 /// The distinction ADR-35 forced on the global-search gate, asserted here too: a
@@ -616,14 +718,12 @@ fn not_one_of_the_panes_keys_is_a_record_write() {
     );
 }
 
-/// The structural fact this pane is the first to have: the module a handover would
-/// delete is the pane's **model**, and it also owns the rule every plugin list is
-/// scrolled by.
+/// The three facts behind `the-module-is-the-model-and-the-window`, named one at a
+/// time.
 ///
-/// Not a key blocker — it is what makes "delete the native renderer" mean
-/// something different here — so it is asserted rather than tabled. If any of the
-/// three facts stops holding, the handover's cost has changed and §16 should say
-/// so.
+/// The row's probe answers yes-or-no; this says *which* of the three moved, which is
+/// what a reader of the failure needs. It was a standalone observation about cost
+/// until ADR-54 made it one of the three things deciding the verdict.
 #[test]
 fn the_module_a_handover_deletes_is_the_panes_model() {
     let root = repo_root();

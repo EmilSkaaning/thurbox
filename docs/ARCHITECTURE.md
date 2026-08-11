@@ -3395,3 +3395,76 @@ and the home of `visible_window`, which every plugin list scrolls by, and its co
 **second kernel occupant**, the code review's changed-files list, which ADR-45 records
 as wanting `RegionId::FileViewer` specifically. Three decisions, none of them made
 here.
+
+## ADR-54: The file viewer is not handed over — three decisions, and not one is a capability
+
+**Context.** The file viewer was proposed for handover beside the tasks pane, and the
+brief asked for *the minimum widening of `Capability::Files` the pane needs*. Its gate
+(`tests/file_viewer_pane_input_gap.rs`) recorded six rows, five structural: all seven of
+the pane's `KeyContext::FileViewer` actions write view state, expanding a directory
+**reads the filesystem**, expanding a file **launches a process**, the `/` sub-mode's
+keys are not rebindable, nothing carries a query inward, and no node draws the search
+bar. ADR-39 had refused a filesystem capability on the merits — the widest grant in the
+host, and still insufficient.
+
+**Decision.** The pane stays. `src/ui/file_viewer.rs` is not deleted, and the answer to
+the brief's question is that the minimum widening is **none**.
+
+ADR-51 changed the question. A pane may declare `key_context = "FileViewer"` and be
+focused as `InputFocus::FileViewer`, so the kernel resolves those seven actions and
+performs them itself: `FileViewerState::activate` keeps doing the directory read,
+`App::file_viewer_expand` keeps launching the editor, the `/` sub-mode stays kernel
+state, and the plugin draws. Five of the six rows stop being handover requirements
+without anything being granted.
+
+What is left is three **decisions**, and the gate now records them as rows:
+
+1. **The seat.** `PaneSlot` names none for this column's first occupant. One line of the
+   same table ADR-53 extended — except for (3).
+2. **The module is the model *and* the window.** `src/ui/file_viewer.rs` is 1601 lines:
+   `FileNode`, `FileRow`, `Activation`, `FileViewerState` (the expansion set, the cursor,
+   the search, the reads) and `enumerate_paths`, which `App` owns and the published
+   section derives from — plus `visible_window`, the rule **every plugin list** and three
+   native panes scroll by (ADR-30). Deleting the renderer means relocating both, at five
+   call sites in four modules. ADR-39 called that motion without a destination; the
+   destination exists now, and the move belongs in the change that uses it, where the
+   oracle and the seat are what prove it landed.
+3. **The column has a second kernel occupant.** While a review is open, `layout_for`
+   force-shows this column and `render_file_viewer` draws the review's *changed-files
+   list* into it — its own focus, its own keys, and ADR-45 records it as wanting
+   `RegionId::FileViewer` specifically. So ADR-46's precedence rule (a visible plugin
+   pane takes the seat) is the **wrong** rule here: it would hand the column to the
+   plugin while the review needed it. This is the first seat where a claim must not
+   simply win, and the rule is not written.
+
+**Why record it rather than do it.** Each decision is small; taken together with a
+900-line relocation they are the shape of change that gets one of them taken carelessly
+— and two of the three have a failure mode a passing test suite would not show: an empty
+column whenever a review and the file viewer are used together, and a scroll window that
+stopped working for every *other* plugin pane.
+
+**What the gate now keeps, which is the part worth having.** The three rows that closed
+did so *without a grant*, and "the widening was unnecessary" is indistinguishable from
+"the widening happened" in a table that stopped looking. So `no-filesystem-read` closes
+on a **conjunction** — the keyboard is declarable **and** `Capability::Files` still
+publishes basenames, no binding lists a directory, and the published row still carries no
+path. If someone adds `readDir` to the module surface, that row fails: not because the
+pane became unhandoverable, but because this ADR's claim stopped being true.
+`the_verdict_is_derived_from_the_blockers` asserts the headline directly — **nothing
+outstanding is structural** — plus, separately, that no filesystem capability exists.
+
+**Rejected.** *Widen `files` to close the rows honestly* — unnecessary, and closing a
+checkbox with the widest grant in the host is what the brief for this work explicitly
+warned against. *Hand it over and accept the review losing its column* — the failure the
+teardown gate exists to prevent, reached from inside a change meant to honour it. *Delete
+the gate as obsolete* — five of its rows are the only record that the grants were
+unnecessary rather than absent; the tasks pane's gate could be retired because its pane
+was handed over in the same change (ADR-53), and this one's verdict is still no. *Do the
+relocation now as groundwork* — see (2). *Rename the file to match its new question* —
+its module note says what it measures, and four documents reference the name.
+
+**Consequences.** The file viewer is the **closest** remaining pane: its focus is closed
+(ADR-51), its rendering is reproduced to the frame, its recordings are taken, and its
+remaining work is three decisions with known mechanisms rather than a grant with a
+security argument. The order the gate implies is (3), then (1), then (2) — decide the
+review's precedence first, because it is the only one that changes what the seat *means*.
