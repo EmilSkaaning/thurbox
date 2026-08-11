@@ -121,6 +121,16 @@ list is on that list, and stays the kernel's — a wrap is a claim about adjacen
 and the reproduction cannot be seated adjacent to anything (`PaneSlot` names only
 the right column).
 
+That row's handover has since been attempted and refused (ADR-43), and the refusal
+moved the reason: not the keys, but the **central seat**. Focusing the native pane
+is what draws the automation editor and its run history in the central pane, and
+`App::render_central_pane` branches on the pane's three *native* focuses — so a
+plugin pane taking focus removes both surfaces. `n` and `Enter`/`e` are not two
+keys short of parity; they are the pane's whole authoring surface, and it needs a
+seat rather than a grant. The session list's row was refused the same day for the
+opposite reason: its keys move the **active session**, which is kernel view state
+no capability writes.
+
 **A pane's row is ready only on handover, not on existence.** Six panes now show
 why the distinction is load-bearing rather than pedantic: each plugin exists and
 reproduces its pane (four exactly, code review in the part it declares, the
@@ -240,6 +250,24 @@ that gates Stage C and `2.0.0`, not the handovers.
    same shape sits in the info panel's module, which also declares `SystemMetrics`
    — an *input* the metrics collector fills and `App` owns, so a relocation rather
    than a design, but a reason that deletion is not confined to `ui`.
+
+   Two of the seven have now had a handover **attempted and refused**, and their
+   remaining requirements are enforced rather than described (ADR-43): the
+   **automations pane** (`tests/automations_pane_handover_gap.rs`, 10 rows) and the
+   **session list** (`tests/session_list_pane_handover_gap.rs`, 9 rows). Each row
+   is re-derived from the source and tagged structural / vocabulary / wiring, and
+   each gate derives its verdict from its rows — so a requirement that closes for
+   an unrelated reason fails the gate instead of expiring silently. The
+   automations pane's deciding row is not one §17 predicted: focusing the *native*
+   pane is what turns the **central** pane into the automation editor plus its run
+   history, so a plugin pane taking focus removes both. The session list's is the
+   spike's own second condition — the cursor stays kernel state — which is right,
+   and is exactly what forbids a plugin pane from driving it.
+
+   Five of those nineteen rows are **shared** by both panes: the left seat, the
+   render trigger, a pane that is not told its own focus, and the
+   module-as-model class. So step 9's remaining cost is concentrated in a few host
+   decisions rather than spread across seven panes.
 
 Nothing on this list is unblocked by deleting something first, which is the
 whole finding: the teardown has no safe first step yet.

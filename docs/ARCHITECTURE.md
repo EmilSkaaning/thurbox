@@ -2328,3 +2328,103 @@ delete what it records, or its provenance would be unprovable. The other five
 bundled oracles keep their differential shape; each will need the same recording
 captured while *its* native builder exists, which is work belonging to its own
 handover, and `migration/phase-4` now states the rule so a port cannot miss it.
+
+## ADR-43: A refused handover records what it needed, as a gate
+
+**Context.** The left column's two panes were to be the next two handovers: the
+**automations pane**, whose port had already shipped five of its seven keys
+(ADR-41), and the **session list**, the pane ADR-V1 hinges on and the one
+`docs/SPIKE-SESSION-LIST.md` measured, answering *yes, on three conditions*. Both
+attempts stop, and the interesting part is that neither stops where its own prior
+analysis expected.
+
+The session list's spike named the right conditions and drew the wrong conclusion
+from one of them. Its second condition — **the cursor stays kernel state** — is
+correct, and is precisely what makes the handover impossible: a handed-over pane is
+focused as `InputFocus::PluginPane`, `App::focus_key_context` names no arm for it,
+so all six `KeyContext::SessionList` actions resolve in the global scope and none
+fires. A plugin cannot substitute for them either, because `j`/`k` move the
+**active session** — what the central pane, the info panel, the file viewer and the
+code review are all showing — and no capability writes kernel view state. The
+cursor cannot be kernel state *and* be driven by a plugin pane's keys. That is a
+fact about the handover, which a spike about the port could not have seen.
+
+The automations pane's port stopped at its **seat** and read as five-sevenths done.
+It is not. Focusing the native pane is what turns the **central** pane into the
+automation editor plus its run history, and `App::render_central_pane` selects that
+view by testing `self.focus` against three *native* focuses. A plugin pane is a
+fourth focus the branch does not name, so a handover removes the editor, the run
+history and `Enter`-opens-that-run's-session — surfaces the pane does not draw and
+a plugin cannot take. The two unported keys are therefore not a shortfall of two;
+they are the pane's whole authoring surface, and the shortfall is a seat rather
+than a key. It is the same central-seat coupling that blocked the tasks pane
+(ADR-38), found on the pane whose keys were supposed to be the hard part.
+
+**Decision.** Both native panes stay, and a refused handover records every
+requirement it could not meet as a **gate that re-derives each one from the
+source** — not as prose.
+
+The reason is the one `tests/global_search_pane_gap.rs` established: a verdict
+written in markdown is a fact about a build that expires without telling anyone.
+"The session list cannot be handed over" stops being true the moment someone adds a
+view write for an unrelated reason, and nothing would say so. So
+`tests/session_list_pane_handover_gap.rs` (9 rows) and
+`tests/automations_pane_handover_gap.rs` (10 rows) each hold one row per unmet
+requirement with its probe, derive the verdict from the rows rather than stating
+it, and assert both directions — today's answer, and a table where every row
+landed.
+
+Each row is tagged by **why** it is missing, and a third kind joins the two the
+earlier gates used:
+
+- **structural** — a power a plugin is not given on purpose, whose reversal changes
+  what a plugin is (both cursors, the central seat, the left seat, record creation,
+  text authoring, the modules that are models);
+- **vocabulary** — something the drawing catalogue cannot say and could (a centred
+  line, an ellipsizing clip, chrome on a pane's border, a pending-spawn row);
+- **wiring** — something the host could do today with no new plugin-facing
+  concept: when a plugin is asked to render, which facts it is told, or how the
+  host draws a pane it already knows is focused.
+
+The third kind is not a courtesy. Filing the render trigger as structural would
+claim the model forbids event-driven rendering, which it does not; filing it as
+vocabulary would say the catalogue is short a word, which it is not. And the
+ordering of the work follows from the kinds — wiring is cheapest, and the session
+list's 1 s staleness stops being cosmetic the moment the pane is the one a user
+navigates with.
+
+**Two capabilities deliberately not added.** The brief for this work expected
+`Shift+J`/`Shift+K`/`Shift+S` to be unblocked by a session-write grant, and the
+automations pane's `n` by a creation grant. Both are the right *shape* — one
+operation per single-keystroke effect, ADR-35's rule — and both are recorded as
+rows instead. A session-reorder grant would be the **third** capability in the host
+with no consumer, joining `input` before ADR-41 and `tasks-write`: the key it
+enables still acts on the row the user is looking at, which for this pane is the
+kernel's cursor, so the grant would widen a plugin's reach over the database while
+the pane it exists for still could not use it. A creation grant has no id to
+address at all, which is why ADR-35 excluded it. A capability whose consumer cannot
+work is reach without parity.
+
+**Consequences.** No `src/` change: both native panes are still what
+`src/app/view.rs` draws, both bundled plugins keep exactly the capabilities they
+had, and `tests/teardown_gate.rs` keeps both rows blocked — now for reasons that
+fail a test when they stop being reasons. The gates read source text, so they run
+and mean the same thing with or without the `plugins` feature, which is what lets
+them sit beside the teardown gate rather than inside the feature-gated oracles.
+Five of the nineteen rows are shared between the two panes (the left seat, the
+render trigger, a pane's unknown focus, the module-as-model class), which is the
+first evidence that the remaining handovers are blocked by a small number of host
+decisions rather than by per-pane work.
+
+What would unblock each, as an ordering rather than a list. **The automations
+pane** needs its two seats: a `left` slot, whose load-bearing requirement is a
+decision the protocol has so far refused — whether plugin content may size a
+kernel region, since `ui::layout`'s `left_column` sizes this pane as
+`(count + 2).clamp(3, 10)` — and then the central seat, which is the same question
+the tasks pane's editor raised. Its keys are the least of its problems. **The
+session list** needs the cursor question answered first, and there are only two
+answers: either kernel view state becomes plugin-writable under a capability, which
+makes "the active session" a plugin-writable thing and is the widest grant in the
+host, or the pane keeps a kernel-owned cursor and a plugin supplies only its rows —
+the retreat the spike named, which is not a plugin pane at all. That choice is
+ADR-V1's, not a pane port's, so the gate states it rather than picking one.

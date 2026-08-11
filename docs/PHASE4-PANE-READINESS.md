@@ -1507,3 +1507,125 @@ And one blocker is unchanged from §14 for a different reason: a **reproduction 
 not a replacement**. All six ported panes are still drawn natively, so
 `tests/teardown_gate.rs` keeps all seven rows blocked on their own pane-level
 condition rather than on a shared release decision.
+
+## 18. Two handovers attempted, both refused, and the reasons made executable (ADR-43)
+
+§17 left the phase with six ported panes and none handed over. The next step was
+the left column's two: the **automations pane**, whose keys already ship, and the
+**session list**, the pane ADR-V1 hinges on. Both attempts stop. Neither stops
+where its own prior analysis expected, which is the content of this section.
+
+### The automations pane: the shortfall is a seat, not two keys
+
+§17 tabulated `n` and `Enter`/`e` as the two unported keys and read the pane as
+five-sevenths done. That reading is wrong, and the reason is a coupling §17 did not
+look for.
+
+`App::render_central_pane` selects the central view by testing `self.focus`
+against three **native** focuses — `Automations`, `AutomationEditor`,
+`AutomationRunHistory`. Focusing the native pane is therefore what turns the
+central pane into the selected automation's editor, and one `Ctrl+L` further into
+its **run history**, where `r` reruns and `Enter` opens the session that run
+touched. A handed-over pane is focused as `InputFocus::PluginPane`, a fourth focus
+the branch does not name, so none of that appears.
+
+So the handover would remove the editor, the run history and the run's
+open-session key from a pane that still *looks* complete — the pane draws its rows
+correctly and four of its five ported keys behave. The two unported keys are not a
+shortfall of two; they are the pane's whole authoring surface, and what is missing
+is a **seat** rather than a key. This is the same central-seat coupling that
+blocked the tasks pane (§15), found on the pane whose keys were supposed to be the
+hard part. `the_central_pane_follows_the_native_panes_focus_not_the_panes_identity`
+pins it.
+
+Its other rows are §17's, now with probes: the left seat (and the height policy
+underneath it), the circular wrap whose kernel half does not exist, the shared
+`row_summary` that makes the module a model for the `Ctrl+P` modal too, a pane
+that is not told its own focus, and the fitted name. Two are new and both are
+cheap:
+
+- **a focused plugin pane draws an unfocused border.** `App::render_plugin_panes`
+  builds every pane's block at `FocusLevel::Inactive`, unconditionally. Unlike the
+  unknown-focus row this is not a fact the host lacks — it knows
+  `self.focus == InputFocus::PluginPane` — it simply does not use it, so a
+  handed-over pane would take keys while looking unfocused.
+- **the render trigger**, shared with the session list below.
+
+### The session list: the spike's second condition is what forbids the handover
+
+`docs/SPIKE-SESSION-LIST.md` answered *yes, on three conditions*, the second being
+that **the cursor stays kernel state**. That is correct, and it is exactly what
+makes the handover impossible — a conclusion a spike about the *port* could not
+have reached.
+
+A handed-over pane is focused as `InputFocus::PluginPane`;
+`App::focus_key_context` names no arm for it and falls through to
+`KeyContext::Global`; so all six `KeyContext::SessionList` actions — next,
+previous, open, move down, move up, sort A→Z — stop resolving. A plugin's own
+pane-addressed bindings (ADR-34) cannot substitute, because `j`/`k` move the
+**active session**, which is what the central pane, the info panel, the file
+viewer and the code review are all showing, and no capability writes kernel view
+state. The cursor cannot be kernel state *and* be driven by a plugin pane's keys.
+`the_panes_scoped_keys_stop_resolving_when_a_plugin_pane_holds_focus` names the six
+actions so a failure says which keyboard the handover would silence.
+
+Two more rows are worth stating because they are the ones a reader assumes are
+already solved:
+
+- **reordering and sorting write persisted state no operation names.**
+  `Shift+J`/`Shift+K` renumber `sessions.display_order` densely and persist it;
+  `Shift+S` sorts within each repo group in one keystroke. The seam's five
+  operations each address a task or an automation.
+- **the module is the kernel's model, more so than the file viewer's.**
+  `src/ui/project_list.rs` owns `compute_session_order` (the comparator `App`'s
+  `Ctrl+J`/`Ctrl+K` navigate by), `move_in_order`,
+  `sort_alphabetically_within_groups`, `resolve_rows` — which builds the very
+  snapshot the *plugin* reads — and `SessionMatch`, global search's session
+  matcher. Deleting the renderer deletes navigation, reordering, sorting and
+  search. §9 found this class for `FileViewerState` (ADR-39); this case is larger.
+
+### The two capabilities not added, and why that is not timidity
+
+The brief expected the reorder and sort keys to be unblocked by adding a
+session-write grant, and `n` by a creation grant. Both are recorded as rows
+instead, and the reason is the one the phase has now hit twice: a session-reorder
+grant would be the **third** capability in the host with no consumer, joining
+`input` before §17 and `tasks-write`. Its key still acts on the row the user is
+looking at, which for this pane is the kernel's cursor — so the grant would widen
+a plugin's reach over the database while the pane it exists for still could not
+use it. Creation has no id to address at all, which is why ADR-35 excluded it. The
+ordering matters: add the operation *after* the cursor question is answered, not
+before.
+
+### The third gap kind, and what it buys
+
+The earlier gates classify a row as *structural* or *vocabulary*. Two requirements
+here are neither — the **render trigger** (the worker re-renders every pane on a
+fixed `PLUGIN_RENDER_SLICE × PLUGIN_RENDER_SLICES` = 1 s cycle and nothing tells it
+kernel state moved) and **a pane's knowledge of its own focus**. Both are closable
+with no new plugin-facing concept and no node: host wiring plus a rate policy. So
+the gates carry `Gap::Wiring`, the derived verdict treats all three kinds as
+blocking, and the *ordering* follows from the kind. Wiring first — §13 recorded 1 s
+staleness as tolerable for a hidden reproduction, and a handover inverts that
+argument, because it is then the pane the user navigates with that trails.
+
+### What the nineteen rows say about the phase
+
+Nine rows for the session list, ten for the automations pane, and **five of them
+are the same rows**: the left seat, the render trigger, a pane that is not told its
+own focus, and the module-as-model class. That is the first evidence that the
+remaining handovers are blocked by a small number of **host decisions** rather than
+by per-pane work — which is a more useful state than six independent walls, and is
+why the two verdicts were worth landing as tables rather than as two more
+paragraphs.
+
+§17's three blockers, re-verdicted once more:
+
+1. **the build** — closed since ADR-40, unchanged.
+2. **input** — unchanged from §17's narrowing. What these two attempts add is that
+   the remaining input wall is a **seat** as often as it is a key: the automations
+   pane's authoring keys and the tasks pane's editor both need the central pane,
+   and the session list's need a cursor the interface follows.
+3. **a pane whose module is its model** — now **three** panes (the file viewer, the
+   automations pane, the session list), and the session list's case is the largest
+   in the tree.
