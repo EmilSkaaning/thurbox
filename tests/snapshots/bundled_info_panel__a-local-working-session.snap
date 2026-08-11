@@ -1,0 +1,92 @@
+---
+source: tests/bundled_info_panel.rs
+expression: "record::tree(&native)"
+---
+list cursor=none scrollbar=false
+  paragraph
+    text "Name: " muted
+    text "fix-osc52-tmux"
+  paragraph
+    text "Status: " muted
+    text "◐ Working" status_working bold
+  paragraph
+    text "Agent: " muted
+    text "claude" role bold
+  paragraph
+    text "Parent: " muted
+    text "lead" secondary
+  paragraph
+    text "Activity: " muted
+    text "reviewing a very long agent-supplied activity line that has to wrap somewhere" secondary
+  paragraph
+    text "Signal:   " muted
+    text "needs approval to write outside the worktree" muted
+  paragraph
+    text "Repos: " muted
+    text "thurbox/fix/osc52" branch
+  paragraph
+    text "       " muted
+    text "docs" branch
+  paragraph
+    text "       " muted
+    text "web" branch
+  paragraph
+    text "Changes: " muted
+    text "4 files"
+    text " "
+    text "+213" added
+    text " / " muted
+    text "-57" status_error
+  paragraph
+    text "Sync:    " muted
+    text "↑3 ↓2" muted
+  gauge "CPU" percent=13.25 suffix=none
+  paragraph
+    text "RAM" muted
+    text "  500.0 MB"
+  divider
+  paragraph
+    text "Agent (Opus v2.1.3)" accent bold
+  paragraph
+    text "Cost:    " muted
+    text "$4.28" accent
+  paragraph
+    text "Time:    " muted
+    text "2h 03m"
+    text "  (api 30m 20s)" muted
+  paragraph
+    text "Tokens:  " muted
+    text "2.5M in / 84.3k out"
+  gauge "Context" percent=37.0 suffix="74.0k/200.0k"
+  paragraph
+    text "Lines:   " muted
+    text "+1204" added
+    text " / " muted
+    text "-318" status_error
+  paragraph
+    text "Cache:   " muted
+    text "1.8M read / 96.0k created"
+  divider
+  paragraph
+    text "Usage (max)" accent bold
+  gauge "5h" percent=63.4 suffix="63%  2h 35m"
+  gauge "Week" percent=12.0 suffix="12%"
+  divider
+  paragraph
+    text "System" accent bold
+  gauge "CPU" percent=42.7 suffix=none
+  gauge "RAM" percent=56.25 suffix="9.0/16.0 GB"
+  paragraph
+    text "Disk" muted
+    text "  3.0 GB (thurbox dir)"
+  divider
+  paragraph
+    text "Automations (2)" accent bold
+  paragraph
+    text "in 2m 30s" accent
+    text "  "
+    text "shepherd-tick" secondary
+  paragraph
+    text "in 3h 20m" accent
+    text "  "
+    text "renovate-tick" secondary

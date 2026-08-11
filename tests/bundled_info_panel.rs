@@ -15,6 +15,32 @@
 //!
 //! The plugin is loaded from `src/plugin/bundled/info-panel/` directly, so this
 //! checks the source that ships rather than a materialized copy.
+//!
+//! ## Two edges, because the handover deletes one of them
+//!
+//! The equality above is **differential** — it names `info_tree`, which is the
+//! module a handover removes. On the day that happens the comparison has nothing
+//! on its right-hand side, and what a compiling repair leaves behind is a test
+//! that the plugin renders without erroring: satisfied equally by a pane drawing
+//! one wrong row and by one drawing twenty. The seven acceptance snapshots do not
+//! cover the gap either — every one is captured with no active session, and this
+//! pane needs one, so none of them contains a cell of it.
+//!
+//! So each case asserts **both** edges while both sides exist:
+//!
+//! * `native == snapshot` — the recorded expectation in `tests/snapshots/` is the
+//!   *native pane's* tree. This is the edge that gives the recording its
+//!   provenance, and it can only be established while the native builder is here.
+//! * `plugin == native` — today's proof, unchanged.
+//!
+//! Their conjunction is what the handover needs (`plugin == snapshot`) with a
+//! baseline that was proven rather than assumed. When `info_tree` goes, the first
+//! assertion goes with it and the second is rewritten against the snapshot — which
+//! by then is a recording of the pane, not of whatever the plugin happened to do.
+//!
+//! Generating the snapshots from the plugin instead would invert this: a plugin
+//! defect would become the expectation, and the test could never fail for the
+//! reason it exists.
 
 #![cfg(feature = "plugins")]
 
@@ -35,6 +61,163 @@ use thurbox::ui::info_panel::{info_tree, AutomationEntry, SystemMetrics};
 /// time is the one input `info_tree` used to read for itself; it takes `now` as a
 /// parameter precisely so this comparison can be exact.
 const NOW: u64 = 1_700_000_000;
+
+/// The recorded form of a view tree: one line per node, readable by a reviewer.
+///
+/// This is the oracle that outlives the native builder, so its two properties are
+/// load-bearing in opposite directions.
+///
+/// **Legible**, because `{:#?}` is not. The full case's structural dump runs to
+/// thousands of lines, most of them style fields at their defaults; nobody can
+/// tell a correct one from a subtly wrong one at that size, so every future
+/// update would be a rubber stamp — and a rubber-stamped expectation records what
+/// the code last did rather than what the pane should show. Here a lost bold or a
+/// changed colour role is one visible word on one line.
+///
+/// **Exhaustive**, because compactness is bought by omitting, and an omission is a
+/// hole in the oracle. Every `ViewNode` variant and every [`TextStyle`] field is
+/// destructured *by name* below, with no `..` rest pattern and no wildcard arm:
+/// adding a field to the view tree fails to compile here until this decides how to
+/// print it. The compiler is what keeps the format honest, not a reviewer's memory.
+///
+/// Colour roles print through `as_str`, the wire name a plugin uses, so a token
+/// added to the IR has to be spelled in the library's own exhaustive match first.
+mod record {
+    use thurbox::session::motion::{Motion, MotionKind};
+    use thurbox::session::view_tree::{TextStyle, ViewNode};
+
+    /// The whole tree, newline-separated, with a trailing newline per line.
+    pub fn tree(node: &ViewNode) -> String {
+        let mut out = String::new();
+        write_node(node, 0, &mut out);
+        out
+    }
+
+    fn write_node(node: &ViewNode, depth: usize, out: &mut String) {
+        let pad = "  ".repeat(depth);
+        // Exhaustive by construction: no `..`, no `_` arm. See the module note.
+        match node {
+            ViewNode::Text { content, style } => {
+                out.push_str(&format!("{pad}text {content:?}{}\n", style_facts(style)));
+            }
+            ViewNode::Row(children) => {
+                out.push_str(&format!("{pad}row\n"));
+                write_children(children, depth, out);
+            }
+            ViewNode::Line(children) => {
+                out.push_str(&format!("{pad}line\n"));
+                write_children(children, depth, out);
+            }
+            ViewNode::Paragraph(children) => {
+                out.push_str(&format!("{pad}paragraph\n"));
+                write_children(children, depth, out);
+            }
+            ViewNode::Column(children) => {
+                out.push_str(&format!("{pad}column\n"));
+                write_children(children, depth, out);
+            }
+            ViewNode::List {
+                children,
+                selected,
+                scrollbar,
+            } => {
+                let cursor = match selected {
+                    Some(i) => i.to_string(),
+                    None => "none".to_string(),
+                };
+                out.push_str(&format!(
+                    "{pad}list cursor={cursor} scrollbar={scrollbar}\n"
+                ));
+                write_children(children, depth, out);
+            }
+            ViewNode::Divider => out.push_str(&format!("{pad}divider\n")),
+            ViewNode::Gauge {
+                label,
+                percent,
+                suffix,
+            } => {
+                // The float prints through `{:?}`, which round-trips exactly:
+                // `Percent` compares by bit pattern, so a lossy decimal here
+                // would let two gauges the host draws differently record the
+                // same, narrowing the oracle it exists to be.
+                let suffix = match suffix {
+                    Some(s) => format!("{s:?}"),
+                    None => "none".to_string(),
+                };
+                out.push_str(&format!(
+                    "{pad}gauge {label:?} percent={:?} suffix={suffix}\n",
+                    percent.get()
+                ));
+            }
+            ViewNode::Fill { glyph, style } => {
+                out.push_str(&format!("{pad}fill {glyph:?}{}\n", style_facts(style)));
+            }
+            ViewNode::Spacer { lines } => out.push_str(&format!("{pad}spacer lines={lines}\n")),
+            ViewNode::Motion {
+                key,
+                keyed_by_id,
+                motion,
+            } => {
+                let Motion { fps, kind } = motion;
+                match kind {
+                    MotionKind::Cycle { frames, repeat } => {
+                        out.push_str(&format!(
+                            "{pad}motion cycle key={key:?} keyed_by_id={keyed_by_id} \
+                             fps={fps} repeat={repeat}\n"
+                        ));
+                        write_children(frames, depth, out);
+                    }
+                }
+            }
+        }
+    }
+
+    fn write_children(children: &[ViewNode], depth: usize, out: &mut String) {
+        for child in children {
+            write_node(child, depth + 1, out);
+        }
+    }
+
+    /// A style's non-default facts, space-prefixed; empty for the default style.
+    ///
+    /// Absence means default, and the exhaustive destructuring is what makes that
+    /// safe: every fact is printed when it is set, so "nothing printed" cannot
+    /// hide one this format forgot about.
+    fn style_facts(style: &TextStyle) -> String {
+        let TextStyle {
+            token,
+            bold,
+            dim,
+            underline,
+            selected,
+            tint,
+        } = style;
+        let mut facts: Vec<String> = Vec::new();
+        if let Some(token) = token {
+            facts.push(token.as_str().to_string());
+        }
+        if *bold {
+            facts.push("bold".to_string());
+        }
+        if *dim {
+            facts.push("dim".to_string());
+        }
+        if *underline {
+            facts.push("underline".to_string());
+        }
+        if *selected {
+            facts.push("selected".to_string());
+        }
+        if let Some(tint) = tint {
+            facts.push(format!("tint={}", tint.as_str()));
+        }
+        if facts.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", facts.join(" "))
+        }
+    }
+}
 
 /// The process-wide snapshot slot is global, so every case here runs one at a
 /// time — otherwise one case's publication would answer another's reader.
@@ -66,6 +249,14 @@ impl Case {
             self.disk,
             NOW,
         )
+    }
+
+    /// The snapshot file's name: the case name, slugified.
+    ///
+    /// Derived from the name rather than written twice, so a renamed case cannot
+    /// keep asserting against another case's recording.
+    fn snapshot_name(&self) -> String {
+        self.name.replace(' ', "-")
     }
 
     /// The same state as the snapshot a plugin reads.
@@ -435,6 +626,10 @@ fn render(host: &PluginHost) -> ViewNode {
 
 /// The headline claim: for every case, the plugin's tree equals the native
 /// pane's. Equal trees paint identically, so this is byte-identity of the pane.
+///
+/// The recorded edge is asserted **first**, so a run in which both edges break
+/// reports the recording — the fact about the pane — rather than only that two
+/// implementations disagree.
 #[test]
 fn the_plugin_builds_the_native_panes_view_tree() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
@@ -444,9 +639,24 @@ fn the_plugin_builds_the_native_panes_view_tree() {
         thurbox::session::pane_context::publish(case.context());
         let plugin = render(&host);
         let native = case.native_tree();
+        // Edge one: the checked-in expectation is the native pane's tree. This is
+        // the assertion that survives the handover, and the only moment its
+        // baseline can be shown to come from the pane rather than from the plugin
+        // is while the native builder is still here to generate it.
+        insta::assert_snapshot!(case.snapshot_name(), record::tree(&native));
+        // Edge two: today's proof, unchanged.
         assert_eq!(
             plugin, native,
             "the plugin's tree diverges from the native pane for `{}`",
+            case.name
+        );
+        // Their conjunction, asserted rather than left to the reader: this is the
+        // fact a handover inherits, and it is what the surviving assertion becomes
+        // when `info_tree` is deleted.
+        assert_eq!(
+            record::tree(&plugin),
+            record::tree(&native),
+            "the plugin does not reproduce the recorded pane for `{}`",
             case.name
         );
     }

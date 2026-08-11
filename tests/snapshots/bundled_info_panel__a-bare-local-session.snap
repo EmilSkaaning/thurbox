@@ -1,0 +1,17 @@
+---
+source: tests/bundled_info_panel.rs
+expression: "record::tree(&native)"
+---
+list cursor=none scrollbar=false
+  paragraph
+    text "Name: " muted
+    text "demo"
+  paragraph
+    text "Status: " muted
+    text "○ Idle" status_idle bold
+  paragraph
+    text "Agent: " muted
+    text "claude" role bold
+  paragraph
+    text "Repos: " muted
+    text "thurbox" branch
