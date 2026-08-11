@@ -407,6 +407,28 @@ impl Harness {
     }
 }
 
+/// The pane that replaced the info panel, as its manifest declares it (ADR-50):
+/// the `center-left` seat, `ToggleInfoPanel`, and the `info_panel` switch.
+///
+/// Built by hand rather than discovered, because these tests are about what the
+/// *kernel* does with such a pane — the seat, the key, the switch — and starting a
+/// Luau VM here would make them tests of discovery. What the bundled plugin actually
+/// draws is `tests/bundled_info_panel.rs`'s subject.
+#[cfg(feature = "plugins")]
+fn info_pane(visible: bool) -> crate::plugin::PluginPane {
+    use crate::session::plugin_manifest::PaneSlot;
+    let mut pane = crate::plugin::PluginPane::loading(
+        "info-panel",
+        "info",
+        "Info",
+        PaneSlot::CenterLeft,
+        visible,
+    );
+    pane.toggle_action = Some(crate::session::Action::ToggleInfoPanel);
+    pane.feature = Some(crate::session::settings::FeatureFlag::InfoPanel);
+    pane
+}
+
 // ── Snapshot tests: stable, deterministic screens ────────────────────────────
 
 #[test]
@@ -1001,16 +1023,25 @@ fn file_viewer_toggles_via_f3_and_ctrl_e() {
     assert!(!h.app.show_file_viewer, "Ctrl+E again hides it");
 }
 
+/// Both chords bound to `ToggleInfoPanel` reach the pane that replaced the info
+/// panel (ADR-50) — the point being that the handover changed the pane's
+/// *implementation*, not its keyboard.
+#[cfg(feature = "plugins")]
 #[test]
 fn info_panel_toggles_via_f2_and_ctrl_b() {
     let mut h = Harness::standard(1);
-    let initial = h.app.show_info_panel;
+    h.app.set_plugin_panes(vec![info_pane(false)]);
 
     h.func(2);
-    assert_ne!(h.app.show_info_panel, initial, "F2 toggles the info panel");
+    assert_eq!(
+        h.app.plugin_pane_visible("info-panel", "info"),
+        Some(true),
+        "F2 shows the info pane"
+    );
     h.ctrl('b');
     assert_eq!(
-        h.app.show_info_panel, initial,
+        h.app.plugin_pane_visible("info-panel", "info"),
+        Some(false),
         "Ctrl+B toggles it back (same action, alternate chord)"
     );
 }
@@ -1833,11 +1864,16 @@ async fn central_tab_strip_omits_feature_gated_tabs() {
 /// feature is off the TUI never fires those schedules (and the pane is hidden),
 /// so the info panel must not surface them either — even though the cache is
 /// still loaded from the DB.
+///
+/// Asserted on the **published snapshot** rather than on a frame, because the pane
+/// is a plugin's now (ADR-50) and this harness starts no VM. The filter is the same
+/// one it always was — it moved from `render_info_panel` to `build_pane_context`
+/// when the snapshot was introduced — and what the pane does with the list is
+/// `tests/bundled_info_panel.rs`'s automations case.
 #[tokio::test]
 async fn info_panel_hides_automations_when_feature_off() {
     use crate::session::{Automation, AutomationAction, AutomationSchedule};
     let mut h = Harness::spawnable(1);
-    h.app.show_info_panel = true;
     let far_future = crate::sync::current_time_millis() + 3_600_000;
     h.app.automation_ui.cached_automations = vec![Automation {
         id: 1,
@@ -1855,19 +1891,28 @@ async fn info_panel_hides_automations_when_feature_off() {
         next_run_at: Some(far_future),
     }];
 
-    // Feature on: the info panel's automations section lists it.
-    h.app.features.automations = true;
-    assert!(
-        h.render().contains("infopanelnightly"),
-        "info panel surfaces the upcoming automation when the feature is on"
-    );
+    let upcoming = |app: &App| -> Vec<String> {
+        app.build_pane_context()
+            .upcoming_automations
+            .into_iter()
+            .map(|a| a.label)
+            .collect()
+    };
 
-    // Feature off: the pane is hidden *and* the info-panel section is dropped,
-    // so the automation appears nowhere.
+    // Feature on: the pane is told about the upcoming run.
+    h.app.features.automations = true;
+    assert_eq!(upcoming(&h.app), vec!["infopanelnightly".to_string()]);
+
+    // Feature off: the pane is hidden *and* the list is empty, so the automation
+    // is unreachable from this pane whatever it chooses to draw.
     h.app.features.automations = false;
     assert!(
+        upcoming(&h.app).is_empty(),
+        "the info panel must not be told about automations when the feature is off"
+    );
+    assert!(
         !h.render().contains("infopanelnightly"),
-        "info panel must not surface automations when the feature is off"
+        "and no frame shows it either"
     );
 }
 
@@ -2083,8 +2128,11 @@ async fn disabling_a_live_feature_tears_down_its_open_surfaces() {
     let mut h = Harness::spawnable(1);
     let sid = h.app.sessions[0].info.id;
 
-    // Open every live-gated surface, and park focus on the file viewer.
-    h.app.show_info_panel = true;
+    // Open every live-gated surface, and park focus on the file viewer. The info
+    // panel is absent from the list: it is a plugin pane now (ADR-50), so its
+    // switch is enforced by `PluginPane::is_shown` on every read rather than by a
+    // teardown pass — which is also what preserves the user's stored choice across
+    // the switch going off and on (`a_gated_off_pane_keeps_its_stored_visibility`).
     h.app.show_file_viewer = true;
     h.app.show_tasks_panel = true;
     h.app
@@ -2102,7 +2150,6 @@ async fn disabling_a_live_feature_tears_down_its_open_surfaces() {
     settings.features.code_review = false;
     h.app.apply_live_settings(&settings);
 
-    assert!(!h.app.show_info_panel, "info panel hidden");
     assert!(!h.app.show_file_viewer, "file viewer hidden");
     assert!(!h.app.show_tasks_panel, "tasks panel hidden");
     assert_eq!(
@@ -2654,16 +2701,18 @@ async fn clicking_review_target_entry_switches_target() {
 /// Global overlay/panel toggles fall through the review's key capture so they
 /// stay reachable while a review is open (regression: the capture handler
 /// swallowed them). The review itself stays open.
+#[cfg(feature = "plugins")]
 #[test]
 fn info_panel_toggles_while_review_is_open() {
     let mut h = Harness::new(STD_COLS, STD_ROWS, 1);
     open_minimal_review(&mut h);
-    assert!(!h.app.show_info_panel);
+    h.app.set_plugin_panes(vec![info_pane(false)]);
 
     h.key(KeyCode::F(2), KeyModifiers::NONE);
 
-    assert!(
-        h.app.show_info_panel,
+    assert_eq!(
+        h.app.plugin_pane_visible("info-panel", "info"),
+        Some(true),
         "F2 toggles the info panel even while the review is focused"
     );
     assert!(
@@ -4607,11 +4656,19 @@ fn clicking_a_plugin_pane_below_its_rows_only_focuses_it() {
     );
 }
 
-/// A pane whose plugin never declared `input` is not a focus target, so a click on
-/// it changes nothing — the rule focus navigation already applies.
+/// A pane whose plugin never declared `input` records **no click target at all**, so
+/// a click over it falls through to whatever the kernel does with that rect.
+///
+/// The target used to be recorded and then refused by both handlers —
+/// `focus_plugin_pane` will not focus such a pane and `offer_click_to_plugin` reads
+/// the *focused* pane — so its only effect was to consume the click. Harmless while
+/// every plugin pane was a right-column reproduction; not harmless once one sits in
+/// the info panel's seat, because `handle_mouse_click` hit-tests this registry
+/// **before** the pane fallback that arms drag-select, and the Info column is a pane
+/// whose values users copy out (ADR-50).
 #[cfg(feature = "plugins")]
 #[test]
-fn clicking_a_pane_without_the_input_capability_does_nothing() {
+fn a_pane_without_the_input_capability_records_no_click_target() {
     use crate::session::plugin_manifest::PaneSlot;
     use crate::session::view_tree::ViewNode;
 
@@ -4629,16 +4686,43 @@ fn clicking_a_pane_without_the_input_capability_does_nothing() {
     drop(event_tx);
 
     h.render();
-    let row = plugin_pane_row_target(&h, 1).expect("the row is still recorded");
-    let before = h.app.focus;
-    h.app.update(AppMessage::MouseClick {
-        x: row.x,
-        y: row.y,
-        modifiers: KeyModifiers::NONE,
-    });
-
-    assert_eq!(h.app.focus, before, "focus must not land on it");
+    let frame = h.render();
+    assert!(
+        frame.contains("look, no touching"),
+        "the pane is drawn:\n{frame}"
+    );
+    assert!(
+        plugin_pane_row_target(&h, 1).is_none(),
+        "a pane that cannot be told about a click records no row"
+    );
+    assert!(
+        !h.app
+            .click_targets
+            .iter()
+            .any(|t| matches!(&t.action, crate::app::ClickAction::PluginPaneRow { .. })),
+        "nor its own rect, which is what was swallowing the click"
+    );
     assert!(key_rx.try_recv().is_err(), "and nothing is delivered");
+
+    // The same pane with `input` declared records both, so the rule is the
+    // capability's and not the pane kind's.
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, true);
+    pane.accepts_input = true;
+    pane.apply(Ok(ViewNode::list(vec![ViewNode::text("touchable")])));
+    h.app.set_plugin_panes(vec![pane]);
+    h.render();
+    assert!(
+        h.app.click_targets.iter().any(|t| matches!(
+            &t.action,
+            crate::app::ClickAction::PluginPaneRow { row: Some(_), .. }
+        )),
+        "a pane that can be told about a click records its rows"
+    );
+    assert!(h.app.click_targets.iter().any(|t| matches!(
+        &t.action,
+        crate::app::ClickAction::PluginPaneRow { row: None, .. }
+    )));
 }
 
 /// With two focusable panes on screen, the clicked one takes focus and the keys
@@ -5716,66 +5800,160 @@ fn pane_context_has_no_session_when_none_is_open() {
     );
 }
 
-/// A pane seated in a native pane's rect, proved on a real frame: the plugin's
-/// content is where the info panel's labels were, and the native pane is gone.
+/// The pane in the info panel's seat, proved on a real frame: the plugin's content
+/// is drawn in the rect the native pane had, and nothing of the native pane is left
+/// to draw.
 ///
-/// The seat is the first of §14's five handover requirements (ADR-46), and the
-/// assertion is deliberately two-sided — content present *and* the native pane's
-/// own labels absent — because a pane merely drawn *somewhere* is what the
-/// right-column reproduction already did.
+/// The seat closed the first of §14's five handover requirements (ADR-46); the
+/// handover (ADR-50) deleted the other occupant, so this asserts what the seat *is*
+/// now — one pane, its own rect, gone when it is hidden. The `Agent:` label the
+/// earlier version of this test looked for is not a native pane's any more: it is a
+/// row the bundled plugin builds, which `tests/bundled_info_panel.rs` owns.
 #[cfg(feature = "plugins")]
 #[test]
 fn a_plugin_pane_takes_the_info_panels_seat() {
-    use crate::session::plugin_manifest::PaneSlot;
     use crate::session::view_tree::ViewNode;
 
     let mut h = Harness::new(160, 40, 1);
-    h.app.show_info_panel = true;
-    let native = h.render();
     assert!(
-        native.contains("Agent:"),
-        "the native pane draws first:\n{native}"
+        h.app.screen_layout().info_panel.is_none(),
+        "with no claim the seat is not carved at all — there is no kernel pane for it"
     );
-    let native_rect = h
-        .app
-        .screen_layout()
-        .info_panel
-        .expect("the info column is carved at 160 cols");
-
-    let mut pane = crate::plugin::PluginPane::loading(
-        "info-panel",
-        "info",
-        "Info",
-        PaneSlot::CenterLeft,
-        true,
-    );
+    // The rect the seat has always had, measured from a claim rather than from the
+    // deleted pane: `no_claim_leaves_every_rect_unchanged` is what pins it to the
+    // pre-seat geometry.
+    let mut pane = info_pane(true);
     pane.apply(Ok(ViewNode::list(vec![ViewNode::text("PLUGIN INFO")])));
     h.app.set_plugin_panes(vec![pane]);
 
     let seated = h.render();
+    let seat = h
+        .app
+        .screen_layout()
+        .info_panel
+        .expect("the info column is carved at 160 cols");
     assert!(
         seated.contains("PLUGIN INFO"),
         "the seated pane draws:\n{seated}"
     );
+
+    // And hiding it gives the space back, rather than leaving a bordered column
+    // nothing paints — the failure the deleted `show_info_panel` flag could have
+    // produced on its own.
+    h.app.set_plugin_pane_visible("info-panel", "info", false);
+    let hidden = h.render();
+    assert!(!hidden.contains("PLUGIN INFO"), "{hidden}");
     assert!(
-        !seated.contains("Agent:"),
-        "the native info panel must stand down for the pane that took its seat:\n{seated}"
-    );
-    assert_eq!(
-        h.app.screen_layout().info_panel,
-        Some(native_rect),
-        "a seated pane gets the native pane's rect, not a new one"
+        h.app.screen_layout().info_panel.is_none(),
+        "the seat is not carved for a hidden pane"
     );
 
-    // And the seat goes back: hiding the pane restores the native one in the state
-    // it was left in, which is what makes a handover reversible while both exist.
-    h.app.set_plugin_pane_visible("info-panel", "info", false);
-    let restored = h.render();
+    // Showing it again lands in the same rect: the seat is the seat.
+    h.app.set_plugin_pane_visible("info-panel", "info", true);
+    assert_eq!(h.app.screen_layout().info_panel, Some(seat));
+}
+
+/// Dragging to select text in the Info column still works after the handover.
+///
+/// This is the reason `render_plugin_panes` records nothing for a pane with no
+/// `input` (ADR-50). `handle_mouse_click` hit-tests the click registry before the
+/// pane fallback that arms `text_selection`, and `pane_rects` includes the info
+/// column — so a whole-rect target over a pane that then refuses the click would have
+/// ended text selection in the one pane whose values a user copies out, silently.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_click_in_the_info_seat_still_starts_a_text_selection() {
+    use crate::session::view_tree::ViewNode;
+
+    let mut h = Harness::new(160, 40, 1);
+    let mut pane = info_pane(true);
+    pane.apply(Ok(ViewNode::list(vec![ViewNode::text("Name: demo")])));
+    h.app.set_plugin_panes(vec![pane]);
+    h.render();
+
+    let seat = h
+        .app
+        .screen_layout()
+        .info_panel
+        .expect("the seat is carved");
+    h.app.update(AppMessage::MouseClick {
+        x: seat.x + 2,
+        y: seat.y + 2,
+        modifiers: KeyModifiers::NONE,
+    });
     assert!(
-        restored.contains("Agent:"),
-        "the native pane returns:\n{restored}"
+        h.app.text_selection.is_some(),
+        "a click inside the seat arms a drag-selection, as it did when the kernel \
+         drew this column"
     );
-    assert!(!restored.contains("PLUGIN INFO"));
+}
+
+/// The handed-over pane keeps the info panel's own width rule: the seat is not
+/// carved below 120 columns, whatever the user's stored visibility says.
+///
+/// The rule is `compute_layout`'s and always was; what changed is that narrowing no
+/// longer *destroys* the choice. `handle_resize` used to set `show_info_panel = false`
+/// below 120, so widening again left the panel hidden; a plugin pane's visibility is
+/// the user's stored choice, so it comes back (ADR-50).
+#[cfg(feature = "plugins")]
+#[test]
+fn the_info_seat_keeps_its_width_rule_and_the_choice_survives_narrowing() {
+    let mut h = Harness::new(160, 40, 1);
+    h.app.set_plugin_panes(vec![info_pane(true)]);
+    assert!(h.app.screen_layout().info_panel.is_some());
+
+    h.resize(100, 40);
+    assert!(
+        h.app.screen_layout().info_panel.is_none(),
+        "below 120 columns the seat is not carved"
+    );
+    assert_eq!(
+        h.app.plugin_pane_visible("info-panel", "info"),
+        Some(true),
+        "and the user's choice is not thrown away by a resize"
+    );
+
+    h.resize(160, 40);
+    assert!(
+        h.app.screen_layout().info_panel.is_some(),
+        "so widening brings it back"
+    );
+}
+
+/// **The empty state, decided.** With no active session the native pane returned
+/// before painting its block, so the seat was a borderless gap; a plugin pane's frame
+/// is the kernel's and is always painted, and this plugin then draws what it still
+/// knows — host CPU, RAM, the data-dir size, upcoming automations.
+///
+/// This change accepts that (ADR-50): a titled column with real content beats a gap,
+/// and the alternatives were an empty bordered box or a layout that carves on a
+/// content condition no other seat has. Pinned here as a *frame*, because
+/// `tests/bundled_info_panel.rs` pins the tree and neither pinned what a sessionless
+/// launch looks like — which is exactly the state §14 found no oracle covering.
+#[cfg(feature = "plugins")]
+#[test]
+fn the_info_seat_draws_its_frame_with_no_session() {
+    use crate::session::view_tree::ViewNode;
+
+    // No sessions at all: the welcome state.
+    let mut h = Harness::new(160, 40, 0);
+    let mut pane = info_pane(true);
+    // What the bundled plugin renders here is its System section; the tree itself is
+    // `with_no_session_the_plugin_still_shows_what_it_knows`'s subject, so this stands
+    // in for it with one recognisable row.
+    pane.apply(Ok(ViewNode::list(vec![ViewNode::text("System")])));
+    h.app.set_plugin_panes(vec![pane]);
+
+    let frame = h.render();
+    assert!(
+        h.app.screen_layout().info_panel.is_some(),
+        "the seat is carved by the claim, session or no session"
+    );
+    assert!(
+        frame.contains(" Info "),
+        "the pane draws its border and title where the native pane drew nothing:\n{frame}"
+    );
+    assert!(frame.contains("System"), "{frame}");
 }
 
 /// A claim carves the seat on its own. Without this a pane in a seat whose kernel
@@ -5788,7 +5966,6 @@ fn a_seat_is_carved_for_a_claim_alone() {
     use crate::session::view_tree::ViewNode;
 
     let mut h = Harness::new(160, 40, 1);
-    h.app.show_info_panel = false;
     assert!(
         h.app.screen_layout().info_panel.is_none(),
         "nothing wants the seat, so it is not carved"
@@ -5889,7 +6066,6 @@ fn a_second_claimant_for_one_seat_is_not_drawn() {
     use crate::session::view_tree::ViewNode;
 
     let mut h = Harness::new(160, 40, 1);
-    h.app.show_info_panel = true;
     let mut first =
         crate::plugin::PluginPane::loading("alpha", "info", "Alpha", PaneSlot::CenterLeft, true);
     first.apply(Ok(ViewNode::list(vec![ViewNode::text("FIRST CLAIM")])));
@@ -5908,41 +6084,38 @@ fn a_second_claimant_for_one_seat_is_not_drawn() {
 }
 
 /// A seated pane is not one of the right column's occupants, so it neither takes a
-/// plugin column nor pushes the centre around. The property that makes "no claim
-/// changes no geometry" hold for a mixed pane set as well as for none.
+/// plugin column nor moves the seat when a column appears beside it. The property
+/// that makes "no claim changes no geometry" hold for a mixed pane set as well as
+/// for none.
+///
+/// The baseline is the *seated* layout rather than a kernel-drawn info column: that
+/// column has no kernel occupant any more (ADR-50), so the only way to have it is a
+/// claim.
 #[cfg(feature = "plugins")]
 #[test]
 fn a_seated_pane_does_not_consume_a_right_column() {
     use crate::session::plugin_manifest::PaneSlot;
 
     let mut h = Harness::new(160, 40, 1);
-    h.app.show_info_panel = true;
-    let baseline = h.app.screen_layout();
-
-    h.app
-        .set_plugin_panes(vec![crate::plugin::PluginPane::loading(
-            "demo",
-            "info",
-            "Info",
-            PaneSlot::CenterLeft,
-            true,
-        )]);
+    h.app.set_plugin_panes(vec![info_pane(true)]);
     let seated = h.app.screen_layout();
     assert_eq!(h.app.visible_plugin_panes(), 0, "a seat is not a column");
     assert!(seated.plugin_panes.is_empty());
-    assert_eq!(
-        seated.terminal, baseline.terminal,
-        "the centre does not move"
-    );
-    assert_eq!(seated.info_panel, baseline.info_panel);
+    assert!(seated.info_panel.is_some(), "it took the seat instead");
 
-    // A right-column pane alongside it still gets its own region.
+    // A right-column pane alongside it still gets its own region, and taking one
+    // does not disturb the seat.
     h.app.set_plugin_panes(vec![
-        crate::plugin::PluginPane::loading("demo", "info", "Info", PaneSlot::CenterLeft, true),
+        info_pane(true),
         crate::plugin::PluginPane::loading("demo", "board", "Board", PaneSlot::Right, true),
     ]);
+    let mixed = h.app.screen_layout();
     assert_eq!(h.app.visible_plugin_panes(), 1);
-    assert_eq!(h.app.screen_layout().plugin_panes.len(), 1);
+    assert_eq!(mixed.plugin_panes.len(), 1);
+    assert_eq!(
+        mixed.info_panel, seated.info_panel,
+        "the seat is where it was"
+    );
 }
 
 /// The geometry claim, stated as an equality rather than as prose: with no pane
@@ -5953,7 +6126,6 @@ fn no_claim_leaves_every_rect_unchanged() {
     use crate::session::plugin_manifest::PaneSlot;
 
     let mut h = Harness::new(160, 40, 1);
-    h.app.show_info_panel = true;
     h.app.show_tasks_panel = true;
     h.app.show_file_viewer = true;
     let before = h.app.screen_layout();
@@ -5974,7 +6146,10 @@ fn no_claim_leaves_every_rect_unchanged() {
 /// for that pane's seat, which is what §14's toggle row is about.
 ///
 /// Both occupants flip: the assertion checks the kernel's own flag moves too, so
-/// the reversibility rule ADR-46 established is not quietly dropped.
+/// the reversibility rule ADR-46 established is not quietly dropped. The action is
+/// `ToggleFileViewer` because it is one whose kernel pane still *exists* —
+/// `ToggleInfoPanel`'s does not (ADR-50), and that case is
+/// [`a_handed_over_panes_action_has_one_occupant`] below.
 #[cfg(feature = "plugins")]
 #[test]
 fn a_pane_bound_to_an_action_answers_it() {
@@ -5982,29 +6157,59 @@ fn a_pane_bound_to_an_action_answers_it() {
     use crate::session::Action;
 
     let mut h = Harness::new(160, 40, 1);
-    h.app.show_info_panel = false;
+    assert!(!h.app.show_file_viewer);
     let mut pane =
-        crate::plugin::PluginPane::loading("demo", "info", "Info", PaneSlot::CenterLeft, false);
-    pane.toggle_action = Some(Action::ToggleInfoPanel);
+        crate::plugin::PluginPane::loading("demo", "files", "Files", PaneSlot::Right, false);
+    pane.toggle_action = Some(Action::ToggleFileViewer);
     h.app.set_plugin_panes(vec![pane]);
 
-    h.func(2);
+    h.func(3);
     assert_eq!(
-        h.app.plugin_pane_visible("demo", "info"),
+        h.app.plugin_pane_visible("demo", "files"),
         Some(true),
         "the declared action shows the pane"
     );
     assert!(
-        h.app.show_info_panel,
+        h.app.show_file_viewer,
         "the kernel's own pane keeps answering its action, so hiding the plugin \
-         pane hands the seat back"
+         pane hands its column back"
+    );
+
+    h.func(3);
+    assert_eq!(h.app.plugin_pane_visible("demo", "files"), Some(false));
+    assert!(
+        !h.app.show_file_viewer,
+        "twice returns every occupant to the start"
+    );
+}
+
+/// The handed-over case: the action bound to a seat whose kernel occupant was
+/// deleted has exactly **one** occupant, and firing it twice still returns the pane
+/// to where it started.
+///
+/// Worth its own test rather than a variant of the one above, because the thing that
+/// could go wrong is specific: a kernel flag retained "just in case" would carve the
+/// seat on its own, and the pane's own visibility would then no longer decide whether
+/// anything is drawn there.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_handed_over_panes_action_has_one_occupant() {
+    let mut h = Harness::new(160, 40, 1);
+    h.app.set_plugin_panes(vec![info_pane(false)]);
+    assert!(h.app.screen_layout().info_panel.is_none());
+
+    h.func(2);
+    assert_eq!(h.app.plugin_pane_visible("info-panel", "info"), Some(true));
+    assert!(
+        h.app.screen_layout().info_panel.is_some(),
+        "the pane's own visibility is the whole condition for the seat"
     );
 
     h.func(2);
-    assert_eq!(h.app.plugin_pane_visible("demo", "info"), Some(false));
+    assert_eq!(h.app.plugin_pane_visible("info-panel", "info"), Some(false));
     assert!(
-        !h.app.show_info_panel,
-        "twice returns every occupant to the start"
+        h.app.screen_layout().info_panel.is_none(),
+        "twice returns to the start, and nothing else can carve the seat"
     );
 }
 

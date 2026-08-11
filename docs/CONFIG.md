@@ -270,7 +270,7 @@ no results. Data is never touched, so re-enabling a flag is lossless.
 | `automations` | `true` | automations pane, `Ctrl+P`, TUI schedule firing, heartbeat arming |
 | `file_viewer` | `true` | file viewer column (`F3`) and file search results |
 | `global_search` | `true` | global search strip (`Ctrl+/`) |
-| `info_panel` | `true` | info panel column (`F2`) |
+| `info_panel` | `true` | info panel column (`F2`) — a bundled **plugin** pane since ADR-50, so the switch gates that pane; a build without the plugin host has no info panel at all |
 | `shell_pane` | `true` | per-session shell toggle (`Ctrl+T`) |
 | `code_review` | `true` | native code-review view (diff + comments, `Ctrl+X`) |
 | `perf_hud` | `true` | perf HUD overlay (`F12`): live perf counters + frame/tick timing (see `docs/PERFORMANCE.md`) |

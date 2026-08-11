@@ -1142,6 +1142,44 @@ impl App {
         false
     }
 
+    /// What to say when `ToggleInfoPanel` finds no pane to flip.
+    ///
+    /// Two spellings because the *reason* differs, and a message naming a command
+    /// the running binary does not have is worse than no message: without the plugin
+    /// host there is no `thurbox-cli plugin` subcommand to send anyone to, and the
+    /// pane is not missing but absent by construction (ADR-50).
+    #[cfg(feature = "plugins")]
+    const NO_INFO_PANE_HINT: &'static str =
+        "provided by the `info-panel` plugin, which has no pane here \
+         (see `thurbox-cli plugin doctor`)";
+
+    /// Without the plugin host the pane cannot exist, so the report says so rather
+    /// than pointing at a diagnostic this build does not ship.
+    #[cfg(not(feature = "plugins"))]
+    const NO_INFO_PANE_HINT: &'static str =
+        "provided by a plugin, and this build has no plugin host";
+
+    /// Whether any pane the user could show declares `action` as its toggle.
+    ///
+    /// The read-only half of [`Self::toggle_panes_bound_to`], for an arm that needs
+    /// to know whether the action reached anything without flipping it again. Gated
+    /// on the same predicate, so "bound" and "toggled" cannot disagree about a pane
+    /// whose `[features]` switch is off.
+    #[cfg(feature = "plugins")]
+    pub(super) fn pane_bound_to(&self, action: crate::session::Action) -> bool {
+        let features = self.features;
+        self.plugin_panes
+            .iter()
+            .any(|p| p.toggle_action == Some(action) && p.is_enabled(&features))
+    }
+
+    /// Without the plugin feature nothing is bound, which is what makes a
+    /// handed-over pane's action report the pane's absence in this build.
+    #[cfg(not(feature = "plugins"))]
+    pub(super) fn pane_bound_to(&self, _action: crate::session::Action) -> bool {
+        false
+    }
+
     /// The kernel's own dispatch for `action`, in priority order.
     fn dispatch_kernel_action(&mut self, action: crate::session::Action) -> bool {
         if let Some(consumed) = self.dispatch_app_action(action) {
@@ -1265,9 +1303,18 @@ impl App {
                 "Automations",
                 Self::open_automations_list,
             ),
+            // The info panel is a plugin's pane (ADR-50), so the flip already
+            // happened in `toggle_panes_bound_to` before this arm ran and there is
+            // no kernel pane left to toggle. What is left for the kernel to do is
+            // the *report*: when nothing claims the seat — the bundled plugin failed
+            // to load, a user's own `info-panel` plugin declares no such pane, or
+            // this is a build with no plugin host — a silent key is
+            // indistinguishable from a broken binding. The `[features]` gate still
+            // runs first, so a disabled switch keeps naming itself.
             Action::ToggleInfoPanel => self.gated(self.features.info_panel, "Info panel", |s| {
-                s.show_info_panel = !s.show_info_panel;
-                s.resize_sessions_to_content_area();
+                if !s.pane_bound_to(crate::session::Action::ToggleInfoPanel) {
+                    s.set_info(format!("Info panel: {}", Self::NO_INFO_PANE_HINT));
+                }
             }),
             Action::FocusTasks => {
                 self.gated(self.features.tasks, "Tasks panel", Self::act_toggle_tasks)

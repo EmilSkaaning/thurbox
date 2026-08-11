@@ -3,8 +3,6 @@
 //! Grouped out of the [`App`](super::App) god object. Fields are `pub(crate)`
 //! so call-sites keep direct access (`self.metrics.tick_count`).
 
-use crate::ui::info_panel;
-
 /// Per-frame / per-tick performance counters.
 ///
 /// These are deterministic, wall-clock-free proxies for the render and tick
@@ -316,6 +314,27 @@ impl PerfTimings {
     }
 }
 
+/// System-wide and active-session resource metrics.
+///
+/// Declared here rather than in `session` because it is an **input** the collector
+/// produces for one consumer, not shared vocabulary: `session::pane_context`'s
+/// `SystemSnapshot` is the published form of the same five numbers, and a second
+/// spelling of them in that module would be two types for one fact. It lived in
+/// `ui::info_panel` until that pane was handed over to its plugin (ADR-50), which
+/// left the value's owner — [`MetricsState`] — as its home.
+pub(crate) struct SystemMetrics {
+    /// Overall CPU usage 0-100.
+    pub(crate) cpu_percent: f32,
+    /// Total RAM used in bytes.
+    pub(crate) memory_used: u64,
+    /// Total RAM in bytes.
+    pub(crate) memory_total: u64,
+    /// Active session CPU usage 0-100+.
+    pub(crate) session_cpu_percent: f32,
+    /// Active session memory in bytes.
+    pub(crate) session_memory_bytes: u64,
+}
+
 /// CPU/RAM metrics collection plus the app-wide tick counter that paces the
 /// periodic refreshes (metrics, git stats, usage).
 pub(crate) struct MetricsState {
@@ -324,7 +343,7 @@ pub(crate) struct MetricsState {
     /// System info collector for CPU/RAM metrics.
     pub(crate) sys: Option<sysinfo::System>,
     /// Cached system metrics for the info panel.
-    pub(crate) system_metrics: info_panel::SystemMetrics,
+    pub(crate) system_metrics: SystemMetrics,
     /// thurbox's on-disk data-directory size (`~/.local/share/thurbox`) in
     /// bytes, `None` until the first background scan completes. Kept separate
     /// from [`system_metrics`](Self::system_metrics) because the ~1 s metrics
@@ -343,7 +362,7 @@ impl MetricsState {
         Self {
             tick_count: 0,
             sys: Some(sysinfo::System::new()),
-            system_metrics: info_panel::SystemMetrics {
+            system_metrics: SystemMetrics {
                 cpu_percent: 0.0,
                 memory_used: 0,
                 memory_total: 0,

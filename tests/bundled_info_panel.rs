@@ -1,46 +1,32 @@
-//! The bundled info-panel plugin renders the native info panel.
+//! The bundled info-panel plugin **is** thurbox's info panel.
 //!
-//! Phase 4's question is not "does the plugin draw something" but "does the host
-//! surface suffice for a real pane". The answer here is a **tree equality**: the
-//! Luau plugin's view tree must equal the one `ui::info_panel::info_tree` builds
-//! from the same state. Because the same renderer paints both
-//! (`ui::plugin_pane::render_tree`), an equal tree is a byte-identical pane
-//! without comparing a single frame — and a failure localises to a node instead
-//! of to a cell.
+//! `src/ui/info_panel.rs` is deleted (ADR-50), so there is no native builder left to
+//! compare against: what holds this plugin to the pane is the ten checked-in
+//! recordings under `tests/snapshots/`, each generated from
+//! `ui::info_panel::info_tree` while it existed and asserted against it in the same
+//! test. That ordering is the whole of ADR-42 — a recording is only *provable* as
+//! the pane's while the pane's builder is present, so it had to be taken by the
+//! change before this one.
 //!
-//! It lives in `tests/` because it is the one place that must see both
-//! `ui::info_panel` and `plugin::PluginHost`. Under `src/` only `app` may reach
-//! both (`tests/architecture_rules.rs`), and an integration test is not part of
-//! the library's module graph at all — so the allowlist stays untouched.
+//! What the recordings buy, concretely: they can fail for the reason this file
+//! exists. A test that merely rendered the plugin without erroring would be
+//! satisfied by a pane drawing one wrong row, which is exactly what a handover
+//! deleting one side of a differential comparison leaves behind. The seven
+//! acceptance snapshots cover none of it either — every one is captured with no
+//! active session, at 100 columns, and this seat is carved at 120.
+//!
+//! **The recordings must never be regenerated from this plugin.** A
+//! `cargo insta accept` here would convert ten statements about the pane into ten
+//! statements about whatever the plugin currently does, and the test could no longer
+//! fail for the reason it exists. If a case's recording moves, the published context
+//! or the plugin moved; both are findings, neither is a snapshot to accept.
+//!
+//! It lives in `tests/` because it needs `plugin::PluginHost`, which under `src/`
+//! only `app` may reach (`tests/architecture_rules.rs`) — an integration test is not
+//! part of the library's module graph at all, so the allowlist stays untouched.
 //!
 //! The plugin is loaded from `src/plugin/bundled/info-panel/` directly, so this
 //! checks the source that ships rather than a materialized copy.
-//!
-//! ## Two edges, because the handover deletes one of them
-//!
-//! The equality above is **differential** — it names `info_tree`, which is the
-//! module a handover removes. On the day that happens the comparison has nothing
-//! on its right-hand side, and what a compiling repair leaves behind is a test
-//! that the plugin renders without erroring: satisfied equally by a pane drawing
-//! one wrong row and by one drawing twenty. The seven acceptance snapshots do not
-//! cover the gap either — every one is captured with no active session, and this
-//! pane needs one, so none of them contains a cell of it.
-//!
-//! So each case asserts **both** edges while both sides exist:
-//!
-//! * `native == snapshot` — the recorded expectation in `tests/snapshots/` is the
-//!   *native pane's* tree. This is the edge that gives the recording its
-//!   provenance, and it can only be established while the native builder is here.
-//! * `plugin == native` — today's proof, unchanged.
-//!
-//! Their conjunction is what the handover needs (`plugin == snapshot`) with a
-//! baseline that was proven rather than assumed. When `info_tree` goes, the first
-//! assertion goes with it and the second is rewritten against the snapshot — which
-//! by then is a recording of the pane, not of whatever the plugin happened to do.
-//!
-//! Generating the snapshots from the plugin instead would invert this: a plugin
-//! defect would become the expectation, and the test could never fail for the
-//! reason it exists.
 
 #![cfg(feature = "plugins")]
 
@@ -55,11 +41,10 @@ use thurbox::session::view_tree::ViewNode;
 use thurbox::session::{
     AgentMetrics, AgentUsage, GitStats, SessionInfo, SessionStatus, UsageWindow, WorktreeInfo,
 };
-use thurbox::ui::info_panel::{info_tree, AutomationEntry, SystemMetrics};
 
-/// A fixed instant, so the usage countdown is the same on both sides. Wall-clock
-/// time is the one input `info_tree` used to read for itself; it takes `now` as a
-/// parameter precisely so this comparison can be exact.
+/// A fixed instant, so a usage window's countdown is the same on every run. It is
+/// the one input the native builder used to read for itself, and it took `now` as a
+/// parameter precisely so the recordings below could be exact.
 const NOW: u64 = 1_700_000_000;
 
 /// The recorder that turns a view tree into the checked-in expectation.
@@ -75,34 +60,28 @@ mod view_tree_record;
 /// time — otherwise one case's publication would answer another's reader.
 static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// One comparison case: the state the native pane is given, and the snapshot the
-/// plugin reads. Both are derived from the *same* fields by `native_tree` and
-/// `context`, which is what makes an equality failure a statement about the
-/// plugin rather than about two hand-written fixtures drifting.
+/// One case: the state to publish, and the recording it must reproduce.
+///
+/// The fields are still spelled as the *pane's* inputs — a `SessionInfo`, an
+/// `AgentUsage` — rather than as a ready-made `PaneContext`, because `context` below
+/// mirrors `App::build_pane_context`. Publishing a hand-written snapshot instead
+/// would make a failure a statement about this fixture; deriving it the way the
+/// kernel derives it keeps a failure a statement about the plugin.
 struct Case {
     name: &'static str,
     info: SessionInfo,
-    metrics: Option<SystemMetrics>,
+    /// The published system section, `None` for a case with no metrics yet. Carries
+    /// `thurbox_dir_bytes`, which the native pane took as a separate argument.
+    metrics: Option<SystemSnapshot>,
     usage: Option<AgentUsage>,
-    automations: Vec<AutomationEntry>,
+    /// Upcoming automations as the snapshot carries them: a label and *seconds*. The
+    /// native pane was handed a pre-rendered countdown string and this plugin
+    /// composes its own, which is the split ADR-29 established.
+    automations: Vec<UpcomingAutomationSnapshot>,
     parent: Option<&'static str>,
-    disk: Option<u64>,
 }
 
 impl Case {
-    /// The pane's own tree, from the native builder.
-    fn native_tree(&self) -> ViewNode {
-        info_tree(
-            &self.info,
-            self.metrics.as_ref(),
-            &self.automations,
-            self.usage.as_ref(),
-            self.parent,
-            self.disk,
-            NOW,
-        )
-    }
-
     /// The snapshot file's name: the case name, slugified.
     ///
     /// Derived from the name rather than written twice, so a renamed case cannot
@@ -199,49 +178,25 @@ impl Case {
             review: Default::default(),
             files: Default::default(),
             session_list: Default::default(),
-            system: self.metrics.as_ref().map(|m| SystemSnapshot {
-                cpu_percent: m.cpu_percent,
-                memory_used: m.memory_used,
-                memory_total: m.memory_total,
-                session_cpu_percent: m.session_cpu_percent,
-                session_memory_bytes: m.session_memory_bytes,
-                thurbox_dir_bytes: self.disk,
-            }),
+            system: self.metrics.clone(),
             // The pane's own automations section stays default: this plugin reads
             // the *upcoming* list, and the two readers behind one capability being
             // independently readable is what `bundled_automations_panel` pins.
             automations: Default::default(),
-            upcoming_automations: self
-                .automations
-                .iter()
-                .map(|a| UpcomingAutomationSnapshot {
-                    // The id is not drawn by either pane; a fixed value keeps the
-                    // two trees comparable while the field exists for a pane that
-                    // may *change* an automation.
-                    id: 0,
-                    label: a.label.clone(),
-                    // The native pane is handed a pre-rendered countdown string;
-                    // the plugin composes its own from the seconds, so the case
-                    // fixes the seconds and derives the string from them.
-                    due_in_secs: countdown_secs(&a.countdown),
-                })
-                .collect(),
+            upcoming_automations: self.automations.clone(),
         }
     }
 }
 
-/// The seconds a fixture's countdown string was built from.
+/// An upcoming automation, as the kernel publishes one.
 ///
-/// The fixtures below name a duration once, as `"in 2m 30s"` and `150`; this
-/// keeps the two from drifting by deriving the number from the label the native
-/// side is given.
-fn countdown_secs(rendered: &str) -> u64 {
-    match rendered {
-        "due" => 0,
-        "in 45s" => 45,
-        "in 2m 30s" => 150,
-        "in 3h 20m" => 12_000,
-        other => panic!("fixture countdown {other:?} has no seconds mapping"),
+/// The `id` is fixed: neither pane drew it, and the field exists for a pane that may
+/// one day *change* an automation.
+fn upcoming(label: &str, due_in_secs: u64) -> UpcomingAutomationSnapshot {
+    UpcomingAutomationSnapshot {
+        id: 0,
+        label: label.to_string(),
+        due_in_secs,
     }
 }
 
@@ -297,12 +252,13 @@ fn full_case() -> Case {
     Case {
         name: "everything populated",
         info,
-        metrics: Some(SystemMetrics {
+        metrics: Some(SystemSnapshot {
             cpu_percent: 42.7,
             memory_used: 9_663_676_416,
             memory_total: 17_179_869_184,
             session_cpu_percent: 13.25,
             session_memory_bytes: 524_288_000,
+            thurbox_dir_bytes: Some(3_221_225_472),
         }),
         usage: Some(AgentUsage {
             windows: vec![
@@ -321,17 +277,10 @@ fn full_case() -> Case {
             note: None,
         }),
         automations: vec![
-            AutomationEntry {
-                label: "shepherd-tick".to_string(),
-                countdown: "in 2m 30s".to_string(),
-            },
-            AutomationEntry {
-                label: "renovate-tick".to_string(),
-                countdown: "in 3h 20m".to_string(),
-            },
+            upcoming("shepherd-tick", 150),
+            upcoming("renovate-tick", 12_000),
         ],
         parent: Some("lead"),
-        disk: Some(3_221_225_472),
     }
 }
 
@@ -352,21 +301,20 @@ fn cases() -> Vec<Case> {
         usage: None,
         automations: Vec::new(),
         parent: None,
-        disk: None,
     });
 
     // Metrics present but the session is using nothing yet: the session
     // CPU/RAM rows drop out while the System section stays.
     let mut idle = full_case();
     idle.name = "no session resource usage";
-    idle.metrics = Some(SystemMetrics {
+    idle.metrics = Some(SystemSnapshot {
         cpu_percent: 0.0,
         memory_used: 0,
         memory_total: 0,
         session_cpu_percent: 0.0,
         session_memory_bytes: 0,
+        thurbox_dir_bytes: None,
     });
-    idle.disk = None;
     out.push(idle);
 
     // Usage that reports a note instead of windows — "not logged in" and the
@@ -436,10 +384,7 @@ fn cases() -> Vec<Case> {
     // A single automation, due now: the `"due"` branch of the countdown.
     let mut due = full_case();
     due.name = "an automation due now";
-    due.automations = vec![AutomationEntry {
-        label: "flow-tick".to_string(),
-        countdown: "due".to_string(),
-    }];
+    due.automations = vec![upcoming("flow-tick", 0)];
     out.push(due);
 
     // A repo with no worktree branch, so the primary repo row is the repo alone.
@@ -476,12 +421,16 @@ fn render(host: &PluginHost) -> ViewNode {
         .expect("the pane renders")
 }
 
-/// The headline claim: for every case, the plugin's tree equals the native
-/// pane's. Equal trees paint identically, so this is byte-identity of the pane.
+/// The headline claim: for every case, the pane the plugin draws is the pane the
+/// recording holds — and the recording is the native pane's tree.
 ///
-/// The recorded edge is asserted **first**, so a run in which both edges break
-/// reports the recording — the fact about the pane — rather than only that two
-/// implementations disagree.
+/// Equal trees paint identically (the same renderer paints both), so this is
+/// byte-identity of the pane without comparing a frame, and a failure localises to a
+/// line rather than to a cell.
+///
+/// The comparison runs through the *record* rather than through `assert_eq!` on
+/// trees for the reason the recorder documents: a lost bold is one visible word on
+/// one line, where two structural dumps have to be diffed by eye.
 #[test]
 fn the_plugin_builds_the_native_panes_view_tree() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
@@ -490,32 +439,26 @@ fn the_plugin_builds_the_native_panes_view_tree() {
     for case in cases() {
         thurbox::session::pane_context::publish(case.context());
         let plugin = render(&host);
-        let native = case.native_tree();
-        // Edge one: the checked-in expectation is the native pane's tree. This is
-        // the assertion that survives the handover, and the only moment its
-        // baseline can be shown to come from the pane rather than from the plugin
-        // is while the native builder is still here to generate it.
-        insta::assert_snapshot!(case.snapshot_name(), view_tree_record::tree(&native));
-        // Edge two: the plugin reproduces that recording — asserted through the
-        // records, so a failure names the line that moved instead of printing two
-        // structural dumps to diff by eye.
-        view_tree_record::assert_matches(case.name, &plugin, &native);
-        // Edge three: the port's original claim, exact rather than legible.
-        assert_eq!(
-            plugin, native,
-            "the plugin's tree diverges from the native pane for `{}`",
-            case.name
-        );
+        // Do not accept a moved snapshot. The expectation was generated from
+        // `ui::info_panel::info_tree` before it was deleted (ADR-42); regenerating it
+        // from this plugin would make the test unable to fail for the reason it
+        // exists.
+        insta::assert_snapshot!(case.snapshot_name(), view_tree_record::tree(&plugin));
     }
 }
 
-/// The rendered tree has to be non-trivial, or the equality above could pass on
-/// two empty lists. Counts the rows the full case must produce.
+/// The recorded tree has to be non-trivial, or the assertion above could pass on an
+/// empty list.
+///
+/// Counted from the **plugin's** tree now: the native builder that used to answer
+/// this is gone, and the recording it left is what the test above compares against.
+/// The numbers are unchanged, which is the point — they were true of the pane.
 #[test]
 fn the_compared_tree_is_a_whole_pane() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
-    let case = full_case();
-    let tree = case.native_tree();
+    let host = host();
+    thurbox::session::pane_context::publish(full_case().context());
+    let tree = render(&host);
     let rows = match &tree {
         ViewNode::List { children: rows, .. } => rows.len(),
         other => panic!("expected a list, got {}", other.kind_name()),

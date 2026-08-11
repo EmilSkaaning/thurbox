@@ -1015,15 +1015,17 @@ instead would put a VM call on the resize path (ADR-26). Its header wraps when
 label plus suffix overflow, and the bar moves down with it.
 
 **The view tree is kernel surface, not plugin-only.** `session::view_tree`,
-`session::motion` and `ui::plugin_pane` are ungated: thurbox's **info panel**
-(`ui::info_panel::info_tree`) builds a `ViewNode` and is painted by the same
-renderer, in every build — the Phase 0 exit criterion, and the evidence that the
-catalogue can carry a real v1 pane. Neither module references `mlua` or
-`crate::plugin`, so a stable build pays nothing for them. The port is held to
-**byte identity** by keeping the pre-port line builders under `#[cfg(test)]` as an
-oracle and comparing the two renderings cell by cell across widths, heights and
-content variants (`view_tree_render_matches_the_legacy_paragraph_cell_for_cell`),
-plus a pinned whole-pane frame.
+`session::motion` and `ui::plugin_pane` are ungated: thurbox's own panes
+(`ui::tasks_panel::tasks_tree`, `ui::file_viewer::file_tree`, …) build a `ViewNode`
+and are painted by the same renderer, in every build — the Phase 0 exit criterion,
+and the evidence that the catalogue can carry a real v1 pane. Neither module
+references `mlua` or `crate::plugin`, so a stable build pays nothing for them. Each
+port is held to **byte identity** by keeping its pre-port line builders under
+`#[cfg(test)]` as an oracle and comparing the two renderings cell by cell across
+widths, heights and content variants, plus a pinned whole-pane frame. The pane the
+criterion was first met on — the info panel — no longer has that oracle, because it
+no longer has a renderer: it was **handed over** to its plugin (ADR-50) and what
+holds it to the pane is a recorded view tree instead.
 
 **A plugin reads kernel state through a published snapshot** (ADR-27) — the
 mechanism that made the info panel writable *as* a plugin, closing
@@ -1066,19 +1068,30 @@ filter. Rejected: a `TaskReader` trait in `session` implemented by `storage` on
 the `plugin_store` pattern — four of the six fields a row draws are not in the
 database at all, so a plugin reading rows that way could not draw the pane.
 
-The bundled **`info-panel`** plugin (`src/plugin/bundled/info-panel/`) is the first
-native pane reproduced in Luau, and `tests/bundled_info_panel.rs` asserts its view
-tree **equals** `info_tree`'s across ten content variants — the same renderer paints
-both, so an equal tree is a byte-identical pane and a failure names a node rather
-than a cell. It is **additive**: `default_visible = false`, the native pane is still
-what thurbox draws, and `tests/teardown_gate.rs` keeps `src/ui/info_panel.rs`
-protected — a pane's replacement verdict requires **handover** (the plugin exists
-*and* `src/app/view.rs` no longer names the native renderer), because a
-reproduction is not a replacement. Two costs the port did not pay off, recorded in
-the audit's §7: the plugin pane is up to a second stale (the render worker polls on
-a ~1 s cycle — the session-list spike's event-driven-render condition, now wanted by
-a second pane), and every plugin will reimplement `format_bytes` until a
-`thurbox.format.*` table is designed from more than one pane's needs.
+The bundled **`info-panel`** plugin (`src/plugin/bundled/info-panel/`) **is**
+thurbox's info panel: `src/ui/info_panel.rs` is deleted (ADR-50) and this is the
+first pane the kernel does not draw. Its manifest binds the pane's identity —
+`slot = "center-left"` (the seat the native pane held), `toggle_action =
+"ToggleInfoPanel"` (F2/`Ctrl+B`), `feature = "info_panel"`, and `default_visible =
+false` because the native pane defaulted to hidden. `tests/bundled_info_panel.rs`
+holds it to the pane through ten **recordings** generated from
+`ui::info_panel::info_tree` while that builder existed (ADR-42) — the assertion that
+outlives a deletion, and one that must never be regenerated from the plugin.
+Consequences worth knowing: the panel's visibility now **persists** across restarts
+(plugin pane visibility is stored in `metadata`, where `show_info_panel` reset each
+launch); with no active session it draws a bordered `Info` column showing System
+rather than the borderless gap the native pane left; `ToggleInfoPanel` **reports
+which plugin provides the pane** when nothing claims the seat (a failed plugin, a
+user plugin of the same name, or a build with no plugin host); and
+`--no-default-features` has **no info panel at all**, deliberately — no seat is
+carved, so there is no empty column. Every other pane's replacement verdict still
+requires **handover** (the plugin exists *and* `src/app/view.rs` no longer calls the
+native renderer), because a reproduction is not a replacement. One cost the port
+recorded in the audit's §7 is still unpaid: every plugin reimplements `format_bytes`
+until a `thurbox.format.*` table is designed from more than one pane's needs. The
+other — a pane up to a second stale — was closed by the event-driven render trigger
+(ADR-49) before the handover, since a stale *reproduction* is tolerable and a stale
+*pane* is not.
 
 The bundled **`tasks`** plugin (`src/plugin/bundled/tasks/`) is the second, and the
 first *list* pane — the shape the four remaining Phase 4 panes have. From two
@@ -2574,7 +2587,7 @@ backend dependency stays visible at each call site.
   under headers — shared with `App`'s `Ctrl+J/K` navigation so
   the two never drift; `move_in_order` is the pure reorder step
   behind `Shift+J`/`Shift+K`),
-  `terminal_view`, `info_panel`,
+  `terminal_view`,
   `status_bar`, `repo_picker_modal` (repo selection with
   worktree toggle). `selection.rs` handles mouse-drag text
   selection, `links.rs` detects clickable URLs for Ctrl+Click.
@@ -2741,7 +2754,7 @@ Global keys use `Ctrl` + semantic Vim conventions:
 | `Ctrl+U` | Restore deleted sessions | **U**ndelete |
 | `Ctrl+Y` / `F4` | Pick TUI theme | Color **Y**oke |
 | `Ctrl+,` / `F6` | Settings panel (edit settings.toml) | **,** = preferences |
-| `Ctrl+B` / `F2` | Toggle info panel (visible at width >= 120) | Info **b**ox |
+| `Ctrl+B` / `F2` | Toggle info panel (a plugin pane; width >= 120) | Info **b**ox |
 | `Ctrl+E` / `F3` | Toggle file viewer | **E**xplore files |
 | `F9` | Toggle session-list pane (hide for full-width terminal) | Sessions list |
 | `F10` | Show/hide plugin panes — picker when >1 (`plugins` feature) | Plugin pane |

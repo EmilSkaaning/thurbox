@@ -2948,3 +2948,128 @@ and on the automations pane), and the session list has no outstanding *wiring* g
 left at all. A capability added to the vocabulary must now decide what it reads, and
 a field added to the published snapshot must decide which source it belongs to —
 both as compile errors.
+
+## ADR-50: The info panel is deleted, and a plugin is the pane
+
+**Context.** Phase 4 reproduced six of thurbox's own panes as bundled plugins and
+handed over none of them. PHASE4 §14 listed five things a handover needs and they
+closed one at a time: the build (ADR-40), the seat (ADR-46), the toggle and the
+feature flag (ADR-47), the recorded oracle (ADR-42, ADR-48), the render trigger
+(ADR-49). What still blocks the other five panes is **focus** — a seated pane is
+`InputFocus::PluginPane`, so `KeyContext::SessionList` / `Automations` / `Tasks` do
+not resolve — plus each pane's own recorded gap rows.
+
+The info panel is outside both. It declares no `input` capability, so it has no
+scoped keyboard, no cursor and no mutation, and it is the only reproduced pane with
+no gap file at all. Every change since §14 was made for it.
+
+**Decision.** `src/ui/info_panel.rs` is **deleted** — 2018 lines, including the
+pre-port line builders that were the view-tree port's byte-identity oracle. The Info
+column is `src/plugin/bundled/info-panel/init.luau`, drawn from the `center-left`
+seat, bound by its manifest to `ToggleInfoPanel` and gated by `[features]
+info_panel`. Five decisions the deletion needed:
+
+**The kernel's own occupant of the seat is deleted, not switched off.**
+`App::show_info_panel` goes with the renderer. Keeping the `bool` compiles and passes
+every existing test, and is wrong in a specific way: `layout_for` carves a seat when
+**either** occupant wants it (ADR-46), so a flag nobody paints from still carves the
+column. F2 in a build with no plugin host, or with a broken `info-panel` plugin,
+would have produced a bordered 15% column containing nothing — the exact failure
+`tests/teardown_gate.rs` exists to prevent, reached from inside the change meant to
+honour it. With the flag gone the seat's condition is `seat_taken(CenterLeft)`, so
+the impossible state is unrepresentable rather than merely untested. Consequences,
+both stated rather than absorbed: the panel's visibility is now **persisted** (plugin
+pane visibility lives in `metadata`) where the flag reset every launch, and a resize
+below 120 columns no longer *destroys* the choice — the layout declines the seat and
+widening brings the pane back.
+
+**The seed stays hidden.** `default_visible = false`, because `show_info_panel`
+initialised to `false` and F2 showed the panel: a handover changes which code draws a
+pane, not whether it is on screen. `tests/bundled_manifests.rs`'s
+`PANES_DRAWN_IN_A_NATIVE_PANES_PLACE` **permits** a handed-over pane to seed visible
+— its argument is that "visible *and* duplicated" is the mistake — and does not ask
+for it. Seeding visible would also have changed every ≥120-column install's first
+launch with nothing failing: the acceptance snapshots render at 100 columns, below
+the width at which this seat is carved, which is the same fact that made §14's
+proposed proof vacuous. The pane is still added to that list, so the list answers
+"which bundled panes are no longer reproductions".
+
+**The empty state is decided, not discovered.** §14 found the one divergence no
+oracle covered: with no active session `render_info_panel` returned *before* painting
+its block, so the seat was a borderless gap, while a plugin pane's frame is the
+kernel's and is always painted. The plugin's behaviour is **accepted** — a bordered
+`Info` column showing System (host CPU, RAM, thurbox's data-dir size) and any
+upcoming automations. An empty bordered box would be strictly worse than both, and
+not carving the seat without a session would put a *content* condition into the
+layout that no other seat has and that the kernel cannot evaluate without knowing
+what the plugin will draw. Pinned as a frame, since the tree was already pinned.
+
+**A pane that cannot receive input records no click target.** Found by driving the
+handover rather than by a test. `handle_mouse_click` hit-tests the click registry
+*before* the pane fallback that arms drag-select, and that fallback covers the info
+column — which is how text is selected out of it. Every visible plugin pane recorded
+a whole-rect `PluginPaneRow` target, and for a pane with no `input` both handlers
+already refuse it (`focus_plugin_pane` will not focus it; `offer_click_to_plugin`
+reads the *focused* pane), so the target's only effect was to consume the click. The
+registry now agrees with the two guards. Registering a target whose only effect is to
+swallow a click was the bug; the handover is what made it observable.
+
+**The evidence is the recording, and it was not regenerated.** The oracle asserted
+three edges; two named `info_tree`, which this change deletes. What is left is
+`plugin == recording`, and the ten `.snap` files are **byte-identical** after the
+deletion — which is the whole payoff of ADR-42, since a `cargo insta accept` here
+would have converted ten statements about the pane into ten statements about the
+plugin. `Case` carries the published `SystemSnapshot` / `UpcomingAutomationSnapshot`
+instead of the deleted types, and the `SessionInfo → SessionSnapshot` derivation is
+untouched because it mirrors `App::build_pane_context`.
+
+**Consequences.** `SystemMetrics` moves to `src/app/metrics_state.rs`, whose
+`MetricsState` owns the value — it is an input the collector produces for one
+consumer, not shared vocabulary, and `session::pane_context::SystemSnapshot` is
+already `session`'s spelling of the same five numbers. `AutomationEntry` is deleted
+rather than moved: it carried a pre-rendered countdown *string*, and the snapshot
+carries seconds. `ToggleInfoPanel` keeps its `[features]` gate and, when nothing
+claims the seat, **reports which plugin provides the pane** — the honest surface for a
+failed bundled plugin, for a user plugin of the same name that shadowed it, and for a
+build with no plugin host. `set_plugin_pane_visible` now resizes the sessions, which
+every kernel panel toggle already did and no plugin-pane path did; showing the Info
+column narrows the agent's terminal, so its PTY has to be told.
+
+A **new failure mode** arrives with the pane: a broken `info-panel` plugin costs the
+Info column, where before it cost nothing. Driving it shows two distinct cases, and
+the distinction is why the action's report had to exist rather than being a nicety:
+
+- a **load** failure (a syntax error, a top-level `error()`) means the plugin has no
+  pane, so nothing claims the seat and nothing is drawn — and F2 would have been
+  *silent*. It reports `Info panel: provided by the \`info-panel\` plugin, which has
+  no pane here (see \`thurbox-cli plugin doctor\`)`. Fixing the file recovers the
+  column on the next source poll, without a keystroke, because the stored visibility
+  is still the user's.
+- a **render** failure (an error inside `render`) keeps the pane: its title becomes
+  `Info (error)` and the body shows `failed: …` over the last good tree
+  (`paint_plugin_pane`), which is the pane-level containment `plugin-host/panes`
+  already required.
+
+Not mitigated away: it is what "every pane a plugin" means, and both cases name
+themselves.
+
+**`--no-default-features` loses the pane, deliberately.** That build has no plugin
+host. It gets no empty column (the seat is carved only by a claim, and no claim can
+exist), no silent key (`toggle_panes_bound_to` is already a `false` stub there, so
+the action reports the absence — in that build's own words, since it ships no
+`thurbox-cli plugin` subcommand to send anyone to), and no orphaned state. Keeping the renderer under
+`#[cfg(not(feature = "plugins"))]` was refused: `migration/phase-4` forbids exactly
+that, and for a good reason — it produces two panes that differ by build, and the one
+users install is the one nobody tests hardest. Stage B put `plugins` in the default
+feature set precisely so no install is in this position, and the teardown gate fails
+if it ever leaves.
+
+**Not done: the code review.** It was the other pane proposed for this change and it
+is refused. `tests/code_review_pane_handover_gap.rs` re-derives eleven rows and ten
+are still blocked: two seats (its changed-files list wants `RegionId::FileViewer`,
+which no slot names), a keyboard that is a `self.focus` capture rather than scoped
+actions and therefore not rebindable at all today, and five operations no capability
+performs (review writes, `git` retargeting, clipboard/agent export, cursor writes, a
+resolved width). Deleting `src/ui/code_review.rs` would replace a mouse-first,
+eleven-button, searchable, retargetable review with a scrollable read-only document.
+ADR-45's ordering stands.

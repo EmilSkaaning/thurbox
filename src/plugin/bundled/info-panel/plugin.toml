@@ -1,14 +1,14 @@
-# thurbox's info panel, as a plugin.
+# thurbox's info panel.
 #
-# Phase 4 of the v2 migration turns the native panes into bundled plugins, and
-# this is the first. It is a *reproduction*, not a replacement: the native pane
-# is still what thurbox draws, and `tests/bundled_info_panel.rs` asserts this
-# plugin builds the identical view tree — so the two cannot drift while both
-# exist.
+# Not a reproduction any more: `src/ui/info_panel.rs` is deleted and this is the
+# pane (ADR-50). It is the first of thurbox's own panes the kernel does not draw,
+# and the measure of the whole v2 pane model — what it can do is what a third
+# party's plugin can do, because every host power below is a declared capability.
 #
-# It uses no privileged surface. Every host power below is a declared capability
-# a user's own plugin can request, which is the whole point of shipping the pane
-# this way: what it can do is what a third party can do.
+# `tests/bundled_info_panel.rs` still holds it to the native pane's tree: the
+# eleven checked-in recordings under `tests/snapshots/` were generated from
+# `ui::info_panel::info_tree` while it existed, so they are a statement about the
+# pane rather than about this file.
 name = "info-panel"
 api_version = 1
 
@@ -19,12 +19,24 @@ capabilities = ["render", "sessions", "metrics", "automations"]
 
 [[panes]]
 id = "info"
-title = "Info (plugin)"
-# The seat the native info panel occupies: the narrow column left of centre
-# (ADR-46). Showing this pane draws it there and stands the native one down, so
-# the two are compared in one rect rather than side by side.
+# The native pane's title, not "Info (plugin)": a name that marks the pane as a
+# plugin is right for a copy drawn beside the original and wrong for the pane.
+title = "Info"
+# The seat the info panel occupies: the narrow column left of centre (ADR-46).
+# Nothing else can occupy it — the kernel's own pane for this seat was deleted
+# with its renderer — so the seat is carved by this claim or not at all.
 slot = "center-left"
-# Off by default: a bundled pane must not arrive on screen unasked, and until it
-# is shown the native info panel is what that column draws. Turn it on to compare
-# them.
+# The key that always showed the info panel (ADR-47). With no kernel pane left for
+# this seat it is the *only* thing the action does, and firing it twice still
+# returns the pane to where it started.
+toggle_action = "ToggleInfoPanel"
+# The switch that always gated the info panel. Off, this is not a pane: not shown,
+# no seat, not rendered — and the user's stored visibility survives, so turning it
+# back on restores what they had.
+feature = "info_panel"
+# Hidden, because `App::show_info_panel` initialised to `false`: a handover changes
+# which code draws a pane, not whether it is on screen. The exemption in
+# `tests/bundled_manifests.rs` permits a handed-over pane to seed visible; it does
+# not ask it to, and no acceptance snapshot would catch the change (they render at
+# 100 columns, below the width at which this seat is carved at all).
 default_visible = false

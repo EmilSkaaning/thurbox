@@ -158,12 +158,27 @@ const REPLACEMENTS: &[Replacement] = &[
     // third argument is the pane's native renderer module, which is how the probe
     // below asks whether the handover happened; the fourth is the oracle that has
     // to hold a recording before the handover may take that module away.
-    pane(
-        "info-panel-plugin",
-        "the info panel",
-        "info_panel",
-        Some("bundled_info_panel"),
-    ),
+    // The first pane handed over (ADR-50): `src/ui/info_panel.rs` is deleted and the
+    // bundled plugin draws the Info column. Recorded ready, which is what releases
+    // its unit's path below — and the row stays here rather than being removed,
+    // because a ready verdict is a fact the probe re-derives and a deleted row would
+    // be a fact nobody checks.
+    Replacement {
+        id: "info-panel-plugin",
+        v1_capability: "the info panel",
+        v2_home: "a bundled plugin under src/plugin/bundled/, drawn instead of the native pane",
+        ready: true,
+        probe: |root, id| {
+            pane_is_handed_over(
+                bundled_plugin_exists(root, id),
+                view_draws_native_pane(root, id),
+                plugin_host_reaches_the_installed_build(root),
+                pane_oracle_records_the_native_tree(root, id),
+            )
+        },
+        native_module: Some("info_panel"),
+        oracle: Some("bundled_info_panel"),
+    },
     pane(
         "tasks-plugin",
         "the tasks pane",
@@ -382,13 +397,26 @@ fn bundled_plugin_exists(root: &Path, id: &str) -> bool {
 ///
 /// Resolved through the row rather than passed in, so the probe stays a plain
 /// `fn` pointer and the module name lives in exactly one place — the table.
+///
+/// The needle is `<module>::` — a **call into** the module — not the bare module
+/// name. The bare name was enough while every pane was still drawn, and the first
+/// handover showed why it is not: `src/app/view.rs` also names each seat's rect
+/// (`areas.info_panel`) and each footer flag (`features.info_panel`), so a pane whose
+/// renderer was deleted still "mentioned" its module and the row could never be
+/// recorded ready. Both survivors are the *layout's* vocabulary for a seat, which
+/// outlives whichever code paints it — the point of ADR-46.
+///
+/// A stale `use` of a module nothing calls would slip past this needle, and does not
+/// need to be caught here: it is an unused import, which `cargo clippy -- -D
+/// warnings` already refuses. Every native renderer is invoked module-qualified from
+/// this one file, so the rule stays uniform across the panes.
 fn view_draws_native_pane(root: &Path, id: &str) -> bool {
     let module = REPLACEMENTS
         .iter()
         .find(|r| r.id == id)
         .and_then(|r| r.native_module)
         .unwrap_or_else(|| panic!("pane row `{id}` names no native renderer module"));
-    source(root, "src/app/view.rs").contains(module)
+    source(root, "src/app/view.rs").contains(&format!("{module}::"))
 }
 
 /// What the teardown deletes, and what each deletion waits on.
@@ -624,13 +652,32 @@ fn readiness_is_derived_from_the_verdicts() {
     // The headline blocker: status reporting is still delivered by the installer
     // the teardown deletes.
     assert!(blocked.contains(&"hooks-in-kernel"));
-    // No pane has a plugin to become the default, so no native pane may go.
+    // Every pane row *except* one handed over is a blocker, so its renderer may not
+    // go. Written as "each blocked row is a blocker" rather than "every pane row is",
+    // because the handover of one pane must not read as the gate weakening for the
+    // rest: `every_listed_path_survives_until_its_unit_is_ready` still protects each
+    // of the six, from these same verdicts.
+    let handed_over: Vec<&str> = REPLACEMENTS
+        .iter()
+        .filter(|r| r.v2_home.contains("bundled") && r.ready)
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(
+        handed_over,
+        vec!["info-panel-plugin"],
+        "the handed-over set is a deliberate list, so a second pane joining it is a \
+         decision made here and not a side effect"
+    );
     for r in REPLACEMENTS
         .iter()
-        .filter(|r| r.v2_home.contains("bundled"))
+        .filter(|r| r.v2_home.contains("bundled") && !r.ready)
     {
         assert!(blocked.contains(&r.id), "{} is recorded ready", r.id);
     }
+    assert!(
+        !blocked.contains(&"info-panel-plugin"),
+        "the info panel is handed over, so its row is not a blocker"
+    );
     // A row recorded ready is not a blocker.
     assert!(!blocked.contains(&"self-heal"));
 
@@ -646,34 +693,64 @@ fn readiness_is_derived_from_the_verdicts() {
 /// pane whose plugin exists but whose native renderer is still drawn is **not**
 /// ready.
 ///
-/// This is not a restatement of the probe. It pins the *reason* the info panel's
-/// row is blocked — a reproduction is not a replacement — so that "simplifying"
-/// the probe back to "does a plugin directory exist" fails here with the
-/// argument attached, rather than quietly permitting the deletion of the pane
-/// every user is looking at.
+/// This is not a restatement of the probe. It pins the *reason* a reproduced pane's
+/// row is blocked — a reproduction is not a replacement — so that "simplifying" the
+/// probe back to "does a plugin directory exist" fails here with the argument
+/// attached, rather than quietly permitting the deletion of the pane every user is
+/// looking at.
+///
+/// The worked example is the **tasks pane**, and that choice is load-bearing. It was
+/// the info panel until the info panel was handed over (ADR-50), at which point every
+/// assertion here would have been false — and the repair that passes is to flip them,
+/// which turns an argument about why a row is blocked into a record of what the tree
+/// happens to say. So the example must always name a pane the interface still draws;
+/// `the_example_pane_is_still_drawn_natively` is what fails if it stops being one.
 #[test]
 fn a_reproduced_pane_is_not_a_replaced_one() {
     let root = repo_root();
     assert!(
-        bundled_plugin_exists(&root, "info-panel-plugin"),
-        "the info panel's bundled plugin should exist — if it was removed, this \
-         test no longer proves anything and should be revisited with it"
+        bundled_plugin_exists(&root, EXAMPLE_BLOCKED_PANE),
+        "{EXAMPLE_BLOCKED_PANE}'s bundled plugin should exist — if it was removed, \
+         this test no longer proves anything and should be revisited with it"
     );
     assert!(
-        view_draws_native_pane(&root, "info-panel-plugin"),
-        "the native info panel should still be what the interface draws"
+        view_draws_native_pane(&root, EXAMPLE_BLOCKED_PANE),
+        "the native pane should still be what the interface draws"
     );
     assert!(
-        !replacement("info-panel-plugin").ready,
+        !replacement(EXAMPLE_BLOCKED_PANE).ready,
         "a pane reproduced by a plugin, while the native one is still drawn, is \
-         not handed over: deleting src/ui/info_panel.rs would remove what users see"
+         not handed over: deleting its renderer would remove what users see"
     );
     // And the recorded verdict agrees with the probe, which is the general rule
     // `recorded_verdicts_match_the_tree` enforces for every row.
-    assert!(!(replacement("info-panel-plugin").probe)(
+    assert!(!(replacement(EXAMPLE_BLOCKED_PANE).probe)(
         &root,
-        "info-panel-plugin"
+        EXAMPLE_BLOCKED_PANE
     ));
+}
+
+/// The pane the test above illustrates with, named once.
+///
+/// A `const` rather than a literal in four places, so moving the example after the
+/// next handover is one edit and cannot be done halfway.
+const EXAMPLE_BLOCKED_PANE: &str = "tasks-plugin";
+
+/// The example must name a pane that is still drawn natively, or the illustration
+/// above comes to assert the opposite of the tree and the passing repair is to
+/// invert it.
+///
+/// Separate from the test it guards because the failure it wants to produce is
+/// specific: "the example pane was handed over — move the example", not "a bundled
+/// plugin is missing".
+#[test]
+fn the_example_pane_is_still_drawn_natively() {
+    assert!(
+        !replacement(EXAMPLE_BLOCKED_PANE).ready,
+        "`{EXAMPLE_BLOCKED_PANE}` is the worked example of a *blocked* row and it is \
+         now handed over. Point EXAMPLE_BLOCKED_PANE at a pane the interface still \
+         draws, in the change that hands this one over — do not flip the assertions"
+    );
 }
 
 /// The other half of the pane probe that is easy to get wrong: a pane handed to a
@@ -717,12 +794,14 @@ fn the_build_condition_holds_and_still_gates_a_handover() {
     // in: the condition gated a release decision rather than forbidding handover.
     assert!(pane_is_handed_over(true, false, true, true));
 
-    // Consequence today: with the build condition met, each pane row is blocked
-    // by its own pane-level reason — the interface still draws all seven native
-    // renderers — so a handover is now pane work rather than a release decision.
+    // Consequence today: with the build condition met, each *blocked* pane row is
+    // blocked by its own pane-level reason — the interface still draws its native
+    // renderer — so a handover is pane work rather than a release decision. A row
+    // already handed over is skipped: it no longer names a renderer `view.rs` draws,
+    // which is precisely what made it ready.
     for r in REPLACEMENTS
         .iter()
-        .filter(|r| r.v2_home.contains("bundled"))
+        .filter(|r| r.v2_home.contains("bundled") && !r.ready)
     {
         assert!(
             view_draws_native_pane(&root, r.id),
@@ -819,6 +898,13 @@ fn every_reproduced_pane_records_its_native_tree() {
 
 /// Every pane row must name a native renderer, or its probe would panic the first
 /// time the pane's plugin appeared — which is exactly when the gate matters.
+///
+/// For a **blocked** row the module must also still be mentioned by `src/app/view.rs`,
+/// which is the direction only a blocked row satisfies: a handover's whole content is
+/// that the mention is gone. So a ready row is checked for naming a module and not for
+/// the tree still using it — otherwise this rule would fail on the first handover and
+/// the passing repair would be to delete it, taking the check for the other six with
+/// it.
 #[test]
 fn every_pane_row_names_its_native_renderer() {
     let root = repo_root();
@@ -829,9 +915,22 @@ fn every_pane_row_names_its_native_renderer() {
         let module = r
             .native_module
             .unwrap_or_else(|| panic!("{} names no native renderer module", r.id));
+        // The same needle the probe uses, so this rule and the verdict cannot
+        // disagree about what "still drawn" means.
+        let called = view_draws_native_pane(&root, r.id);
+        if r.ready {
+            assert!(
+                !called,
+                "{}: recorded handed over, but src/app/view.rs still calls \
+                 `{module}::` — a ready row whose renderer is still drawn is the one \
+                 state the four conditions forbid",
+                r.id
+            );
+            continue;
+        }
         assert!(
-            source(&root, "src/app/view.rs").contains(module),
-            "{}: src/app/view.rs no longer mentions `{module}` — either the pane \
+            called,
+            "{}: src/app/view.rs no longer calls `{module}::` — either the pane \
              was handed over (re-verdict the row) or the module was renamed",
             r.id
         );

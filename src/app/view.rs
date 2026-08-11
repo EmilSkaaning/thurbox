@@ -18,9 +18,9 @@ use crate::ui::selection;
 use crate::ui::theme::Theme;
 use crate::ui::{
     agent_picker_modal, automation_editor_modal, automations_list_modal, automations_panel,
-    branch_selector_modal, file_viewer, global_search, info_panel, project_list,
-    restore_sessions_modal, session_name_modal, status_bar, task_editor_modal, tasks_panel,
-    terminal_view, theme_picker_modal, worktree_name_modal,
+    branch_selector_modal, file_viewer, global_search, project_list, restore_sessions_modal,
+    session_name_modal, status_bar, task_editor_modal, tasks_panel, terminal_view,
+    theme_picker_modal, worktree_name_modal,
 };
 
 #[cfg(feature = "plugins")]
@@ -155,7 +155,8 @@ impl App {
         self.render_header(frame, areas.header);
         self.render_left_panel(frame, areas.left_panel);
         self.render_automations_pane(frame, areas.automations_panel);
-        self.render_info_panel(frame, areas.info_panel);
+        // No `render_info_panel`: the Info column is a bundled plugin's pane
+        // (ADR-50), painted by `render_plugin_panes` from the `center-left` seat.
         self.render_tasks_panel(frame, areas.tasks_panel);
         #[cfg(feature = "plugins")]
         self.render_plugin_panes(frame, &areas);
@@ -499,64 +500,15 @@ impl App {
         );
     }
 
-    /// Render the info panel for the active session (when present).
-    ///
-    /// A plugin pane that claimed this seat draws it instead (ADR-46).
-    fn render_info_panel(&self, frame: &mut Frame, info_area: Option<Rect>) {
-        let Some(info_area) = info_area else {
-            return;
-        };
-        if self.seat_taken(PaneSlot::CenterLeft) {
-            return;
-        }
-        let Some(info) = self.sessions.get(self.active_index).map(|s| &s.info) else {
-            return;
-        };
-        let now = crate::sync::current_time_millis();
-        // Usage is scoped per (agent, host): a remote session shows the
-        // account its *host* is logged into, not the local one.
-        let usage_key = (info.agent.clone(), info.remote_host.clone());
-        let agent_usage = self.usage.get(&usage_key);
-        // Skip the upcoming-automations section entirely when the feature is
-        // off: the TUI won't fire those schedules, so advertising their
-        // countdowns here (the cache is loaded from the DB regardless) would
-        // surface a disabled feature. Mirrors the footer badge being zeroed.
-        let automation_entries: Vec<info_panel::AutomationEntry> = self
-            .automation_ui
-            .cached_automations
-            .iter()
-            .filter(|_| self.features.automations)
-            .filter(|a| a.enabled && a.next_run_at.is_some())
-            .map(|a| {
-                let remaining = a.next_run_at.unwrap_or(now).saturating_sub(now);
-                info_panel::AutomationEntry {
-                    label: truncate_str(&a.name, 30),
-                    countdown: crate::ui::format_countdown(remaining / 1_000),
-                }
-            })
-            .collect();
-        // Resolved by the model, so the published pane-context snapshot names a
-        // vanished parent exactly as this pane does.
-        let parent_name = self.parent_display_name(info);
-        info_panel::render_info_panel(
-            frame,
-            info_area,
-            info,
-            Some(&self.metrics.system_metrics),
-            &automation_entries,
-            agent_usage,
-            parent_name.as_deref(),
-            self.metrics.thurbox_dir_bytes,
-        );
-    }
-
     /// Draw each visible plugin pane into the region the layout gave it.
     ///
     /// Two kinds of placement, and one painter for both (ADR-46). A pane whose
     /// slot names a **seat** is painted into that seat's rect — the same rect the
     /// kernel's own pane for it would have had, which is why the guards in
-    /// `render_left_panel`, `render_automations_pane`, `render_info_panel` and
-    /// `render_central_pane` step aside. Every other visible pane is a right-column
+    /// `render_left_panel`, `render_automations_pane` and `render_central_pane`
+    /// step aside. The `center-left` seat has no such guard: its kernel occupant
+    /// was deleted with the info panel's renderer (ADR-50), so a claim is the only
+    /// thing that ever draws there. Every other visible pane is a right-column
     /// occupant, zipped against `areas.plugin_panes` — which can be **shorter**
     /// than that list when the terminal has room for only some of them, and the
     /// `zip` is what leaves the rest unpainted.
@@ -568,8 +520,9 @@ impl App {
     fn render_plugin_panes(&mut self, frame: &mut Frame, areas: &layout::PanelAreas) {
         // What each pane painted, collected while `self` is borrowed immutably and
         // recorded afterwards — the click registry needs `&mut self`, and a pane's
-        // hitboxes have to come from the paint that produced them.
-        let mut painted: Vec<(String, String, Rect, Vec<crate::ui::RowHitbox>)> = Vec::new();
+        // hitboxes have to come from the paint that produced them. The `bool` is
+        // whether the pane can be clicked at all; see the recording loop below.
+        let mut painted: Vec<(String, String, Rect, bool, Vec<crate::ui::RowHitbox>)> = Vec::new();
 
         // Seats first, in the order the native panes are drawn in. Each holds one
         // pane, so a second claimant is simply not placed.
@@ -583,7 +536,13 @@ impl App {
                 continue;
             };
             let rows = Self::paint_plugin_pane(frame, pane, rect, &self.motion);
-            painted.push((pane.plugin.clone(), pane.id.clone(), rect, rows));
+            painted.push((
+                pane.plugin.clone(),
+                pane.id.clone(),
+                rect,
+                pane.accepts_input,
+                rows,
+            ));
         }
 
         let features = self.features;
@@ -593,13 +552,31 @@ impl App {
             .filter(|p| p.is_shown(&features) && p.slot == PaneSlot::Right);
         for (pane, &rect) in column.zip(&areas.plugin_panes) {
             let rows = Self::paint_plugin_pane(frame, pane, rect, &self.motion);
-            painted.push((pane.plugin.clone(), pane.id.clone(), rect, rows));
+            painted.push((
+                pane.plugin.clone(),
+                pane.id.clone(),
+                rect,
+                pane.accepts_input,
+                rows,
+            ));
         }
 
         // Rows first, then the pane's whole rect — the registry's first match
         // wins, so an on-row click reports its row and a click anywhere else in
         // the pane only focuses it.
-        for (plugin, pane, area, rows) in painted {
+        //
+        // A pane whose plugin never declared `input` records **nothing**. Both
+        // halves of the target are already no-ops for such a pane —
+        // `focus_plugin_pane` refuses it and `offer_click_to_plugin` reads the
+        // *focused* pane — so its only effect was to consume the click, and the
+        // registry is hit-tested before `handle_mouse_click`'s pane fallback. That
+        // fallback is what arms drag-select over the info panel's column, so
+        // recording a target there would have silently ended text selection in the
+        // one pane whose values a user copies out (ADR-50).
+        for (plugin, pane, area, clickable, rows) in painted {
+            if !clickable {
+                continue;
+            }
             for hit in rows {
                 self.record_click(
                     hit.rect,

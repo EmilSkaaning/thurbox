@@ -11,14 +11,13 @@ pub mod file_viewer;
 pub mod global_search;
 pub mod highlight;
 pub mod host_picker_modal;
-pub mod info_panel;
 pub mod layout;
 pub mod links;
 pub mod markdown;
 pub mod overlay;
 pub mod perf_hud;
 // Ungated with `session::view_tree`: this is the renderer for *any* view tree,
-// and `info_panel` is its first kernel-side caller.
+// kernel pane or plugin pane, so it compiles in a build with no plugin host.
 pub mod plugin_pane;
 pub mod plugin_panes_modal;
 pub mod project_list;

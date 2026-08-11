@@ -501,7 +501,7 @@ struct MetricsRefresh {
     /// refreshes (it is moved into the worker for the duration).
     sys: sysinfo::System,
     /// Aggregate machine + active-session metrics for the info panel.
-    metrics: crate::ui::info_panel::SystemMetrics,
+    metrics: metrics_state::SystemMetrics,
     /// Per-session agent metrics parsed from statusline JSON files.
     agent_metrics: Vec<(SessionId, crate::session::AgentMetrics)>,
 }
@@ -539,7 +539,7 @@ fn collect_system_metrics(
         })
         .unwrap_or((0.0, 0));
 
-    let metrics = crate::ui::info_panel::SystemMetrics {
+    let metrics = metrics_state::SystemMetrics {
         cpu_percent,
         memory_used,
         memory_total,
@@ -1063,7 +1063,6 @@ pub struct App {
     /// like `features` and re-applied on a live reload — the render path reads
     /// it every frame, so it cannot come from the write-once global.
     pub(crate) motion_settings: crate::session::settings::MotionSettings,
-    pub(crate) show_info_panel: bool,
     /// Whether the tasks panel column is shown (toggled like the file viewer).
     pub(crate) show_tasks_panel: bool,
     /// Plugin-contributed panes and what each is currently showing.
@@ -1484,7 +1483,6 @@ impl App {
             session_counter,
             features: crate::session::settings::global().features,
             motion_settings: crate::session::settings::global().motion,
-            show_info_panel: false,
             show_tasks_panel: false,
             published_pane_context: None,
             #[cfg(feature = "plugins")]
@@ -1704,10 +1702,12 @@ impl App {
     /// keep rendering its panel even though its tab/footer affordance is gone.
     /// Each branch only forces the *hidden* state, so it's idempotent and never
     /// re-opens anything when a flag is turned back on.
+    ///
+    /// `info_panel` has no branch: that pane is a plugin's (ADR-50), and a plugin
+    /// pane's own `feature` declaration is enforced by `PluginPane::is_shown` on
+    /// every read of visibility — which is live, and which also preserves the
+    /// user's stored choice across the switch going off and on.
     fn enforce_feature_visibility(&mut self) {
-        if !self.features.info_panel {
-            self.show_info_panel = false;
-        }
         if !self.features.file_viewer {
             self.show_file_viewer = false;
             if self.focus == InputFocus::FileViewer {
@@ -4744,8 +4744,13 @@ impl App {
 
         // Collapse the optional right-side panels if the terminal gets too
         // narrow (they only render at width >= 120 anyway).
+        //
+        // The Info column is not among them any more: it is a plugin pane
+        // (ADR-50), whose visibility is the user's stored choice rather than a
+        // transient `show_*` flag. `compute_layout` already refuses the seat below
+        // 120 columns, so narrowing hides it and widening brings it back —
+        // destroying the choice on a resize would be the worse behaviour of the two.
         if cols < 120 {
-            self.show_info_panel = false;
             self.show_tasks_panel = false;
             // Rescue the editor too, not just the list — otherwise focus stays
             // on the hidden panel's editor, which keeps capturing every key.
@@ -8225,6 +8230,13 @@ impl App {
         if let Err(e) = self.db.set_plugin_pane_visible(plugin, pane, visible) {
             tracing::warn!("cannot persist plugin pane visibility: {e}");
         }
+        // Showing or hiding a pane changes the central pane's width, so the agent's
+        // PTY has to be told — exactly as every kernel panel toggle does. It was
+        // missing here while every plugin pane was a right-column reproduction
+        // nobody left on; the info panel's handover makes this the *only* path that
+        // resizes the terminal for that column (ADR-50), and an agent redrawing at
+        // the wrong width until the next unrelated resize is the visible cost.
+        self.resize_sessions_to_content_area();
         self.needs_redraw = true;
     }
 
@@ -8527,12 +8539,17 @@ impl App {
     /// A seat is carved when **either** occupant wants it: the kernel's own pane,
     /// or a plugin pane that claimed the seat (ADR-46). Without a claim every
     /// expression below is what it was, which is why seating changed no geometry.
+    ///
+    /// `center-left` is the one seat with a *single* possible occupant: the info
+    /// panel's renderer is deleted (ADR-50), so a claim is the whole condition. That
+    /// is why the kernel's flag went with the renderer rather than being left
+    /// switched off — a `bool` nobody paints from would still carve the column.
     pub(crate) fn layout_for(&self, area: Rect) -> layout::PanelAreas {
         layout::compute_layout(
             area,
             layout::LayoutParams {
                 show_session_list: self.show_session_list || self.seat_taken(PaneSlot::Left),
-                show_info_panel: self.show_info_panel || self.seat_taken(PaneSlot::CenterLeft),
+                show_info_panel: self.seat_taken(PaneSlot::CenterLeft),
                 show_tasks_panel: self.show_tasks_panel,
                 // The review's changed-files list lives in the file-viewer
                 // column, so force that column present while a review is open.
@@ -10548,14 +10565,71 @@ mod tests {
         assert!(app.file_viewer.search_active);
     }
 
+    /// A pane bound to `ToggleInfoPanel`, as the bundled `info-panel` plugin
+    /// declares one. The tests below need the *binding*, not the plugin: they are
+    /// about what the key does to a seat, and starting a Luau VM here would make
+    /// them a test of discovery instead.
+    #[cfg(feature = "plugins")]
+    fn info_pane(visible: bool) -> crate::plugin::PluginPane {
+        use crate::session::plugin_manifest::PaneSlot;
+        let mut pane = crate::plugin::PluginPane::loading(
+            "info-panel",
+            "info",
+            "Info",
+            PaneSlot::CenterLeft,
+            visible,
+        );
+        pane.toggle_action = Some(crate::session::Action::ToggleInfoPanel);
+        pane.feature = Some(crate::session::settings::FeatureFlag::InfoPanel);
+        pane
+    }
+
+    /// F2 shows and hides the pane that replaced the info panel (ADR-50). The
+    /// kernel has no flag of its own for this seat any more, so the assertion is
+    /// on the seat: carved when the pane is shown, absent when it is not.
+    #[cfg(feature = "plugins")]
     #[test]
-    fn f2_toggles_info_panel() {
-        let mut app = app_with_sessions(0);
-        assert!(!app.show_info_panel);
+    fn f2_toggles_the_info_pane_and_its_seat() {
+        let mut app = app_with_sessions(1);
+        app.update(AppMessage::Resize(160, 40));
+        app.set_plugin_panes(vec![info_pane(false)]);
+        assert!(app.screen_layout().info_panel.is_none());
+
         app.handle_key(KeyCode::F(2), KeyModifiers::NONE);
-        assert!(app.show_info_panel);
+        assert_eq!(app.plugin_pane_visible("info-panel", "info"), Some(true));
+        assert!(
+            app.screen_layout().info_panel.is_some(),
+            "showing the pane carves the seat it claims"
+        );
+
         app.handle_key(KeyCode::F(2), KeyModifiers::NONE);
-        assert!(!app.show_info_panel);
+        assert_eq!(app.plugin_pane_visible("info-panel", "info"), Some(false));
+        assert!(app.screen_layout().info_panel.is_none());
+    }
+
+    /// The failure mode a handover creates: nothing provides the pane. It must not
+    /// carve an empty column, and it must not be silent — a key that does nothing
+    /// is indistinguishable from a broken binding.
+    ///
+    /// Runs in both build configurations, and means the same in each: without the
+    /// plugin host no pane can be bound at all, which is exactly the state this
+    /// asserts.
+    #[test]
+    fn f2_reports_when_no_pane_provides_the_info_panel() {
+        let mut app = app_with_sessions(1);
+        app.update(AppMessage::Resize(160, 40));
+
+        app.handle_key(KeyCode::F(2), KeyModifiers::NONE);
+        assert!(
+            app.screen_layout().info_panel.is_none(),
+            "nothing draws the Info column, so the seat must not be carved"
+        );
+        let msg = app.status_message.take().expect("the key reports");
+        // The wording differs by build — one names the plugin and its doctor, the
+        // other says this binary has no plugin host — so the assertion is on what
+        // both must carry: that a plugin is what provides the pane.
+        assert!(msg.text.contains("Info panel:"), "{}", msg.text);
+        assert!(msg.text.contains("plugin"), "{}", msg.text);
     }
 
     #[test]
@@ -10676,8 +10750,11 @@ mod tests {
         assert!(!app.show_file_viewer);
         assert!(app.status_message.take().unwrap().text.contains("disabled"));
 
+        // F2 is gated by `info_panel` even though the pane it shows is a plugin's:
+        // the switch is what the manifest named, and the gate runs before the
+        // pane's own report.
         app.handle_key(KeyCode::F(2), KeyModifiers::NONE);
-        assert!(!app.show_info_panel);
+        assert!(app.screen_layout().info_panel.is_none());
         assert!(app.status_message.take().unwrap().text.contains("disabled"));
 
         app.handle_key(KeyCode::Char('/'), KeyModifiers::CONTROL);
@@ -10787,18 +10864,31 @@ mod tests {
         );
     }
 
+    /// Showing the Info column narrows the agent's terminal, and the PTY has to be
+    /// told. It is the same claim as `f3_toggle_resizes_session_parser`, but it now
+    /// travels through the plugin-pane visibility write rather than a `show_*` flag
+    /// — which is where the resize was missing until the handover (ADR-50).
+    #[cfg(feature = "plugins")]
     #[test]
     fn f2_toggle_resizes_session_parser() {
         let mut app = app_with_sessions(1);
         app.update(AppMessage::Resize(160, 40));
+        app.set_plugin_panes(vec![info_pane(false)]);
         let before = session_parser_size(&app, 0);
 
         app.handle_key(KeyCode::F(2), KeyModifiers::NONE);
         let after = session_parser_size(&app, 0);
-        assert!(app.show_info_panel);
+        assert_eq!(app.plugin_pane_visible("info-panel", "info"), Some(true));
         assert!(
             after.1 < before.1,
             "terminal width must shrink when info panel opens: before={before:?}, after={after:?}",
+        );
+
+        app.handle_key(KeyCode::F(2), KeyModifiers::NONE);
+        assert_eq!(
+            session_parser_size(&app, 0),
+            before,
+            "and back, so hiding it is not a one-way narrowing"
         );
     }
 
@@ -14279,7 +14369,7 @@ mod tests {
         };
         tx.send(MetricsRefresh {
             sys: sysinfo::System::new(),
-            metrics: crate::ui::info_panel::SystemMetrics {
+            metrics: metrics_state::SystemMetrics {
                 cpu_percent: 42.0,
                 memory_used: 100,
                 memory_total: 200,

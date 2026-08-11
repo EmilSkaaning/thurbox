@@ -2273,3 +2273,132 @@ not resolve, and `render_central_pane`'s editor branch still keys on native focu
 here (`render-is-not-event-driven` on the session list and on the automations pane),
 and the session list now has **no outstanding wiring gap at all**: what is left of
 its verdict is vocabulary and structure.
+
+## 25. The first handover (ADR-50)
+
+`src/ui/info_panel.rs` is **deleted** — 2018 lines. The Info column is
+`src/plugin/bundled/info-panel/init.luau`, in Luau, drawn from the `center-left`
+seat, bound by its manifest to `ToggleInfoPanel` and gated by `[features]
+info_panel`. Phase 4's question was whether a plugin can *obtain* what a real pane
+draws; this is the first pane where the answer is load-bearing rather than measured.
+
+### Why this pane, and why alone
+
+Of §14's five requirements all five were closed (§21–§24). What still blocks the
+others is **focus** plus each pane's own rows — and the info panel is outside both:
+it declares no `input`, so it has no scoped keyboard, no cursor and no mutation, and
+it is the only reproduced pane with **no gap file**. The other five each have one
+(§15, §16, §18, §20), and every row in them is still enforced.
+
+The code review was the other pane proposed for this change and is **refused**. Ten
+of its eleven rows remain blocked; §20's ordering is unchanged. Two seats, a
+keyboard that is a `self.focus` capture rather than actions — so not rebindable at
+all today — and five operations no capability performs. Handing over the diff would
+replace a mouse-first, retargetable, searchable review with a scrollable document.
+
+### The four decisions the deletion needed, none of them about drawing
+
+Reproduction was finished in §1. What the handover had to decide was everything
+*around* the pane, and each answer is one the next five handovers inherit.
+
+| Decision | Answer | Why not the alternative |
+|---|---|---|
+| the kernel's own occupant of the seat | **deleted** with the renderer | `layout_for` carves a seat when *either* occupant wants it, so a retained `show_info_panel` would still carve a column nothing paints — the gate's own failure, reached from inside the change meant to honour it |
+| the seed | `default_visible = false` | the native pane initialised to hidden; and no snapshot would have caught a change, since they render at 100 columns and this seat is carved at 120 |
+| the empty state | the plugin's: a bordered `Info` with System | an empty bordered box is worse than both; not carving without a session puts a content condition in the layout that no other seat has |
+| the click registry | a pane with no `input` records **nothing** | the target's only effect was to consume the click, and it sits in front of the fallback that arms drag-select over this column |
+
+### Two bugs the handover surfaced, neither about the info panel
+
+Both were latent for every plugin pane and invisible while every plugin pane was a
+hidden reproduction. That is the pattern worth carrying: a *reproduction* exercises
+the drawing path and nothing else, so the paths around a pane are only tested by
+making one real.
+
+- **A pane visibility change never resized the sessions.** Every kernel panel toggle
+  called `resize_sessions_to_content_area`; `set_plugin_pane_visible` did not. Showing
+  the Info column narrows the agent's terminal, so its PTY was left at the old width
+  until some unrelated resize. Fixed in the write path, so every route — the bound
+  action, the picker, the generated `<plugin>.<pane>.hide` command — is covered.
+- **A pane that cannot receive input was still eating clicks.** Recorded a whole-rect
+  target; `focus_plugin_pane` then refused to focus it and `offer_click_to_plugin`
+  reads the *focused* pane, so both halves were no-ops and only the consumption was
+  real. Harmless in the right column, not harmless in front of `pane_rects`.
+
+### What the oracle proved, and what it cost
+
+`tests/bundled_info_panel.rs` lost the two edges that named `info_tree` and keeps
+`plugin == recording`. **The ten `.snap` files are byte-identical after the
+deletion** — the payoff ADR-42 was written for, and the one fact that could not have
+been established afterwards. A `cargo insta accept` in this change would have turned
+ten statements about the pane into ten statements about the plugin, which is why the
+test's module doc now says so in as many words.
+
+What is gone and cannot be kept: the **pre-port byte-identity oracle** — ~600 lines
+of `#[cfg(test)]` line builders proving the view-tree port painted the pre-port pane
+cell for cell. It needs both `legacy_lines` and `info_tree`, and both were in the
+deleted module. Its successor is narrower and honest: the recorded tree, plus
+`ui::plugin_pane`'s own renderer tests. The five other panes keep theirs, and §14's
+lesson applies to this too — *what will the proof be able to fail for after the
+change*, not what it can fail for now.
+
+### The new failure mode, and the two cases driving it separated
+
+A broken `info-panel` plugin now costs the Info column. Driving it found that "broken"
+is two different failures with two different surfaces, which is worth knowing before
+the next handover:
+
+| Break | What happens | Surface |
+|---|---|---|
+| **load** (syntax error, top-level `error()`) | the plugin has no pane, so nothing claims the seat and nothing is drawn | F2 reports `provided by the \`info-panel\` plugin, which has no pane here (see \`thurbox-cli plugin doctor\`)`; fixing the file restores the column on the next source poll with no keystroke, since the stored visibility is still the user's |
+| **render** (error inside `render`) | the pane stays, its last good tree underneath | the title becomes `Info (error)` and the body reads `failed: …` |
+
+The first case is the one that justifies the report existing at all: without it F2 is
+**silent**, and a silent key is indistinguishable from a broken binding. The second is
+the pane-level containment the host already had.
+
+A user plugin named `info-panel` shadows the bundled one — documented override
+behaviour, now with the Info column as the stake, and the report is what tells them.
+
+`--no-default-features` **loses the pane**. No empty column (the seat needs a claim),
+no silent key (the action reports), no orphaned state. Keeping the renderer under
+`cfg(not(plugins))` is forbidden by `migration/phase-4` and rightly: two panes
+differing by build, with the installed one tested least.
+
+### What was driven by hand
+
+In a fresh sandbox at 168 columns, with the bundled plugin and one session:
+
+- F2 draws the Info column — border, ` Info ` title, `Name:`/`Status:`/`Agent:`,
+  the System gauges — where `render_info_panel` used to draw it; F2 again gives the
+  space back and the agent's terminal widens to fill it.
+- the CPU gauge moves on its own (the source poll, ADR-49), and the pane's rect is
+  the rect the native pane had.
+- setting `[features] info_panel = false` in `settings.toml` removes the column
+  within a poll, without a plugin reload, and F2 then names the switch; setting it
+  back restores the column *and* the visibility that was stored.
+- appending a top-level `error()` to the materialized `init.luau` removes the column
+  (the plugin no longer loads, so no pane claims the seat) and F2 then reports
+  `Info panel: provided by the \`info-panel\` plugin, which has no pane here (see
+  \`thurbox-cli plugin doctor\`)`; restoring the file brings the column back on the
+  next source poll without a keystroke.
+- moving the error *inside* `render` instead leaves the pane in place with the title
+  `Info (error)` and `failed: error: runtime …` in the body — the two failure cases
+  are distinct, and the table above is the corrected claim.
+- and in a `--no-default-features` binary — the build with no plugin host — F2 carves
+  nothing and reports `Info panel: provided by a plugin, and this build has no plugin
+  host`. The wording differs from the default build's on purpose: that build ships no
+  `thurbox-cli plugin` subcommand, and a message naming a command the running binary
+  does not have is worse than no message. Driving it is what caught that; the first
+  version pointed everyone at `plugin doctor`.
+
+### What this leaves
+
+Five native panes, five reproduced, five blocked — by **focus** and by their own
+recorded rows. The gate is 10 tests: the info-panel row is the first `ready`, its
+unit's path is gone, and two of the gate's own rules had to be scoped to blocked
+rows because a handover inverts the direction they read the tree in. One of them, the
+worked example of a *blocked* row, now names the tasks pane and is guarded by a test
+that fails if that pane is ever handed over without moving the example — because the
+repair that passes is to flip the assertions, which turns an argument into a
+transcript.

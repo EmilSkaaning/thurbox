@@ -1,11 +1,11 @@
 //! Rendering a [`ViewNode`] tree into a pane.
 //!
 //! Named for the pane kind it was written for, but **not** limited to one: since
-//! Phase 0's exit criterion this is also how thurbox's own
-//! [`crate::ui::info_panel`] is painted, and it compiles in every build rather
-//! than only with the plugin host. The name is kept as a deliberate
-//! non-decision — renaming it carries no behaviour and would have obscured the
-//! diff that ungated it.
+//! Phase 0's exit criterion this is also how thurbox's own panes are painted —
+//! [`crate::ui::tasks_panel`], [`crate::ui::file_viewer`] and the rest — so it
+//! compiles in every build rather than only with the plugin host. The name is kept
+//! as a deliberate non-decision — renaming it carries no behaviour and would have
+//! obscured the diff that ungated it.
 //!
 //! `ui` renders the view tree without ever seeing `crate::plugin` — the tree
 //! is pure data in `session`, so the renderer has no path back to a VM and

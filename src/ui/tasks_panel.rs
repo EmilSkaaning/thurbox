@@ -4,7 +4,8 @@
 //! highlighted; while focused it shows a compact action footer. Filtering is
 //! handled by the global `Ctrl+/` search, not a per-pane box.
 //!
-//! Like [`super::info_panel`], the pane renders through the **view tree**: it is
+//! Like the file viewer and the automations pane, this one renders through the
+//! **view tree**: it is
 //! ordinary in-process Rust on the UI thread, but its rows are a
 //! [`ViewNode`] that [`super::plugin_pane::render_tree`] paints. The split is
 //! sharp on purpose, because it is the split a plugin lives on:

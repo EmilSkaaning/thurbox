@@ -54,6 +54,14 @@ pub fn tree(node: &ViewNode) -> String {
 /// the honest report of that is "the trees stopped agreeing at line N" plus the
 /// two line counts. A cleverer alignment would name a later, prettier difference
 /// and bury the actual one.
+///
+/// Unused by a **handed-over** pane's oracle, which has no native tree left to
+/// compare against and asserts the recording alone (ADR-50) — and this module is
+/// compiled separately into each oracle's test binary, so the first such handover
+/// made it dead code in exactly one of them. Allowed rather than deleted: the five
+/// panes still drawn natively use it, and the day the last one is handed over is the
+/// day to remove it.
+#[allow(dead_code)]
 pub fn assert_matches(case: &str, plugin: &ViewNode, native: &ViewNode) {
     let (plugin, native) = (tree(plugin), tree(native));
     if plugin == native {

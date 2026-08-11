@@ -1,11 +1,11 @@
 --!strict
 -- thurbox's info panel, in Luau.
 --
--- A faithful reproduction of `ui::info_panel::info_tree`: every row, in the same
--- order, under the same conditions, with the same style tokens.
--- `tests/bundled_info_panel.rs` asserts the two view trees are *equal*, which
--- makes this the measurement of whether a third party could have written the
--- pane — the plugin holds no surface a user's plugin could not declare.
+-- **This is the pane.** `src/ui/info_panel.rs` is deleted (ADR-50): the Info column
+-- a user sees is built here, by a plugin holding no surface a third party's plugin
+-- could not declare. `tests/bundled_info_panel.rs` holds it to the tree the native
+-- pane built, through recordings taken while that builder existed — so the target
+-- is still the pane's behaviour and not this file's.
 --
 -- Two things are worth reading for what they imply about writing a pane:
 --

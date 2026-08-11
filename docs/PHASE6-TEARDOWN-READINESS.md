@@ -9,7 +9,8 @@ Every claim below is traced to the code that makes it true, and each is enforced
 by `tests/teardown_gate.rs` (ADR-23) so it cannot quietly go stale — if you
 implement one of these replacements, that test will tell you to come back here.
 
-Status: **1 of 14 replacements ready.** No unit is deletable.
+Status: **2 of 14 replacements ready.** One unit is deleted: the info panel's native
+renderer (ADR-50). No other unit is deletable.
 
 ## 1. The deletion targets are real and exactly the claimed size
 
@@ -65,7 +66,7 @@ Getting any of that wrong fails silently: the binary compiles, sessions launch,
 and status reporting stops. That is why it is one change with the switch-over in
 it, not a refactor done in pieces.
 
-## 3. Phase 4 has started, but no pane has been handed over
+## 3. Phase 4 has handed over one pane of seven
 
 `src/plugin/bundled/` contains `hello`, `info-panel`, `tasks`, `file-viewer`,
 `code-review`, `session-list` and `automations`. Every native pane a plugin can be
@@ -73,7 +74,7 @@ written for now has one.
 
 | Pane | Native renderer | Bundled plugin | Drawn by |
 |---|---|---|---|
-| Info panel | `src/ui/info_panel.rs` | `info-panel` | the native pane |
+| Info panel | **deleted** (ADR-50) | `info-panel` | **the plugin** |
 | Tasks | `src/ui/tasks_panel.rs` | `tasks` | the native pane |
 | Automations | `src/ui/automations_panel.rs` | `automations` (its rows **and** five of its seven keys, PHASE4 §17) | the native pane |
 | File viewer | `src/ui/file_viewer.rs` | `file-viewer` | the native pane |
@@ -131,14 +132,40 @@ seat rather than a grant. The session list's row was refused the same day for th
 opposite reason: its keys move the **active session**, which is kernel view state
 no capability writes.
 
-**A pane's row is ready only on handover, not on existence.** Six panes now show
-why the distinction is load-bearing rather than pedantic: each plugin exists and
-reproduces its pane (four exactly, code review in the part it declares, the
-session list in its rows), while the native renderer is still what the interface
-draws. Deleting `src/ui/info_panel.rs` today would remove the pane every user is
+**The info panel is handed over, and it is the only one** (ADR-50, PHASE4 §25).
+`src/ui/info_panel.rs` is deleted, its row is the gate's first `ready`, and
+`every_listed_path_survives_until_its_unit_is_ready` no longer protects the path.
+It went first because it is the one reproduced pane with **no gap file**: it declares
+no `input`, so neither the focus wall nor a per-pane row list applies to it. What the
+handover had to decide was everything around the pane — the seat's other occupant
+(deleted, not switched off, or a retained flag would carve a column nothing paints),
+the seed (hidden, as the native pane defaulted), the empty state (the plugin's, and
+pinned), and the click registry (a pane that cannot receive input records nothing) —
+and it surfaced two latent bugs that no *reproduction* could have: a pane visibility
+change never resized the sessions, and an input-less pane was swallowing clicks in
+front of drag-select.
+
+**A pane's row is ready only on handover, not on existence.** The five remaining
+panes show why the distinction is load-bearing rather than pedantic: each plugin
+exists and reproduces its pane (three exactly, code review in the part it declares,
+the session list in its rows), while the native renderer is still what the interface
+draws. Deleting `src/ui/tasks_panel.rs` today would remove the pane every user is
 looking at. So `tests/teardown_gate.rs`'s pane probe is a four-way conjunction, and
 `a_reproduced_pane_is_not_a_replaced_one` pins that reasoning so it cannot be
-"simplified" back to a directory check.
+"simplified" back to a directory check — with the **tasks pane** as its worked
+example now, guarded by a test that fails if that pane is handed over without moving
+the example, because the repair that passes is to flip the assertions.
+
+Two of the gate's own rules had to be **scoped to blocked rows** for the same reason,
+and it is worth naming as a class: a handover inverts the direction they read the tree
+in. `every_pane_row_names_its_native_renderer` asserted that `view.rs` still draws
+each pane's renderer — true of every row until one of them was handed over — and the
+per-pane loop in `the_build_condition_holds_and_still_gates_a_handover` did the same.
+A third imprecision surfaced with them: the probe searched `view.rs` for the bare
+module name, and `view.rs` also names each seat's rect (`areas.info_panel`) and each
+footer flag (`features.info_panel`), both of which are the **layout's** vocabulary for
+a seat and outlive whichever code paints it. The needle is now `<module>::`, a call
+into the module; a stale `use` is an unused import that clippy already refuses.
 
 **And a third condition, because the first two together permitted the mistake**
 (ADR-37): the runtime that draws the replacement must reach the build a user
@@ -183,8 +210,9 @@ needs the plugin pane to be reachable from the keyboard (PHASE4 §5, done), to b
 seatable in the native pane's region (PHASE4 §21, done), to answer its action and
 feature flag (PHASE4 §22, done), to carry a recorded oracle (PHASE4 §23, done for
 all six reproduced panes), and to render on events rather than on a 1 s poll
-(PHASE4 §7 and §13, and the session-list spike's third condition) — which is the
-one still open.
+(PHASE4 §24, done). All five are closed, and the info panel took that route first
+(PHASE4 §25). What holds the remaining five is **focus** plus each pane's own
+recorded rows.
 
 Stage B's *exit* criterion ("at least one plugin that thurbox did not write") is a
 separate matter and cannot be met until a release carrying the host has shipped —
@@ -208,9 +236,10 @@ that gates Stage C and `2.0.0`, not the handovers.
    pinning. Unblocks `plugin-update`, and is the prerequisite for replacing the
    `[features]` flags.
 6. **Phase 4, all seven panes** — each landing alongside its native predecessor
-   and asserting the same rendering. The info panel has landed this way
-   (ADR-27, tree equality rather than a frame snapshot). Writing a pane's plugin
-   does **not** unblock its unit.
+   and asserting the same rendering. Every pane has landed this way (ADR-27, tree
+   equality rather than a frame snapshot), and one has since been **handed over**
+   (the info panel, ADR-50). Writing a pane's plugin does **not** unblock its unit;
+   deleting the native renderer it replaces is what does.
 7. ~~**Stage B and the Cargo default flip.**~~ **Done** (ADR-40). Listed here
    rather than after the handovers, which is where it sat until ADR-37: no pane
    can be handed over before it, because a Luau pane in a build with no Luau VM is
@@ -266,12 +295,16 @@ that gates Stage C and `2.0.0`, not the handovers.
    scrolled by and four other native panes window with. That pane's handover
    therefore begins by lifting its model out of `ui`, which PHASE4 §16 records and
    deliberately does not do in advance of a destination. A milder version of the
-   same shape sits in the info panel's module, which also declares `SystemMetrics`
-   — an *input* the metrics collector fills and `App` owns, so a relocation rather
-   than a design, but a reason that deletion is not confined to `ui`.
+   same shape sat in the info panel's module, which also declared `SystemMetrics` —
+   an *input* the metrics collector fills and `App` owns. Its handover moved the type
+   to `src/app/metrics_state.rs`, beside the value's owner, which is the precedent for
+   the file viewer's harder version: a relocation to the owner, not to `session`,
+   whose `pane_context::SystemSnapshot` is already that module's spelling of the same
+   numbers.
 
-   Two of the seven have now had a handover **attempted and refused**, and their
-   remaining requirements are enforced rather than described (ADR-43): the
+   One of the seven is **done** (the info panel, ADR-50). Two others have had a
+   handover **attempted and refused**, and their remaining requirements are enforced
+   rather than described (ADR-43): the
    **automations pane** (`tests/automations_pane_handover_gap.rs`, 10 rows) and the
    **session list** (`tests/session_list_pane_handover_gap.rs`, 9 rows). Each row
    is re-derived from the source and tagged structural / vocabulary / wiring, and
@@ -288,5 +321,7 @@ that gates Stage C and `2.0.0`, not the handovers.
    module-as-model class. So step 9's remaining cost is concentrated in a few host
    decisions rather than spread across seven panes.
 
-Nothing on this list is unblocked by deleting something first, which is the
-whole finding: the teardown has no safe first step yet.
+The teardown's first safe step has been taken — one pane, the one with no gap file —
+and it did not unblock the rest: each remaining pane still waits on focus and on its
+own recorded rows, and the extension system waits on six capabilities that do not
+exist. Nothing else on this list is unblocked by deleting something first.
