@@ -3,7 +3,7 @@
 ## Purpose
 The properties of the GitHub Actions workflow files that a deterministic check
 enforces rather than a reviewer remembering: the release workflow releases only
-from the trunk and never with the plugin feature, and the nightly workflow
+from the trunk and never without the plugin runtime, and the nightly workflow
 publishes to no moderated package channel and marks every release a prerelease.
 Each is cheap to check and expensive to discover broken. Branch protection and
 the installers' own resolution rule are out of scope — they are enforced by
@@ -81,36 +81,6 @@ the whole trigger rather than about one list.
 - **THEN** the check fails rather than treating the absent trigger as satisfying
   the invariant
 
-### Requirement: The release workflow never builds with the plugin feature
-
-The check SHALL reject any request for the plugin feature in the release
-workflow: `--features plugins` and `--features=plugins` in either flag order,
-`--all-features` (which enables it transitively), and a manifest edit that adds
-`plugins` to a `features` list. A line whose content is entirely a YAML comment
-MUST be ignored, so the invariant can be documented inside the workflow it
-constrains without the documentation tripping the check.
-
-#### Scenario: The committed release workflow passes
-
-- **WHEN** the release workflow contains no plugin-feature request
-- **THEN** the invariant passes
-
-#### Scenario: A gated build reaches a release job
-
-- **WHEN** a release job runs a cargo command with `--features plugins`
-- **THEN** the check fails, naming the line
-
-#### Scenario: All features enables the gate transitively
-
-- **WHEN** a release job runs a cargo command with `--all-features`
-- **THEN** the check fails, because the plugin feature is among them
-
-#### Scenario: A comment mentioning the feature is not a violation
-
-- **WHEN** a line in the release workflow is a comment explaining that
-  `--features plugins` must not appear
-- **THEN** the invariant still passes
-
 ### Requirement: The nightly workflow publishes to no package channel
 
 While a nightly workflow exists, the check SHALL reject any package-channel
@@ -172,4 +142,55 @@ installer resolves to.
 
 - **WHEN** the nightly workflow runs `gh release create` without `--prerelease`
 - **THEN** the check fails, naming the line
+
+### Requirement: The release workflow does not build without the plugin runtime
+
+The check SHALL reject any release-workflow build that suppresses the crate's
+default features, since the plugin runtime is delivered through them:
+`--no-default-features` in any position, and a manifest edit that rewrites the
+default feature list. A line whose content is entirely a YAML comment MUST be
+ignored, so the invariant can be documented inside the workflow it constrains
+without the documentation tripping the check.
+
+The invariant is directional and MUST NOT be read as forbidding an explicit
+request for the feature: a release job naming `--features plugins` or
+`--all-features` is redundant but harmless, because it asks for the runtime the
+release is required to carry.
+
+#### Scenario: The committed release workflow passes
+
+- **WHEN** the release workflow builds with plain `cargo build --release` and
+  `cross build --release`
+- **THEN** the invariant passes, because the default feature set carries the
+  runtime
+
+#### Scenario: A release job suppresses default features
+
+- **WHEN** a release job runs a cargo command with `--no-default-features`
+- **THEN** the check fails, naming the line
+
+#### Scenario: A manifest edit rewrites the default feature list
+
+- **WHEN** a release job edits `Cargo.toml` to assign a different `default`
+  feature list
+- **THEN** the check fails, naming the line
+
+#### Scenario: An explicit feature request is not a violation
+
+- **WHEN** a release job runs a cargo command with `--features plugins` or
+  `--all-features`
+- **THEN** the invariant passes, because both ask for the runtime rather than
+  removing it
+
+#### Scenario: A comment mentioning the flag is not a violation
+
+- **WHEN** a line in the release workflow is a comment explaining that
+  `--no-default-features` must not appear
+- **THEN** the invariant still passes
+
+#### Scenario: The release workflow is missing
+
+- **WHEN** `.github/workflows/cd.yml` is absent
+- **THEN** the check fails rather than passing on the grounds that there is
+  nothing to check
 

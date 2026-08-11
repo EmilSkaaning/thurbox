@@ -138,6 +138,15 @@ MUST apply uniformly to every pane row, so that the release decision which
 unblocks them is visible as a single shared blocker instead of appearing as seven
 independent pane problems.
 
+The condition MUST remain checked once it is satisfied rather than being retired
+as settled. It records that the runtime reaches installed builds, and that is a
+release decision a later change could reverse — by suppressing default features
+in the release build, or by removing the runtime from the default feature list —
+in which case every pane already handed over would silently become an empty
+column. So while the runtime is part of the default build, the inventory SHALL
+assert that it is, and each pane row's verdict SHALL then turn on the two
+pane-level conditions alone.
+
 #### Scenario: A plugin exists but the native pane is still drawn
 
 - **WHEN** a bundled plugin for a pane exists and the application still calls that
@@ -169,4 +178,11 @@ independent pane problems.
 - **WHEN** the plugin runtime is absent from the default build
 - **THEN** no pane row is ready, whatever each pane's plugin renders and whatever
   the application draws
+
+#### Scenario: The build condition is satisfied and still asserted
+
+- **WHEN** the plugin runtime is part of the default build
+- **THEN** the inventory asserts that it is, and each pane row is unready only for
+  its own pane-level reason — so removing the runtime from the default feature
+  list fails the inventory instead of quietly emptying every handed-over pane
 
