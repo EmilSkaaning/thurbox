@@ -1000,13 +1000,26 @@ Recording MUST therefore happen in a change that does not also delete the native
 builder, so that the recording's provenance is demonstrable in the run that
 introduces it.
 
-**A pane whose handover is attempted SHALL have its recording before the attempt
-concludes, whichever way it concludes.** A refused handover leaves the native
-builder in place and produces no recording, so the pane's oracle keeps its
-differential shape and the next attempt inherits the same hole — while the only
-moment the recording can be *proven* to be the native pane's is one in which that
-builder still exists. Recording is therefore owed by the attempt, not by the
-handover.
+**Every pane a bundled plugin reproduces SHALL carry a recording**, whether or not
+its handover has been attempted. An earlier form of this requirement was owed by
+an *attempt*: a pane whose handover was attempted had to be recorded before the
+attempt concluded, either way. That trigger is too late and too weak. It is too
+late because three panes' attempts concluded before the rule existed and inherited
+the differential oracle it forbids; it is too weak because an attempt is a human
+decision to begin work, so a pane nobody attempts keeps its differential oracle
+indefinitely — and the change that eventually deletes the native builder is the
+one least able to notice that the evidence went with it. Reproduction is the
+earliest moment at which the recording is both **owed** and **provable**: the
+plugin exists, so there is something to constrain, and the native builder exists,
+so the baseline can be shown to be the pane's.
+
+The requirement SHALL be enforced by the tree rather than by convention: a pane
+whose oracle holds no recording MUST NOT be recorded handed over, so the native
+builder stays protected until the recording exists. See
+`migration/teardown`'s handover conditions.
+
+A pane recorded structurally unportable, with no bundled plugin reproducing it, is
+owed no recording — there is no plugin to constrain and no handover to gate.
 
 #### Scenario: The recording is captured while both sides exist
 
@@ -1025,12 +1038,32 @@ handover.
 - **WHEN** the plugin's tree changes in any recorded respect
 - **THEN** the recorded comparison fails and names the node that moved
 
+#### Scenario: A pane is reproduced and never attempted
+
+- **WHEN** a bundled plugin reproduces a native pane and no handover of it is
+  attempted
+- **THEN** the pane still carries a recording checked against its native builder,
+  because reproduction is what makes the recording owed
+
 #### Scenario: A handover attempt is refused
 
 - **WHEN** an attempt to hand a pane over concludes that the native pane stays
 - **THEN** the pane's recorded expectation exists and is checked against its
-  native builder in the same change, so the next attempt does not start from a
-  differential oracle again
+  native builder, so the next attempt does not start from a differential oracle
+  again
+
+#### Scenario: A pane's oracle is still differential when its handover is proposed
+
+- **WHEN** a handover would delete a native builder that is the only right-hand
+  side its pane's oracle has
+- **THEN** the handover is refused by the teardown inventory, naming the missing
+  recording, rather than being permitted and repaired by dropping the assertion
+
+#### Scenario: A surface is recorded unportable
+
+- **WHEN** a native surface is recorded as structurally unportable and no bundled
+  plugin reproduces it
+- **THEN** no recording is owed for it
 
 ### Requirement: A compact recorded expectation is exhaustive over the view tree
 
