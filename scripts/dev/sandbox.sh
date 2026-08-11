@@ -19,6 +19,21 @@
 #   scripts/dev/sandbox.sh -- session list # run `thurbox-cli <args>` in the sandbox
 #   scripts/dev/sandbox.sh --clean [name]  # kill + wipe a persistent profile, then exit
 #
+# v2 plugin host (absent from stable builds, so it needs an explicit build):
+#   scripts/dev/sandbox.sh --plugins       # build with --features plugins and launch
+#   scripts/dev/sandbox.sh --plugins --show tasks,file-viewer
+#                                          # …and make those bundled panes visible
+#   scripts/dev/sandbox.sh --plugins --show all
+#                                          # every bundled pane (see the note below)
+#
+# The bundled panes that reproduce a native pane ship `default_visible = false`,
+# because the native pane is still what draws the interface — a visible copy
+# would show two of the same pane. `--show` flips them on through the generated
+# `<plugin>.<pane>.show` commands, and the choice persists in the sandbox DB.
+# `--show all` turns on six panes at once, which overflows the right-hand column
+# on a normal terminal; it is useful for checking that they *load*, less so for
+# looking at them. Prefer naming one or two.
+#
 # State (persistent mode): target/dev-sandbox/<profile>/ (gitignored). Sessions
 # survive across runs — its tmux-dev server is left alive on exit. `--clean`
 # (or `cargo clean`) removes it.
@@ -43,12 +58,16 @@ profile="default"
 isolation="thurbox" # thurbox | full
 action="tui"        # tui | shell | cli | clean
 cli_args=()
+features=()         # extra cargo --features flags
+show_panes=""       # comma-separated plugin names, or "all"
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --fresh) mode="fresh"; shift ;;
         --profile) profile="${2:?--profile needs a name}"; shift 2 ;;
         --isolate-home) isolation="full"; shift ;;
+        --plugins) features=(--features plugins); shift ;;
+        --show) show_panes="${2:?--show needs a plugin name, a comma-separated list, or 'all'}"; shift 2 ;;
         --shell) action="shell"; shift ;;
         --clean) action="clean"; shift; case "${1:-}" in ""|-*) ;; *) profile="$1"; shift ;; esac ;;
         --) shift; action="cli"; cli_args=("$@"); break ;;
@@ -66,8 +85,12 @@ if [ "$action" = "clean" ]; then
 fi
 
 # Build the dev binaries BEFORE the HOME override (so cargo finds ~/.cargo).
-log "building thurbox (dev)"
-( cd "$TBX_REPO_ROOT" && cargo build --bin thurbox --bin thurbox-cli >&2 )
+if [ -n "$show_panes" ] && [ ${#features[@]} -eq 0 ]; then
+    die "--show needs --plugins (the plugin host is absent from a default build)"
+fi
+
+log "building thurbox (dev${features[*]+ ${features[*]}})"
+( cd "$TBX_REPO_ROOT" && cargo build --bin thurbox --bin thurbox-cli "${features[@]+${features[@]}}" >&2 )
 
 if [ "$isolation" = "full" ]; then
     tbx_sandbox_init_full "$mode" "$profile"
@@ -78,8 +101,35 @@ export TBX_IN_SANDBOX="$profile"
 
 log "sandbox root: $TBX_SANDBOX_ROOT ($mode, $isolation isolation)"
 
+# Make the named bundled panes visible, through the same generated commands a
+# user or an agent would call — so this exercises the real surface rather than
+# writing the visibility rows behind its back.
+show_bundled_panes() {
+    local cli="$TBX_REPO_ROOT/target/debug/thurbox-cli"
+    local wanted="$1" ids id plugin
+    # `command list --json` is the source of truth for which panes exist; parsing
+    # it means this never drifts from the bundled set.
+    ids="$("$cli" command list --json 2>/dev/null \
+        | grep -o '"id":"[^"]*\.show"' | cut -d'"' -f4)" || true
+    if [ -z "$ids" ]; then
+        log "no plugin panes found (is this a --plugins build?)"
+        return
+    fi
+    for id in $ids; do
+        plugin="${id%%.*}"
+        if [ "$wanted" = "all" ] || [[ ",$wanted," == *",$plugin,"* ]]; then
+            if "$cli" command run "$id" >/dev/null 2>&1; then
+                log "showing pane: $plugin"
+            else
+                log "could not show pane: $plugin"
+            fi
+        fi
+    done
+}
+
 # What to run in the sandbox env.
 run_in_sandbox() {
+    [ -n "$show_panes" ] && show_bundled_panes "$show_panes"
     case "$action" in
         shell)
             log "entering sandbox shell — \`thurbox\`/\`thurbox-cli\` target this sandbox; exit to leave"
