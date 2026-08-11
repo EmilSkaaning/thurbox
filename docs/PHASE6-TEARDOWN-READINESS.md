@@ -36,7 +36,7 @@ So the plan's arithmetic is sound. The readiness half is where it breaks.
 | Agent status hooks | kernel session layer | **no** | `ensure_builtin_hooks_extension` calls `install_extension` — the wiring is delivered *by* the installer Phase 6 deletes |
 | Registering agents in `agents.toml` | manifest `[[agents]]` | **no** | `PluginManifest` declares `panes`, `commands`, `keybindings`, `capabilities`, `service`, `cli`, `spawn` |
 | Seeding sessions/automations | manifest `[[automations]]` + `init` | **no** | no `automations` field, and no kernel-table host API to seed one through |
-| Placing files in an agent's config dir | plugin `fs` capability | **no** | `Capability` is `log`, `state-read`, `state-write`, `render`, `input`, `spawn`, `sessions`, `metrics`, `automations` |
+| Placing files in an agent's config dir | plugin `fs` capability | **no** | `Capability` names no `fs`: it is `log`, `state-read`, `state-write`, `render`, `input`, `spawn`, `sessions`, `metrics`, `automations`, `tasks`, `files`, `tasks-write`, `automations-write`, `review` — every one of which reads or writes a record the kernel already holds |
 | Patching agent args at spawn | spawn contributions | **no** | `SpawnDecl` carries `env` only; argument contributions have no manifest surface |
 | Self-heal on startup/tick | idempotent by construction | **yes** | `plugin::discovery::discover` re-walks the manifests every start, so nothing is installed-then-healed |
 | Version/staleness/auto-update | `thurbox-cli plugin update` | **no** | the `plugin` CLI is `list`, `status`, `doctor`, `reload` |
@@ -68,13 +68,14 @@ it, not a refactor done in pieces.
 ## 3. Phase 4 has started, but no pane has been handed over
 
 `src/plugin/bundled/` contains `hello`, `info-panel`, `tasks`, `file-viewer`,
-`code-review` and `session-list`.
+`code-review`, `session-list` and `automations`. Every native pane a plugin can be
+written for now has one.
 
 | Pane | Native renderer | Bundled plugin | Drawn by |
 |---|---|---|---|
 | Info panel | `src/ui/info_panel.rs` | `info-panel` | the native pane |
 | Tasks | `src/ui/tasks_panel.rs` | `tasks` | the native pane |
-| Automations | `src/ui/automations_panel.rs` | absent | the native pane |
+| Automations | `src/ui/automations_panel.rs` | `automations` (its rows **and** five of its seven keys, PHASE4 §17) | the native pane |
 | File viewer | `src/ui/file_viewer.rs` | `file-viewer` | the native pane |
 | Global search | `src/ui/global_search.rs` | none possible yet (PHASE4 §10) | the native pane |
 | Code review | `src/ui/code_review.rs` | `code-review` (the diff stream only, PHASE4 §11) | the native pane |
@@ -82,8 +83,9 @@ it, not a refactor done in pieces.
 
 `docs/PHASE4-PANE-READINESS.md` is the audit of what the plugin API could not
 express for the *first* of those panes; all five of its gaps are now closed
-(ADR-26, ADR-27, ADR-28), and §8, §9, §11 and §13 record what the second, third,
-fourth and fifth ports needed on top of them (ADR-29, ADR-30, ADR-31, ADR-33).
+(ADR-26, ADR-27, ADR-28), and §8, §9, §11, §13 and §17 record what the second
+through sixth ports needed on top of them (ADR-29, ADR-30, ADR-31, ADR-33,
+ADR-41).
 
 One row in the table above will not fill in by porting harder. §10 of the same
 document records **global search as structurally unportable** — it is a mode, not
@@ -108,9 +110,20 @@ compose box — with the reason each is unported. That row therefore needs both 
 handover *and* the remaining surface before `src/ui/code_review.rs` can go, which
 is a longer list than any other pane's.
 
-**A pane's row is ready only on handover, not on existence.** Five panes now show
+The automations row is the first where a port's **keys ship** (PHASE4 §17,
+ADR-41): a plugin holding `input` keeps a cursor of its own across renders, so five
+of the pane's seven keys act on the row it drew, through `automations-write` — which
+had no consumer before. That narrows the tasks blocker rather than closing it: what
+remains unportable is a key that writes **kernel** view state (a cursor thurbox
+owns, a focus, an active session), plus record creation, text authoring, a central
+seat, a modal, and reaching an agent. The pane's own circular wrap with the session
+list is on that list, and stays the kernel's — a wrap is a claim about adjacency,
+and the reproduction cannot be seated adjacent to anything (`PaneSlot` names only
+the right column).
+
+**A pane's row is ready only on handover, not on existence.** Six panes now show
 why the distinction is load-bearing rather than pedantic: each plugin exists and
-reproduces its pane (three exactly, code review in the part it declares, the
+reproduces its pane (four exactly, code review in the part it declares, the
 session list in its rows), while the native renderer is still what the interface
 draws. Deleting `src/ui/info_panel.rs` today would remove the pane every user is
 looking at. So `tests/teardown_gate.rs`'s pane probe is a conjunction, and

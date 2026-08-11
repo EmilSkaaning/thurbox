@@ -5123,6 +5123,151 @@ fn pane_context_bounds_how_many_task_rows_it_publishes() {
     assert_eq!(h.app.build_pane_context().tasks.cursor, None);
 }
 
+/// The automations section is the pane's whole list — in pane order, with the
+/// parts its summary is composed from and *no* composed summary.
+#[test]
+fn pane_context_describes_the_automations_pane() {
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(1);
+    let ids = automation_fixture(&mut h, &["nightly", "paused"]);
+    h.app.db.set_automation_enabled(ids[1], false).unwrap();
+    h.app.refresh_automations();
+
+    let bare = h.app.build_pane_context().automations;
+    let names: Vec<&str> = bare.entries.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(
+        names,
+        h.app
+            .automation_ui
+            .cached_automations
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>(),
+        "the published order is the pane's order"
+    );
+    // Disabled rows cross too, unlike the *upcoming* list next to them. Looked up
+    // by name rather than by position: the pane's order is the cache's, which this
+    // test does not fix.
+    let find = |name: &str| {
+        bare.entries
+            .iter()
+            .find(|a| a.name == name)
+            .unwrap_or_else(|| panic!("`{name}` was published"))
+    };
+    assert!(find("nightly").enabled);
+    assert!(!find("paused").enabled);
+    assert_eq!(find("nightly").action, "exec");
+    assert_eq!(find("nightly").schedule, "daily 09:00");
+    assert_eq!(
+        h.app.build_pane_context().upcoming_automations.len(),
+        1,
+        "the filtered reader drops the disabled one, which is why there are two"
+    );
+
+    // Unfocused: the anchor crosses, the appearance does not.
+    assert_eq!(bare.cursor, Some(0));
+    assert!(!bare.cursor_visible);
+    assert!(!bare.focused);
+
+    // Focusing the pane is what puts the cursor on screen. `j` past the last
+    // session flows into the pane, which is the left column's continuous list.
+    h.key(KeyCode::Char('j'), KeyModifiers::NONE);
+    let focused = h.app.build_pane_context().automations;
+    assert!(focused.focused);
+    assert!(focused.cursor_visible);
+    assert_eq!(focused.cursor, Some(0));
+
+    h.key(KeyCode::Char('j'), KeyModifiers::NONE);
+    let moved = h.app.build_pane_context().automations;
+    assert_eq!(moved.cursor, Some(1), "the anchor follows the cursor");
+    assert!(moved.cursor_visible);
+
+    // Entering the central-pane editor is `FocusLevel::Active`, which this pane
+    // draws exactly as unfocused — so the published cursor stops being drawn with
+    // it. The anchor stays, because the list still has to scroll to it.
+    h.key(KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(h.app.focus, InputFocus::AutomationEditor);
+    let editing = h.app.build_pane_context().automations;
+    assert_eq!(editing.cursor, Some(1), "the anchor is focus-independent");
+    assert!(
+        !editing.cursor_visible,
+        "the native pane marks no row while the editor holds focus, so publishing \
+         one would make the two panes disagree"
+    );
+    assert!(!editing.focused);
+}
+
+/// The two out-of-range cases, which are not the same: a stale selection anchors
+/// on the last row, and a selection past the *bound* anchors on nothing.
+#[test]
+fn pane_context_bounds_and_clamps_the_automation_cursor() {
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(1);
+    automation_fixture(&mut h, &["only"]);
+
+    // A stale index: clamped, because the host refuses a list whose cursor is not
+    // an index into its children, and the native pane's appearance follows the
+    // same clamp.
+    h.app.automation_ui.automation_panel_index = 40;
+    assert_eq!(h.app.build_pane_context().automations.cursor, Some(0));
+
+    // Past the published bound: the row was never sent, so there is nothing
+    // honest to anchor on.
+    h.app.automation_ui.automation_panel_index =
+        crate::session::pane_context::MAX_AUTOMATION_ROWS + 3;
+    assert_eq!(h.app.build_pane_context().automations.cursor, None);
+}
+
+/// With the feature off thurbox draws no automations pane and fires no schedules,
+/// so a pane advertising them would surface something the user switched off.
+#[test]
+fn pane_context_publishes_no_automations_when_the_feature_is_off() {
+    let _demand = DemandGuard::new(true);
+    let mut h = Harness::standard(1);
+    automation_fixture(&mut h, &["hidden"]);
+    assert_eq!(h.app.build_pane_context().automations.entries.len(), 1);
+
+    h.app.features.automations = false;
+    let off = h.app.build_pane_context();
+    assert!(off.automations.entries.is_empty());
+    assert!(
+        off.upcoming_automations.is_empty(),
+        "both readers behind the one capability follow the flag"
+    );
+}
+
+/// Create `names` as daily `Exec` automations and refresh the pane's cache,
+/// returning their ids in creation order.
+fn automation_fixture(h: &mut Harness, names: &[&str]) -> Vec<i64> {
+    let ids = names
+        .iter()
+        .map(|name| {
+            h.app
+                .db
+                .create_automation(&crate::storage::automations::NewAutomation {
+                    name: (*name).to_string(),
+                    enabled: true,
+                    schedule: crate::session::AutomationSchedule::Cron {
+                        expr: "0 9 * * *".to_string(),
+                    },
+                    timezone: None,
+                    action: crate::session::AutomationAction::Exec {
+                        command: "true".to_string(),
+                    },
+                    prompt: String::new(),
+                    // A next run an hour out, so the *upcoming* reader beside this
+                    // section has something to filter — its filter is
+                    // enabled-and-scheduled, and a row with no next run would be
+                    // dropped for the wrong reason.
+                    next_run_at: Some(crate::sync::current_time_millis() + 3_600_000),
+                })
+                .unwrap()
+        })
+        .collect();
+    h.app.refresh_automations();
+    ids
+}
+
 /// A changed task list is a changed snapshot; an unchanged one still publishes
 /// once, so adding the section did not defeat the change gate.
 #[test]

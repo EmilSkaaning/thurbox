@@ -7514,13 +7514,13 @@ impl App {
         // The same filter the native pane applies: with the automations feature
         // off the TUI fires nothing, so advertising a countdown would surface a
         // disabled feature.
-        let automations = self
+        let upcoming_automations = self
             .automation_ui
             .cached_automations
             .iter()
             .filter(|_| self.features.automations)
             .filter(|a| a.enabled && a.next_run_at.is_some())
-            .map(|a| pc::AutomationSnapshot {
+            .map(|a| pc::UpcomingAutomationSnapshot {
                 id: a.id,
                 label: view::truncate_str(&a.name, 30),
                 due_in_secs: a.next_run_at.unwrap_or(now_ms).saturating_sub(now_ms) / 1_000,
@@ -7530,11 +7530,84 @@ impl App {
         pc::PaneContext {
             session,
             system,
-            automations,
+            upcoming_automations,
+            automations: self.build_automations_snapshot(now_ms),
             tasks: self.build_tasks_snapshot(),
             files: self.build_files_snapshot(),
             review: self.build_review_snapshot(),
             session_list: self.build_session_list_snapshot(),
+        }
+    }
+
+    /// The automations pane's rows as the published snapshot carries them.
+    ///
+    /// Built from the same `cached_automations` the pane draws from, through the
+    /// same two resolvers (`automation_schedule_label` /
+    /// `automation_due_in_secs`), so the published row and the drawn one cannot
+    /// disagree about a schedule's label or a countdown. What it does **not** do is
+    /// compose the summary — that is the pane's, so both panes compose it through
+    /// one `ui::automations_panel::row_summary`.
+    fn build_automations_snapshot(
+        &self,
+        now_ms: u64,
+    ) -> crate::session::pane_context::AutomationsSnapshot {
+        use crate::session::pane_context as pc;
+
+        if !self.features.automations {
+            return pc::AutomationsSnapshot::default();
+        }
+        let search = self.global_search_query();
+        let entries: Vec<pc::AutomationRowSnapshot> = self
+            .automation_ui
+            .cached_automations
+            .iter()
+            .take(pc::MAX_AUTOMATION_ROWS)
+            .map(|a| {
+                let m = search.and_then(|q| crate::fuzzy::fuzzy_match(q, &a.name));
+                pc::AutomationRowSnapshot {
+                    id: a.id,
+                    name: a.name.clone(),
+                    enabled: a.enabled,
+                    action: a.action.kind(),
+                    schedule: automation::automation_schedule_label(a),
+                    due_in_secs: automation::automation_due_in_secs(a, now_ms),
+                    dimmed: search.is_some() && m.is_none(),
+                    match_positions: m.map(|m| m.positions).unwrap_or_default(),
+                }
+            })
+            .collect();
+        let selected = self.automation_ui.automation_panel_index;
+        // The scroll anchor, published whatever holds focus — a pane windows to its
+        // cursor even while the cursor is not being drawn.
+        //
+        // Clamped into the rows, matching `ui::automations_panel::cursor_row`: a
+        // stale selection left by a shortened list anchors on the last row, and the
+        // appearance follows the anchor because the host refuses a list whose cursor
+        // is not an index into its children. Past the *published bound* is a
+        // different case — the row was never sent, so there is nothing honest to
+        // anchor on and it is absent (the rule the file section already states).
+        let cursor = if entries.is_empty() || selected >= pc::MAX_AUTOMATION_ROWS {
+            None
+        } else {
+            Some(selected.min(entries.len() - 1))
+        };
+        pc::AutomationsSnapshot {
+            entries,
+            cursor,
+            // Exactly `ui::automations_panel::resolve_rows`'s rule: the pane draws
+            // its cursor while it holds focus, or while a global search is
+            // previewing a row here (so the moving cursor is visible even though
+            // focus is in the search strip). A plugin can observe neither, so it is
+            // resolved here.
+            //
+            // Deliberately **not** the editor/run-history focuses. `view.rs` maps
+            // those to `FocusLevel::Active`, which this pane draws identically to
+            // `Inactive` — so including them here would publish a cursor the native
+            // pane does not draw, and the two panes would disagree.
+            cursor_visible: matches!(self.focus, InputFocus::Automations)
+                || self.global_search_preview_kind()
+                    == Some(crate::app::search::SearchKind::Automation),
+            focused: matches!(self.focus, InputFocus::Automations),
         }
     }
 

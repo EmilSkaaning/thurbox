@@ -745,6 +745,13 @@ impl KeyChord {
             parts.push("cmd");
         }
         let key = match self.code {
+            // Named, because a literal space is not a token: `parse` trims its
+            // input, so `" "` round-trips to nothing and the two kernel actions
+            // whose default chord is the space bar (toggling an automation,
+            // cycling a task's status) could not be written to
+            // `keybindings.json` and read back, nor declared by a plugin
+            // manifest. Named in both directions or in neither.
+            KeyCode::Char(' ') => "space".into(),
             KeyCode::Char(c) => c.to_string(),
             KeyCode::F(n) => format!("f{n}"),
             KeyCode::Enter => "enter".into(),
@@ -823,6 +830,9 @@ impl KeyChord {
             "backspace" => KeyCode::Backspace,
             "delete" | "del" => KeyCode::Delete,
             "insert" | "ins" => KeyCode::Insert,
+            // See `display`: the space bar has no literal spelling that survives
+            // the trim above, so it is a name like every other non-printing key.
+            "space" => KeyCode::Char(' '),
             // "f1".."f12" — but NOT a bare "f", which is the letter key (the
             // `[1..].parse()` on "" used to fail and reject "ctrl+f" entirely).
             other
@@ -1576,10 +1586,34 @@ mod tests {
 
     #[test]
     fn chord_parse_round_trip() {
-        let cases = ["ctrl+n", "f1", "shift+pageup", "alt+enter", "q"];
+        let cases = ["ctrl+n", "f1", "shift+pageup", "alt+enter", "q", "space"];
         for c in cases {
             let chord = KeyChord::parse(c).expect(c);
             assert_eq!(chord.display(), c);
+        }
+    }
+
+    /// The space bar is named, in both directions.
+    ///
+    /// Regression: `display` emitted a literal `" "`, which `parse` trims to
+    /// nothing — so the default chord of the two actions that use the space bar
+    /// could not be written to `keybindings.json` and read back, and no plugin
+    /// manifest could declare it. Found by the automations pane's port, whose
+    /// toggle key is the space bar.
+    #[test]
+    fn the_space_bar_is_a_named_chord_in_both_directions() {
+        let space = KeyChord::plain(' ');
+        assert_eq!(space.display(), "space");
+        assert_eq!(KeyChord::parse("space"), Some(space));
+        assert_eq!(KeyChord::parse("SPACE"), Some(space));
+        // A literal space is still not a chord: `parse` trims, so there is
+        // nothing left of it. Which is the whole reason for the name.
+        assert_eq!(KeyChord::parse(" "), None);
+        // And the two kernel actions that use it now serialize.
+        for action in [Action::AutomationsToggle, Action::TasksCycleStatus] {
+            let chords = action.default_chords();
+            assert_eq!(chords[0].display(), "space", "{action:?}");
+            assert_eq!(KeyChord::parse(&chords[0].display()), Some(chords[0]));
         }
     }
 

@@ -19,8 +19,8 @@
 use mlua::{Lua, Table};
 
 use crate::session::pane_context::{
-    AutomationSnapshot, FileNodeSnapshot, PaneContext, ReviewLineSnapshot, SessionRowSnapshot,
-    SessionSnapshot, SystemSnapshot, TaskSnapshot,
+    AutomationRowSnapshot, FileNodeSnapshot, PaneContext, ReviewLineSnapshot, SessionRowSnapshot,
+    SessionSnapshot, SystemSnapshot, TaskSnapshot, UpcomingAutomationSnapshot,
 };
 
 /// Set `key` to `value` only when there is one.
@@ -144,26 +144,75 @@ fn build_system(lua: &Lua, m: &SystemSnapshot) -> mlua::Result<Table> {
     Ok(t)
 }
 
-/// Scheduled automations as an array, soonest first.
+/// Automations *due to fire* as an array, soonest first — the filtered view.
 ///
 /// An empty array rather than `Nil`: "there are none" is a fact the kernel knows,
 /// unlike "no metrics have been sampled yet", so a plugin can iterate without a
 /// nil check.
-pub fn automations_table(lua: &Lua, context: &PaneContext) -> mlua::Result<Table> {
+///
+/// The narrower of the two readers the automations capability grants; see
+/// [`automations_table`] for the pane's whole list.
+pub fn upcoming_automations_table(lua: &Lua, context: &PaneContext) -> mlua::Result<Table> {
     let t = lua.create_table()?;
-    for (i, a) in context.automations.iter().enumerate() {
-        t.set(i + 1, build_automation(lua, a)?)?;
+    for (i, a) in context.upcoming_automations.iter().enumerate() {
+        t.set(i + 1, build_upcoming_automation(lua, a)?)?;
     }
     Ok(t)
 }
 
-fn build_automation(lua: &Lua, a: &AutomationSnapshot) -> mlua::Result<Table> {
+fn build_upcoming_automation(lua: &Lua, a: &UpcomingAutomationSnapshot) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     // The row's identity, which is what a pane granted `automations-write` passes
     // back when it enables, runs or deletes the automation it drew.
     t.set("id", a.id)?;
     t.set("label", a.label.clone())?;
     t.set("dueInSecs", a.due_in_secs)?;
+    Ok(t)
+}
+
+/// The automations pane's rows:
+/// `{ entries = { … }, cursor = n?, cursorVisible = bool, focused = bool }`.
+///
+/// The second reader behind the automations capability, and the wider one: every
+/// automation rather than only the due ones. Always a table, for
+/// [`upcoming_automations_table`]'s reason.
+///
+/// `cursor` is **one-based** because it is handed straight to `ui.list`'s selected
+/// argument, and it is separate from `cursorVisible` because this pane windows to
+/// its cursor while not drawing it — the split ADR-38 established.
+pub fn automations_table(lua: &Lua, context: &PaneContext) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    let entries = lua.create_table()?;
+    for (i, a) in context.automations.entries.iter().enumerate() {
+        entries.set(i + 1, build_automation_row(lua, a)?)?;
+    }
+    t.set("entries", entries)?;
+    set_opt(
+        &t,
+        "cursor",
+        context.automations.cursor.map(|i| i as u64 + 1),
+    )?;
+    t.set("cursorVisible", context.automations.cursor_visible)?;
+    t.set("focused", context.automations.focused)?;
+    Ok(t)
+}
+
+fn build_automation_row(lua: &Lua, a: &AutomationRowSnapshot) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("id", a.id)?;
+    t.set("name", a.name.clone())?;
+    t.set("enabled", a.enabled)?;
+    t.set("action", a.action)?;
+    t.set("schedule", a.schedule.clone())?;
+    // Absent rather than 0 when there is no next run: "never" and "due now" are
+    // different rows, and the pane draws them differently.
+    set_opt(&t, "dueInSecs", a.due_in_secs)?;
+    t.set("dimmed", a.dimmed)?;
+    let matches = lua.create_table()?;
+    for (i, pos) in a.match_positions.iter().enumerate() {
+        matches.set(i + 1, *pos as u64)?;
+    }
+    t.set("matchPositions", matches)?;
     Ok(t)
 }
 
@@ -478,30 +527,95 @@ mod tests {
     }
 
     /// Unlike metrics, "no automations" is knowledge rather than absence, so it
-    /// crosses as an empty array a plugin can iterate unconditionally.
+    /// crosses as an empty array a plugin can iterate unconditionally — for both
+    /// readers the capability grants.
     #[test]
     fn no_automations_is_an_empty_array() {
         let lua = Lua::new();
-        let t = automations_table(&lua, &context(None)).unwrap();
+        let t = upcoming_automations_table(&lua, &context(None)).unwrap();
         assert_eq!(t.raw_len(), 0);
+
+        let pane = automations_table(&lua, &context(None)).unwrap();
+        assert_eq!(pane.get::<Table>("entries").unwrap().raw_len(), 0);
+        assert!(!pane.contains_key("cursor").unwrap(), "no row to anchor on");
     }
 
     #[test]
-    fn automations_carry_a_resolved_countdown() {
+    fn upcoming_automations_carry_a_resolved_countdown() {
         let lua = Lua::new();
         let ctx = PaneContext {
-            automations: vec![AutomationSnapshot {
+            upcoming_automations: vec![UpcomingAutomationSnapshot {
                 id: 7,
                 label: "nightly".to_string(),
                 due_in_secs: 90,
             }],
             ..PaneContext::default()
         };
-        let t = automations_table(&lua, &ctx).unwrap();
+        let t = upcoming_automations_table(&lua, &ctx).unwrap();
         let first: Table = t.get(1).unwrap();
         assert_eq!(first.get::<i64>("id").unwrap(), 7);
         assert_eq!(first.get::<String>("label").unwrap(), "nightly");
         assert_eq!(first.get::<u64>("dueInSecs").unwrap(), 90);
+    }
+
+    /// The pane's reader: every automation with the parts its summary is composed
+    /// from, and no composed summary — plus the anchor and the drawn cursor as two
+    /// separate answers.
+    #[test]
+    fn an_automation_row_crosses_as_parts_with_no_composed_summary() {
+        let lua = Lua::new();
+        let row = |id: i64, name: &str, enabled: bool, due: Option<u64>| AutomationRowSnapshot {
+            id,
+            name: name.to_string(),
+            enabled,
+            action: "spawn",
+            schedule: "daily 09:00".to_string(),
+            due_in_secs: due,
+            dimmed: false,
+            match_positions: vec![0, 5],
+        };
+        let ctx = PaneContext {
+            automations: crate::session::pane_context::AutomationsSnapshot {
+                entries: vec![
+                    row(3, "nightly sync", true, Some(120)),
+                    row(4, "paused", false, None),
+                ],
+                cursor: Some(1),
+                cursor_visible: false,
+                focused: false,
+            },
+            ..PaneContext::default()
+        };
+        let t = automations_table(&lua, &ctx).unwrap();
+        let entries: Table = t.get("entries").unwrap();
+        assert_eq!(entries.raw_len(), 2, "a disabled automation crosses too");
+
+        let first: Table = entries.get(1).unwrap();
+        assert_eq!(first.get::<i64>("id").unwrap(), 3);
+        assert_eq!(first.get::<String>("name").unwrap(), "nightly sync");
+        assert!(first.get::<bool>("enabled").unwrap());
+        assert_eq!(first.get::<String>("action").unwrap(), "spawn");
+        assert_eq!(first.get::<String>("schedule").unwrap(), "daily 09:00");
+        assert_eq!(first.get::<u64>("dueInSecs").unwrap(), 120);
+        assert_eq!(first.get::<Table>("matchPositions").unwrap().raw_len(), 2);
+        // The composition is the pane's, so no key holds the assembled string.
+        for absent in ["summary", "label", "glyph", "token", "marker"] {
+            assert!(
+                !first.contains_key(absent).unwrap(),
+                "`{absent}` must not cross — the pane composes its own row"
+            );
+        }
+
+        // "Never" is an absent key rather than a zero: "never" and "due now" are
+        // different rows and the pane draws them differently.
+        let second: Table = entries.get(2).unwrap();
+        assert!(!second.contains_key("dueInSecs").unwrap());
+        assert!(!second.get::<bool>("enabled").unwrap());
+
+        // One-based for `ui.list`, and the drawn cursor is its own answer.
+        assert_eq!(t.get::<u64>("cursor").unwrap(), 2);
+        assert!(!t.get::<bool>("cursorVisible").unwrap());
+        assert!(!t.get::<bool>("focused").unwrap());
     }
 
     /// A task row carries what a pane draws it from — and no glyph and no style

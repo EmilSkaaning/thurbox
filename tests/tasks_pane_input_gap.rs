@@ -20,6 +20,16 @@
 //! already expressible as record writes) still cannot name the row they would act
 //! on, because a plugin holds the keys only while the *kernel* publishes no cursor.
 //!
+//! **How that row was later narrowed, without weakening it.** The automations pane's
+//! port (ADR-41) showed that a plugin declaring `input` can keep a cursor **of its
+//! own** across renders — a VM persists between calls — and act on the row *it*
+//! drew, so "a plugin cannot name the row the user is looking at" is true of the
+//! kernel's cursor and not of panes in general. The tasks verdict stands as written:
+//! this pane's plugin declares no input and holds no cursor, so the kernel's is the
+//! only one it could name, and its other three rows are untouched by the
+//! distinction. What changed is the *scope* of the sentence, which the row's `stands`
+//! now says, so nobody reads it as a wall the host has since walked through.
+//!
 //! Three things this gate is deliberately not:
 //!
 //! - it is **not** the teardown gate, which answers whether
@@ -97,11 +107,15 @@ const BLOCKERS: &[Blocker] = &[
     },
     Blocker {
         id: "input-and-cursor-are-disjoint",
-        needs: "acting on the row the user is looking at — which is what the two keys that need \
-                no new host power, `Space` and `d`, would do",
+        needs: "acting on the row the user is looking at **through the kernel's cursor** — which \
+                is what the two keys that need no new host power, `Space` and `d`, would do in \
+                this pane's plugin, since it declares no input and so keeps no cursor of its own",
         stands: "a plugin receives keys only while one of its own panes holds focus, and the \
                  published task row is marked as the cursor's only while the *native* pane holds \
-                 focus or a search preview moves it, so the two are never true at once",
+                 focus or a search preview moves it, so the two are never true at once. Narrower \
+                 than it first read: the automations port showed that a pane declaring `input` \
+                 can hold a cursor **of its own** across renders and act on that row, so this \
+                 row is about the kernel's cursor rather than about panes in general",
         gap: Gap::Structural,
         blocked: true,
         probe: |root| {

@@ -439,6 +439,42 @@ pub fn truncate_ellipsis(s: &str, max: usize) -> String {
     format!("{kept}…")
 }
 
+/// Format a duration until an event as a human-readable countdown (`due`,
+/// `in 45s`, `in 2m 30s`, `in 3h 20m`).
+///
+/// Lives here rather than in `app` because it is presentation, and because the
+/// automations pane's tree builder needs it: a pane's summary is composed in `ui`
+/// so the native pane and the published snapshot's consumer cannot disagree about
+/// the rule.
+///
+/// Takes **seconds**, which is the granularity it displays at and the granularity
+/// [`crate::session::pane_context::AutomationRowSnapshot::due_in_secs`] publishes —
+/// so a plugin's copy and this one are formatting the same number. Callers holding
+/// milliseconds divide, which is what this function used to do internally.
+pub fn format_countdown(remaining_secs: u64) -> String {
+    if remaining_secs == 0 {
+        "due".to_string()
+    } else if remaining_secs < 60 {
+        format!("in {remaining_secs}s")
+    } else if remaining_secs < 3600 {
+        let m = remaining_secs / 60;
+        let s = remaining_secs % 60;
+        if s == 0 {
+            format!("in {m}m")
+        } else {
+            format!("in {m}m {s}s")
+        }
+    } else {
+        let h = remaining_secs / 3600;
+        let m = (remaining_secs % 3600) / 60;
+        if m == 0 {
+            format!("in {h}h")
+        } else {
+            format!("in {h}h {m}m")
+        }
+    }
+}
+
 /// Fit a right-aligned top-border title into the space a left-side tab strip
 /// leaves it. `border_width` is the full pane width (its two corner cells are
 /// never title cells); `reserved_left` is the columns the tabs occupy on the
@@ -1036,6 +1072,23 @@ mod tests {
 
     fn area(width: u16, height: u16) -> Rect {
         Rect::new(0, 0, width, height)
+    }
+
+    /// The boundaries, in seconds — the granularity the function now takes. The
+    /// millisecond callers divide, so `999 ms` still reads `due` by arriving as 0.
+    #[test]
+    fn format_countdown_boundaries() {
+        assert_eq!(format_countdown(0), "due");
+        assert_eq!(format_countdown(1), "in 1s");
+        assert_eq!(format_countdown(45), "in 45s");
+        assert_eq!(format_countdown(59), "in 59s");
+        assert_eq!(format_countdown(60), "in 1m");
+        assert_eq!(format_countdown(90), "in 1m 30s");
+        assert_eq!(format_countdown(300), "in 5m");
+        assert_eq!(format_countdown(3_599), "in 59m 59s");
+        assert_eq!(format_countdown(3_600), "in 1h");
+        assert_eq!(format_countdown(5_400), "in 1h 30m");
+        assert_eq!(format_countdown(7_200), "in 2h");
     }
 
     #[test]

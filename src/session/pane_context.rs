@@ -190,8 +190,14 @@ pub struct SystemSnapshot {
 }
 
 /// One scheduled automation that has not fired yet.
+///
+/// The *filtered* view — enabled and scheduled only — that the info panel's
+/// countdown list draws. Distinct from [`AutomationRowSnapshot`], which is every
+/// automation as the automations pane lists them; both are read through the same
+/// capability, because "reads the automations you have scheduled" is one question
+/// to ask a user whether the answer is the due ones or all of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AutomationSnapshot {
+pub struct UpcomingAutomationSnapshot {
     /// Its row id.
     ///
     /// Published because a pane granted the automation-write capability addresses
@@ -210,6 +216,91 @@ pub struct AutomationSnapshot {
     pub due_in_secs: u64,
 }
 
+/// One row of the automations pane, as a pane draws it.
+///
+/// The interesting field is the one that is **not** here: the row's summary. The
+/// pane shows `<schedule> · <action> · <when>`, and publishing that string would
+/// make a pane an arrangement of text the kernel formatted — the thing this
+/// module's header refuses. So the *parts* cross and the composition is the pane's,
+/// with exactly two of them resolved by the kernel because a sandboxed plugin
+/// cannot: `schedule` (a cron expression's meaning is thurbox's own vocabulary,
+/// shared with the automation editor) and `due_in_secs` (a VM has no clock).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationRowSnapshot {
+    /// The automation's row id, which is what a pane granted the automation-write
+    /// capability passes to enable, run or delete the row it drew.
+    pub id: i64,
+    /// The automation's name, as the model knows it.
+    ///
+    /// Not fitted to any column, for [`TaskSnapshot::title`]'s reason: a width is
+    /// resolved during a frame, this is published on the tick, and the plugin's
+    /// pane is a different rect from the native one.
+    pub name: String,
+    /// Whether it is enabled. Every automation crosses, so a pane draws the
+    /// disabled ones too — unlike [`UpcomingAutomationSnapshot`], which is
+    /// filtered.
+    pub enabled: bool,
+    /// The action's stable wire name (`send` / `spawn` / `exec`).
+    pub action: &'static str,
+    /// The schedule's resolved human label (`once`, `daily 09:00`, `hourly :15`,
+    /// or the raw cron expression when it maps to no preset).
+    pub schedule: String,
+    /// Whole seconds until the next run, or `None` when it has none.
+    pub due_in_secs: Option<u64>,
+    /// Whether a running search filtered this row out.
+    pub dimmed: bool,
+    /// Byte offsets in `name` a running search matched. Empty when no search is
+    /// running or this row did not match; the pane decides how a matched run is
+    /// emphasised.
+    pub match_positions: Vec<usize>,
+}
+
+/// The automations pane's rows, with the cursor's position in them.
+///
+/// The section that made ADR-38's split earn its keep a second time. This pane
+/// windows to its cursor's row **whether or not it holds focus**, and draws the
+/// cursor only when it does (or when a global search is previewing a row here), so
+/// the anchor and the appearance are genuinely two answers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AutomationsSnapshot {
+    /// One entry per row, in the order the pane lists them.
+    pub entries: Vec<AutomationRowSnapshot>,
+    /// Which row the pane's cursor is on — the **scroll anchor**, zero-based into
+    /// `entries`.
+    ///
+    /// `None` when there is no row to name, and never an index past the published
+    /// rows: an anchor into rows a pane never received would make the kernel's own
+    /// windowing meaningless (the rule [`FilesSnapshot`] states for its bound).
+    pub cursor: Option<usize>,
+    /// Whether that cursor is **drawn**.
+    ///
+    /// The second half of the split, and one flag on the section rather than a
+    /// `selected` per row — which is where this section deliberately differs from
+    /// [`TasksSnapshot`]. For this pane the whole cursor appears and disappears
+    /// with the pane's focus, so `selected` would be `cursor_visible && i == cursor`
+    /// on every row: one fact in `n + 1` places, and a publication could then
+    /// highlight one row while scrolling to another. Two fields cannot express that
+    /// disagreement.
+    pub cursor_visible: bool,
+    /// Whether the automations pane holds focus, which is the one thing besides
+    /// the rows that changes what is drawn: the empty-state line names the key that
+    /// adds an automation only when the pane can receive it.
+    ///
+    /// This is the **native** pane's focus. A plugin pane is a different focus and
+    /// is told nothing about its own — see `thurbox.d.luau`.
+    pub focused: bool,
+}
+
+/// Most automation rows a publication carries.
+///
+/// A bound on the *section* for [`MAX_TASK_ROWS`]' reason: a row costs several
+/// view-tree nodes against [`super::view_tree::MAX_NODES`], so an unbounded list
+/// would make every render of an automations pane fail rather than merely scroll.
+/// The same order of magnitude as the task bound because the two lists are the same
+/// kind of thing — hand-authored records, not a directory walk — so neither is
+/// plausibly exceeded.
+pub const MAX_AUTOMATION_ROWS: usize = 200;
+
 /// One row of the task list, as a pane draws it.
 ///
 /// Four of the six fields are view facts rather than stored ones, and they are
@@ -225,7 +316,7 @@ pub struct AutomationSnapshot {
 pub struct TaskSnapshot {
     /// The task's row id.
     ///
-    /// Published for [`AutomationSnapshot::id`]'s reason: a pane granted the
+    /// Published for [`UpcomingAutomationSnapshot::id`]'s reason: a pane granted the
     /// task-write capability addresses a task by id, and the row it drew is the
     /// one it acts on.
     pub id: i64,
@@ -527,8 +618,11 @@ pub struct PaneContext {
     pub session: Option<SessionSnapshot>,
     /// Host resource metrics, or `None` before the first sample.
     pub system: Option<SystemSnapshot>,
-    /// Automations due to fire, soonest first.
-    pub automations: Vec<AutomationSnapshot>,
+    /// Automations due to fire, soonest first — the info panel's filtered view.
+    pub upcoming_automations: Vec<UpcomingAutomationSnapshot>,
+    /// Every automation, in the order the automations pane lists them. Empty when
+    /// there are none or the feature is off.
+    pub automations: AutomationsSnapshot,
     /// The task list, empty when there are no tasks or the feature is off.
     pub tasks: TasksSnapshot,
     /// The file tree the file viewer has open, empty when it has none or the
@@ -627,7 +721,8 @@ mod tests {
                 usage: None,
             }),
             system: None,
-            automations: Vec::new(),
+            upcoming_automations: Vec::new(),
+            automations: AutomationsSnapshot::default(),
             tasks: TasksSnapshot::default(),
             files: FilesSnapshot::default(),
             review: ReviewSnapshot::default(),

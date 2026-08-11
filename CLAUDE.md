@@ -942,7 +942,7 @@ and granted capabilities, and everything discovery rejected with its cause.
 failure is invisible until something runs them; `doctor` discovers only.
 Plugins live in `~/.config/thurbox/plugins/<name>/` as a `plugin.toml` plus an
 `init.luau`; the bundled `hello`, `info-panel`, `tasks`, `file-viewer`,
-`code-review` and `session-list` plugins are materialized to
+`code-review`, `session-list` and `automations` plugins are materialized to
 `~/.local/share/thurbox/builtin-plugins/`, and a user plugin of the same name
 overrides it) and **`command`** (list/describe/run: the typed, agent-callable
 plugin command registry — below; unlike `plugin list`, discovery here starts no
@@ -1033,8 +1033,8 @@ builds and publishes it from `tick_core` and `plugin` reads it when a plugin cal
 a reader, so no plugin call lands on the UI thread and no new module edge appears
 (the precedent is `session::spawn_contribution`). Reading is gated **per kind of
 state** — `sessions` → `thurbox.activeSession()`, `metrics` →
-`thurbox.systemMetrics()`, `automations` → `thurbox.upcomingAutomations()`,
-`tasks` → `thurbox.tasks()` —
+`thurbox.systemMetrics()`, `automations` → `thurbox.upcomingAutomations()` +
+`thurbox.automations()`, `tasks` → `thurbox.tasks()` —
 because the capability list is what an install prompt is written from, and "reads
 your sessions" is a different question from "reads this machine's CPU". The
 snapshot resolves only what a sandboxed plugin *cannot compute* (the VM loads no
@@ -1229,11 +1229,15 @@ to the closed `Action` enum.
 A pane plugin reads kernel state through **capability-gated readers** over one
 published snapshot (`session::pane_context`, ADR-27): `sessions` →
 `thurbox.activeSession()` **and** `thurbox.sessionList()`, `metrics` →
-`thurbox.systemMetrics()`, `automations` →
-`thurbox.upcomingAutomations()`, `tasks` → `thurbox.tasks()`, `files` →
+`thurbox.systemMetrics()`, `automations` → `thurbox.upcomingAutomations()` **and**
+`thurbox.automations()`, `tasks` → `thurbox.tasks()`, `files` →
 `thurbox.files()`, and `review` → `thurbox.review()`. Gated per *kind* rather than
 by one blanket grant because the capability list is what an install prompt is
-written from. **`files` is not a
+written from — which is also why `automations` grants **two** readers rather than
+splitting (ADR-41): the filtered list of what is due (the info panel's) and the
+automations pane's whole list with its cursor answer one sentence a user is asked,
+and "the due ones" versus "all of them" is not a distinction anyone is protected
+by. **`files` is not a
 filesystem capability** (ADR-30): it reports the tree thurbox's *file viewer* has
 open — one **basename** per visible row with its depth, its expansion state and
 the running search's verdict, plus the cursor's row and whether nerd-font glyphs
@@ -1277,7 +1281,20 @@ the widest grant in the host and its sentence says so — an automation the *use
 authored may run a shell command, and this capability can cause one to run; what
 bounds it is that a plugin can neither author nor edit one. The reads and writes are
 separate grants in both directions: a pane that only draws the task list never holds
-the power to delete. The database seam mirrors the plugin store —
+the power to delete. The **bundled `automations` pane** is the first consumer of
+either (ADR-41): it declares `input` + `automations-write` and ports five of the
+native pane's seven keys — `j`/`k` move **its own** cursor (a VM persists across
+renders, so a plugin pane's cursor needs no view write — which is what ADR-38's
+"a plugin cannot name the row the user is looking at" was right about only for
+the *kernel's* cursor), and `Space`/`r`/`d` act on that row by the id the section
+published. The two it cannot port are recorded with the power each needs: `n`
+(creation, which the seam has none of by construction) and `Enter`/`e` (the
+central-pane editor). Its circular `j`/`k` wrap with the session list stays
+**kernel-owned** — the plugin declines the key at its edge, and moving focus is view
+state no capability writes — because a wrap is a claim about adjacency and
+`PaneSlot` cannot seat the pane where the native one sits.
+
+The database seam mirrors the plugin store —
 `session::plugin_mutations::KernelWriter` declared in the pure-data layer,
 implemented by `storage::plugins::DbKernelWriter`, built per VM **on its own
 thread**; a write reaches the panes through the `PRAGMA data_version` poll that

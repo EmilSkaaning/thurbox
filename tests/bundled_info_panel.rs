@@ -22,8 +22,8 @@ use std::path::PathBuf;
 
 use thurbox::plugin::{discovery, ExecutionBounds, PluginHost};
 use thurbox::session::pane_context::{
-    AgentMetricsSnapshot, AutomationSnapshot, GitSnapshot, PaneContext, SessionSnapshot,
-    StatusSnapshot, SystemSnapshot, UsageSnapshot, UsageWindowSnapshot,
+    AgentMetricsSnapshot, GitSnapshot, PaneContext, SessionSnapshot, StatusSnapshot,
+    SystemSnapshot, UpcomingAutomationSnapshot, UsageSnapshot, UsageWindowSnapshot,
 };
 use thurbox::session::view_tree::ViewNode;
 use thurbox::session::{
@@ -164,10 +164,14 @@ impl Case {
                 session_memory_bytes: m.session_memory_bytes,
                 thurbox_dir_bytes: self.disk,
             }),
-            automations: self
+            // The pane's own automations section stays default: this plugin reads
+            // the *upcoming* list, and the two readers behind one capability being
+            // independently readable is what `bundled_automations_panel` pins.
+            automations: Default::default(),
+            upcoming_automations: self
                 .automations
                 .iter()
-                .map(|a| AutomationSnapshot {
+                .map(|a| UpcomingAutomationSnapshot {
                     // The id is not drawn by either pane; a fixed value keeps the
                     // two trees comparable while the field exists for a pane that
                     // may *change* an automation.
@@ -490,6 +494,7 @@ fn with_no_session_the_plugin_still_shows_what_it_knows() {
         files: Default::default(),
         review: Default::default(),
         session_list: Default::default(),
+        automations: Default::default(),
         system: Some(SystemSnapshot {
             cpu_percent: 5.0,
             memory_used: 1_073_741_824,
@@ -498,7 +503,7 @@ fn with_no_session_the_plugin_still_shows_what_it_knows() {
             session_memory_bytes: 0,
             thurbox_dir_bytes: None,
         }),
-        automations: Vec::new(),
+        upcoming_automations: Vec::new(),
     });
     let tree = render(&host);
     let rows = match &tree {

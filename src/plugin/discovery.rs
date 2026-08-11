@@ -204,6 +204,15 @@ const BUNDLED: &[BundledPlugin] = &[
         manifest: include_str!("bundled/session-list/plugin.toml"),
         entry: include_str!("bundled/session-list/init.luau"),
     },
+    // The automations pane, hidden by default too — the last native pane with no
+    // plugin, and the first bundled one that takes *input* and *writes*: its
+    // cursor is its own, and five of its seven keys act through
+    // `automations-write`.
+    BundledPlugin {
+        name: "automations",
+        manifest: include_str!("bundled/automations/plugin.toml"),
+        entry: include_str!("bundled/automations/init.luau"),
+    },
 ];
 
 /// Materialize the bundled plugins and return their directories.

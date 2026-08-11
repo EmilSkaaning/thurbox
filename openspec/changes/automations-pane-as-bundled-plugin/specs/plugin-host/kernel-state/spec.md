@@ -80,8 +80,10 @@ row whether or not it holds focus, and highlights it only when it does or when a
 global search is previewing a row there.
 
 The kernel MUST resolve both, since a plugin can observe neither focus nor a search
-preview. The section MUST NOT publish the same fact twice — a per-row "this row is
-the cursor" flag alongside an index would be two representations that can disagree.
+preview. Where the drawn cursor is a property of the *section* — as it is for a pane
+whose whole cursor appears or disappears with its focus — the section MUST publish it
+once as a section-level flag rather than restating it on every row, so that a
+publication cannot highlight one row while scrolling to another.
 
 The section MUST also carry whether the pane holds focus when that changes what is
 drawn, so an empty pane names the key that adds an automation only when the pane

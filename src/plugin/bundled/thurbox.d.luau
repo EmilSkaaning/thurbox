@@ -251,6 +251,64 @@ export type UpcomingAutomation = {
     dueInSecs: number,
 }
 
+-- One row of the automations pane — *every* automation, unlike
+-- `UpcomingAutomation`, which is filtered to the ones due to fire. Both are read
+-- through the same `automations` capability, because "reads the automations you
+-- have scheduled" is one question to ask a user whichever view you want.
+--
+-- The interesting field is the one that is **not** here: the row's summary. The
+-- pane shows `<schedule> · <action> · <when>` and you compose it, from the parts
+-- below. Two of them the host resolves because a sandbox cannot: `schedule` (a
+-- cron expression's meaning is thurbox's own vocabulary) and `dueInSecs` (you have
+-- no clock). The separator, the ordering, and the precedence that shows `disabled`
+-- for a disabled automation, a countdown for a scheduled one and a placeholder for
+-- an enabled one with no next run, are yours.
+--
+-- `dueInSecs` is **absent**, not zero, when there is no next run: "never" and "due
+-- now" are different rows.
+--
+-- `matchPositions` are zero-based *byte* offsets into `name`, with the same two
+-- edge rules `TaskEntry` documents.
+export type AutomationEntry = {
+    -- The row's id, and the only thing to pass to `setAutomationEnabled`,
+    -- `runAutomation` and `deleteAutomation`. Address the row you drew rather than
+    -- an index: your cursor and the host's list agree today and an index would
+    -- silently act on the wrong record the moment they did not.
+    id: number,
+    name: string,
+    enabled: boolean,
+    action: string,
+    schedule: string,
+    dueInSecs: number?,
+    dimmed: boolean,
+    matchPositions: { number },
+}
+
+-- The automations pane's rows, with the cursor's position in them.
+--
+-- `cursor` is the 1-based scroll anchor — hand it straight to `ui.list`'s second
+-- argument and your pane scrolls. `cursorVisible` is whether that row is **drawn**
+-- as the cursor, which is a different question: thurbox's pane windows to its
+-- cursor whether or not it holds focus and highlights it only when it does (or when
+-- a global search is previewing a row there). Anchoring on the appearance instead
+-- would make your copy jump back to its first row whenever thurbox's pane lost
+-- focus.
+--
+-- Two fields where `TaskList` has an anchor plus a `selected` on every row, and the
+-- difference is deliberate: here the whole cursor appears and disappears with the
+-- pane's focus, so a per-row flag would be one fact in n + 1 places — and a
+-- publication could then highlight one row while scrolling to another.
+--
+-- `focused` is whether **thurbox's** automations pane holds focus. It is not a fact
+-- about your pane: the host tells a pane nothing about its own focus, so a pane
+-- with keys knows only that a key arrived, which only a focused pane receives.
+export type AutomationList = {
+    entries: { AutomationEntry },
+    cursor: number?,
+    cursorVisible: boolean,
+    focused: boolean,
+}
+
 -- One row of the task list.
 --
 -- The status is a *name*, not a glyph and not a token: which checkbox a state
@@ -415,8 +473,14 @@ export type Thurbox = {
     -- Present only with `metrics`. `nil` until the first sample.
     systemMetrics: (() -> SystemMetrics?)?,
     -- Present only with `automations`. Always an array — "there are none" is a
-    -- fact, so it needs no nil check — soonest first.
+    -- fact, so it needs no nil check — soonest first, and filtered to the
+    -- automations that are enabled and scheduled.
     upcomingAutomations: (() -> { UpcomingAutomation })?,
+    -- Present only with `automations`, the same grant `upcomingAutomations` needs.
+    -- Always a table. The wider view: *every* automation, enabled and disabled, in
+    -- the order thurbox's own pane lists them, with the cursor's row. Names are
+    -- **not** fitted to any width: your pane's size is not yours to know.
+    automations: (() -> AutomationList)?,
     -- Present only with `tasks`. Always a table — "there are no tasks" is a
     -- fact — whose `entries` are in the order the pane lists them. Titles are
     -- *not* fitted to any width: your pane's size is not yours to know, so draw

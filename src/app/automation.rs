@@ -8,7 +8,6 @@
 //! as `App::automation_ui`; this module only operates on it.
 
 use super::modals;
-use super::view;
 use super::{App, InputFocus, StatusLevel};
 use crate::session::{
     Automation, AutomationAction, AutomationRunStatus, AutomationSchedule, SessionId,
@@ -1029,25 +1028,44 @@ impl App {
     }
 }
 
-/// One-line summary of an automation for the list modal:
-/// `<schedule> · <action> · <when>`.
-pub(crate) fn format_automation_summary(auto: &Automation, now: u64) -> String {
-    let schedule = match &auto.schedule {
+/// The schedule's human label, as both the pane and the list modal show it.
+///
+/// A preset cron shape gets thurbox's own vocabulary (`daily 09:00`,
+/// `weekdays 08:30`, `Mondays 07:00`, `hourly :15`); a power-user expression that
+/// maps to no preset falls back to the raw expression. Resolved by the kernel
+/// because it *is* the kernel's vocabulary — a sandboxed pane could not derive it,
+/// which is why the published snapshot carries the label rather than the cron.
+pub(crate) fn automation_schedule_label(auto: &Automation) -> String {
+    match &auto.schedule {
         AutomationSchedule::Once { .. } => "once".to_string(),
-        // Show a human-readable schedule for preset cron shapes; fall back to the
-        // raw expression for power-user crons that don't map to a preset.
         AutomationSchedule::Cron { expr } => {
             modals::humanize_cron(expr).unwrap_or_else(|| expr.clone())
         }
-    };
-    let action = auto.action.kind();
-    let when = if !auto.enabled {
-        "disabled".to_string()
-    } else if let Some(next) = auto.next_run_at {
-        // `format_countdown` already includes the "in " prefix.
-        view::format_countdown(next.saturating_sub(now))
-    } else {
-        "—".to_string()
-    };
-    format!("{schedule} · {action} · {when}")
+    }
+}
+
+/// Whole seconds until `auto` next fires, or `None` when it has no next run.
+///
+/// Seconds because that is the granularity a countdown is displayed at and the
+/// granularity the published snapshot carries, so the plugin's copy and the native
+/// pane format the same number.
+pub(crate) fn automation_due_in_secs(auto: &Automation, now: u64) -> Option<u64> {
+    auto.next_run_at
+        .map(|next| next.saturating_sub(now) / 1_000)
+}
+
+/// One-line summary of an automation for the list modal:
+/// `<schedule> · <action> · <when>`.
+///
+/// The adapter over [`crate::ui::automations_panel::row_summary`]: it resolves the
+/// parts from a stored `Automation` and the composition lives in `ui` beside the
+/// pane's tree builder, so the modal, the pane and the bundled plugin's
+/// reproduction are all measured against one rule.
+pub(crate) fn format_automation_summary(auto: &Automation, now: u64) -> String {
+    crate::ui::automations_panel::row_summary(
+        &automation_schedule_label(auto),
+        auto.action.kind(),
+        auto.enabled,
+        automation_due_in_secs(auto, now),
+    )
 }

@@ -1,0 +1,89 @@
+# thurbox's automations pane, as a plugin.
+#
+# The sixth pane of Phase 4 and the last native pane that had no plugin at all.
+# It is also the first bundled plugin that **takes input and writes**: every port
+# before it shipped a read-only reproduction.
+#
+# What that changed. The tasks port (ADR-38) recorded a pane's keys as unportable
+# because a plugin "cannot name the row the user is looking at" — true of the
+# *kernel's* cursor, which is marked only while thurbox's own pane holds focus.
+# A plugin granted `input` receives keys only while its **own** pane is focused,
+# and a VM persists across renders, so the row the user is looking at is the row
+# this plugin's own cursor is on. That cursor starts as the one the host published
+# (so an undriven pane reproduces the native one exactly) and moves from there.
+#
+# Five of the pane's seven keys ship: `j`/`k` (and the arrows) move the cursor,
+# `Space` toggles enabled, `r` runs now, `d` deletes. The two that do not are
+# `n` (creating an automation — the write seam has no creation binding, by
+# construction) and `Enter`/`e` (the central-pane editor — a seat `PaneSlot` does
+# not offer, a focus a plugin cannot take, and text authoring
+# `automations-write` is defined to exclude).
+#
+# `r` is a **request**, and the property matters here because an automation the
+# *user* authored may run a shell command: the binding marks it due and the
+# kernel fires it on its own pass. Nothing runs on this plugin's thread, and a
+# plugin can neither author nor edit an automation — so the set of programs
+# reachable is exactly the set already scheduled.
+#
+# Four capabilities, and that is the whole reach: it renders, it reads the
+# automations thurbox has scheduled, it receives keys while its own pane is
+# focused, and it changes the three things `automations-write` defines. It reads
+# no session, runs no command, and touches no file.
+#
+# A *reproduction*, not a replacement — the native pane is still what the left
+# column shows, and `tests/bundled_automations_panel.rs` asserts this plugin
+# builds the identical view tree, paints the identical frame when the pane
+# scrolls, and reaches the same database rows its keys do.
+name = "automations"
+api_version = 1
+
+capabilities = ["render", "automations", "input", "automations-write"]
+
+[[panes]]
+id = "automations"
+title = "Automations (plugin)"
+# The native pane sits in the **left** column, beneath the session list, and
+# `PaneSlot` names only `right`. So the reproduction is placeable as a pane and
+# not placeable where this pane is: the equality claim is about its *content*.
+# `the_pane_cannot_be_placed_where_the_native_one_sits` pins the refusal so
+# adding the slot forces the finding to be revisited.
+slot = "right"
+# Off by default. The native pane is still what the left column draws, so shipping
+# this visible would put two automations lists on screen for every user. Turn it
+# on to compare them — and, since this one has keys, to drive it.
+default_visible = false
+
+# One binding per ported key. A `[[keybindings]]` entry carries **one** chord
+# where a kernel `Action` carries a list, so the letter is declared (which is what
+# the F1 editor shows and rebinds) and the arrow equivalents are handled as raw
+# key names in `onKey`. Recorded in the change's design §6 rather than worked
+# around silently: the natural closure is `chord` accepting a list.
+[[keybindings]]
+id = "next"
+pane = "automations"
+title = "Next automation"
+chord = "j"
+
+[[keybindings]]
+id = "prev"
+pane = "automations"
+title = "Previous automation"
+chord = "k"
+
+[[keybindings]]
+id = "toggle"
+pane = "automations"
+title = "Toggle enabled"
+chord = "space"
+
+[[keybindings]]
+id = "run"
+pane = "automations"
+title = "Run now"
+chord = "r"
+
+[[keybindings]]
+id = "delete"
+pane = "automations"
+title = "Delete automation"
+chord = "d"

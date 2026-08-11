@@ -173,12 +173,25 @@ pub fn build_module_table(
         module.set("systemMetrics", read)?;
     }
 
+    // Two readers behind one capability, which is the exception to the
+    // one-capability-per-kind rule and needs its reason stated: they are two views
+    // of the same records — the ones due to fire, and every one with the pane's
+    // cursor in it — so a user approving "reads the automations you have scheduled"
+    // has approved both. Splitting them would ask a user to distinguish "the due
+    // ones" from "all of them", which protects nobody, and would force the pane
+    // that draws the list to demand two grants.
     if granted.has(Capability::Automations) {
+        let read = lua.create_function(|lua, ()| {
+            let context = crate::session::pane_context::published().unwrap_or_default();
+            super::kernel_state::upcoming_automations_table(lua, &context)
+        })?;
+        module.set("upcomingAutomations", read)?;
+
         let read = lua.create_function(|lua, ()| {
             let context = crate::session::pane_context::published().unwrap_or_default();
             super::kernel_state::automations_table(lua, &context)
         })?;
-        module.set("upcomingAutomations", read)?;
+        module.set("automations", read)?;
     }
 
     if granted.has(Capability::Tasks) {
@@ -666,57 +679,36 @@ mod tests {
         assert!(ui.is_readonly());
     }
 
-    /// Kernel state is gated per kind, so one grant must not imply another:
-    /// a pane that wants a session name must not thereby read host telemetry.
+    /// Kernel state is gated per kind, so one grant must not imply another: a pane
+    /// that wants a session name must not thereby read host telemetry.
+    ///
+    /// Two capabilities grant **two** readers each and the table says so per
+    /// capability rather than per reader, because that is the property: `sessions`
+    /// covers the active session *and* the whole list, and `automations` covers the
+    /// due ones *and* the pane's whole list. Every other reader must be absent, so
+    /// a new state reader added without a grant fails here.
     #[test]
     fn each_state_reader_is_gated_by_its_own_capability() {
+        const ALL: [&str; 7] = [
+            "activeSession",
+            "sessionList",
+            "systemMetrics",
+            "upcomingAutomations",
+            "automations",
+            "tasks",
+            "files",
+        ];
         let lua = Lua::new();
-        for (capability, present, absent) in [
-            (
-                Capability::Sessions,
-                "activeSession",
-                ["systemMetrics", "upcomingAutomations", "tasks", "files"],
-            ),
-            (
-                Capability::Metrics,
-                "systemMetrics",
-                ["activeSession", "upcomingAutomations", "tasks", "files"],
-            ),
+        for (capability, present) in [
+            (Capability::Sessions, &["activeSession", "sessionList"][..]),
+            (Capability::Metrics, &["systemMetrics"][..]),
             (
                 Capability::Automations,
-                "upcomingAutomations",
-                ["activeSession", "systemMetrics", "tasks", "files"],
+                &["upcomingAutomations", "automations"][..],
             ),
-            (
-                Capability::Tasks,
-                "tasks",
-                [
-                    "activeSession",
-                    "systemMetrics",
-                    "upcomingAutomations",
-                    "files",
-                ],
-            ),
-            (
-                Capability::Files,
-                "files",
-                [
-                    "activeSession",
-                    "systemMetrics",
-                    "upcomingAutomations",
-                    "tasks",
-                ],
-            ),
-            (
-                Capability::Review,
-                "review",
-                [
-                    "activeSession",
-                    "systemMetrics",
-                    "upcomingAutomations",
-                    "tasks",
-                ],
-            ),
+            (Capability::Tasks, &["tasks"][..]),
+            (Capability::Files, &["files"][..]),
+            (Capability::Review, &["review"][..]),
         ] {
             let module = build_module_table(
                 &lua,
@@ -726,13 +718,15 @@ mod tests {
                 None,
             )
             .unwrap();
-            assert!(
-                module.contains_key(present).unwrap(),
-                "{capability} should grant {present}"
-            );
-            for name in absent {
+            for name in present {
                 assert!(
-                    !module.contains_key(name).unwrap(),
+                    module.contains_key(*name).unwrap(),
+                    "{capability} should grant {name}"
+                );
+            }
+            for name in ALL.iter().filter(|n| !present.contains(n)) {
+                assert!(
+                    !module.contains_key(*name).unwrap(),
                     "{capability} must not grant {name}"
                 );
             }

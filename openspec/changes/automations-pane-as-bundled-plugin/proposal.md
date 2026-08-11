@@ -1,10 +1,12 @@
-# Render the automations pane from a bundled Luau plugin
+# Render and drive the automations pane from a bundled Luau plugin
 
 ## Why
 
-Phase 4 turns thurbox's native panes into bundled plugins, easiest first: info
-panel (ADR-27), tasks (ADR-29), file viewer (ADR-30). The automations pane is
-next, and it is the first port that is not simply "another list":
+Phase 4 turns thurbox's native panes into bundled plugins. Five are done — info
+panel (ADR-27), tasks (ADR-29), file viewer (ADR-30), code review in part
+(ADR-31), session list (ADR-33) — and the automations pane is the sixth and the
+last one with no plugin at all. It is the first port that is not simply "another
+list":
 
 - it is the only pane in the phase that lives in the **left column, beneath the
   session list** — every pane ported so far sat in the right column, which is the
@@ -12,9 +14,16 @@ next, and it is the first port that is not simply "another list":
 - its rows carry a **composed summary** (`daily 09:00 · spawn · in 3h`) built from
   a schedule, an action and a countdown, so it is the first port that has to
   decide whether the kernel publishes a display string or its parts;
-- and it is the first list pane whose **scroll anchor and cursor appearance come
-  apart**: it windows to the cursor's row whether or not the pane is focused, but
-  draws the cursor only when it is (or when a global search previews it).
+- its **scroll anchor and cursor appearance come apart**: it windows to the
+  cursor's row whether or not the pane is focused, but draws the cursor only when
+  it is (or when a global search previews it);
+- and it is the first pane whose **keys are portable**. Every previous port
+  shipped a read-only reproduction, and the tasks port recorded the pane's keys as
+  kernel-owned because a plugin "cannot name the row the user is looking at". That
+  verdict is right about the *kernel's* cursor and too strong in general: a plugin
+  granted `input` receives keys only while its own pane is focused, so the row the
+  user is looking at is the one **its own** cursor is on. This port is where that
+  distinction is made and used.
 
 The v1 behaviour being reproduced is the body of `src/ui/automations_panel.rs`:
 one row per automation as `<space><marker><space><name> — <summary><space>`, where
@@ -27,10 +36,15 @@ summary tail is drawn in the row's base style, and an empty pane shows a muted
 `none` — or `none — Ctrl+N to add` while the pane is focused. The list windows so
 the cursor's row stays visible.
 
+Its keys are `j`/`k` (move), `Space` (toggle enabled), `r` (run now), `d`
+(delete), `n` (new) and `Enter`/`e` (the central-pane editor). The first five are
+reproduced; the last two are not, for reasons the host already states.
+
 Today `src/app/view.rs` builds those rows on the UI thread and
 `render_automations_pane` assembles ratatui spans. After this change a Luau plugin
 in its own VM, on the plugin render worker, reads the same rows through the
-**existing** `automations` capability and returns the same view tree.
+**existing** `automations` capability, returns the same view tree, and acts on
+them through the **existing** `automations-write` capability.
 
 The native pane stays compiled in and stays the one on screen. Handover is Phase 6
 and `tests/teardown_gate.rs` keeps this pane's row blocked while `src/app/view.rs`
@@ -47,12 +61,12 @@ still names `automations_panel`.
 - **A new published section: the automations pane's rows.** `PaneContext` gains
   `automations: AutomationsSnapshot` (the existing `Vec` becomes
   `upcoming_automations`, matching the reader that reads it). Each row carries the
-  automation's name, its **resolved schedule label**, its action's wire name,
-  whether it is enabled, the seconds until it is due, the search's verdict, and the
-  matched byte offsets. The section carries the cursor's row, whether that cursor
-  is drawn, and whether the pane is focused. Bounded by `MAX_AUTOMATION_ROWS`, and
-  empty when the `automations` feature is off — mirroring the task and file
-  sections.
+  automation's id, its name, its **resolved schedule label**, its action's wire
+  name, whether it is enabled, the seconds until it is due, the search's verdict,
+  and the matched byte offsets. The section carries the cursor's row, whether that
+  cursor is drawn, and whether the pane is focused. Bounded by
+  `MAX_AUTOMATION_ROWS`, and empty when the `automations` feature is off —
+  mirroring the task and file sections.
 - **The summary is published as parts, not as a string.** The kernel resolves what
   a sandboxed plugin cannot: the cron expression's human label (thurbox's own
   mapping, shared with the automation editor) and the countdown in seconds (a VM
@@ -62,8 +76,31 @@ still names `automations_panel`.
 - **The anchor and the appearance are published separately.** The section names the
   cursor's row *and* whether it is drawn, because this pane windows to the cursor
   while unfocused but does not highlight it. That is the second, independent case
-  for ADR-30's rule that a list's selected row is an **anchor** and a run's
+  for ADR-38's rule that a list's selected row is an **anchor** and a run's
   selected style is an **appearance**.
+- **The pane's keys are ported, and the plugin owns its own cursor.** The bundled
+  plugin declares `input` and `automations-write` — the first bundled plugin to
+  declare either, and `automations-write` had **no consumer at all** before this
+  change — plus four rebindable pane bindings (`j`, `k`, `Space`, `r`, `d`; two
+  bindings share the movement pair with the arrow keys handled as raw key names).
+  Its cursor is its own: `nil` until a key arrives, after which it moves inside the
+  VM and is what `ui.list` anchors and highlights. `Space`/`r`/`d` address the
+  automation at that cursor by the **id the section publishes**.
+- **Running an automation stays a request.** `runAutomation` can cause an
+  automation the *user* authored to run a shell command — an `Exec` action is
+  exactly that. The binding marks the automation due and the kernel fires it on its
+  own pass; no plugin thread executes anything, and the plugin can neither author
+  nor edit an automation, so the set of programs it can trigger is exactly the set
+  already scheduled. This port is where that property acquires a consumer, so it is
+  asserted end to end rather than only stated.
+- **The wrap between the two left-column panes is recorded as kernel-owned.** The
+  native pane and the session list form one continuous circular list: `j` past the
+  last session drops into the automations pane, `k` at its first row hands focus
+  back. Both halves are `App` writing `self.focus`, which is view state no plugin
+  can write. The plugin does the half it *can* — it declines the key at its edge —
+  and the kernel's half is not implemented, so a plugin pane is a **discrete focus
+  stop**. `design.md` §6 records why that is the right answer rather than a gap to
+  paper over, and a test pins both halves.
 - **The native pane draws its view tree.** `ui::automations_panel::automations_tree`
   becomes the pane's rendering IR, painted by the shared
   `ui::plugin_pane::render_tree`; `resolve_rows` keeps the one width-dependent step
@@ -77,11 +114,12 @@ still names `automations_panel`.
   the test; the countdown is presentation, and `ui` is where thurbox's other
   display formatters live.
 - **A bundled `automations` plugin**, shipped in the binary beside `hello`,
-  `info-panel`, `tasks` and `file-viewer`, `default_visible = false`. It owns the
-  markers, the colour roles, the emphasis precedence, the summary composition and
-  the empty-state line; `tests/bundled_automations_panel.rs` asserts its tree
-  **equals** the native pane's across content variants and **paints the same
-  frame** when the pane scrolls.
+  `info-panel`, `tasks`, `file-viewer`, `code-review` and `session-list`,
+  `default_visible = false`. It owns the markers, the colour roles, the emphasis
+  precedence, the summary composition, the empty-state line and its own cursor;
+  `tests/bundled_automations_panel.rs` asserts its tree **equals** the native
+  pane's across content variants, **paints the same frame** when the pane scrolls,
+  and that its keys **change the database** the native keys change.
 - **The left-column finding is recorded and pinned by a test.** `PaneSlot` names
   one slot, `right`, so the reproduction cannot be placed where the native pane
   sits. This change does **not** widen it (see Non-goals); it states the cost, and
@@ -96,8 +134,15 @@ still names `automations_panel`.
   and feature gate.
 - `plugin-host/capabilities` — ADDED: reading scheduled automations is one
   capability covering both the upcoming list and the pane's rows.
-- `migration/phase-4` — ADDED: a fourth native pane is reproduced; a port states
-  when the reproduction cannot be placed where the native pane sits, and pins it.
+- `plugin-host/input` — ADDED: a plugin pane's cursor is the plugin's own, and the
+  host tells a pane nothing about its own focus.
+- `migration/phase-4` — ADDED: a sixth native pane is reproduced; a port states
+  when the reproduction cannot be placed where the native pane sits, and pins it;
+  a ported pane's keys act through the plugin's own cursor; a wrap between two
+  panes stays kernel-owned. MODIFIED: the rule about when a pane's keys may be
+  ported, sharpened to distinguish the kernel's cursor from the plugin's own —
+  which is what makes this port's keys admissible without weakening the tasks
+  verdict.
 
 ## Non-goals
 
@@ -111,11 +156,19 @@ still names `automations_panel`.
   left plugin pane — the native pane's height comes from its row count, which the
   kernel does not know for a plugin pane until it has a tree. That is a layout
   change every user sees, in the file that owns the geometry of every pane, and it
-  is larger than this port. It is recorded in `docs/PHASE4-PANE-READINESS.md` §10
+  is larger than this port. It is recorded in `docs/PHASE4-PANE-READINESS.md` §17
   with its cost, and pinned by a test.
-- **The pane's keys.** `j`/`k`/`Space`/`r`/`d`/`n`/`e` act on thurbox's own
-  automations; the plugin's copy is read-only and draws no hints for actions it
-  cannot perform.
+- **The pane's two keys that need powers the host does not define.** `n` creates an
+  automation and the write seam has no creation binding; `Enter`/`e` opens the
+  central-pane editor, which is a seat `PaneSlot` does not offer, a focus a plugin
+  cannot take, and the text authoring `automations-write` is defined to exclude.
+  Both are recorded with their reasons, exactly as the tasks port recorded its
+  own — the difference being that here the *rest* of the keys ship.
+- **The circular wrap into the session list.** Kernel-owned; see above and
+  `design.md` §6.
+- **Telling a plugin whether its own pane holds focus.** The port makes the case
+  for it (`design.md` §6) and states the one-field closure, but adding it changes
+  what every pane is told, which is a host change rather than a pane change.
 - **The Ctrl+P automations list modal and the in-pane editor.** Different surfaces
   with their own state; only the pane is in scope.
 - **The run-history list** (`src/ui/automation_detail.rs`). It renders in the
@@ -127,28 +180,30 @@ still names `automations_panel`.
   plugin in the same change that measures the need. `design.md` §5 records the
   measurement; the next port should decide it.
 - **Deleting or unwiring the native pane.** Phase 6.
-- **Porting a fifth pane.** Exactly one, completely.
+- **Porting a further pane.** Exactly one, completely.
 
 ## Impact
 
 - New code: `src/plugin/bundled/automations/{plugin.toml,init.luau}`,
   `tests/bundled_automations_panel.rs`.
-- Changed: `src/session/{pane_context.rs,plugin_manifest.rs}`,
+- Changed: `src/session/pane_context.rs`,
   `src/plugin/{capabilities.rs,discovery.rs,kernel_state.rs}`,
   `src/plugin/bundled/thurbox.d.luau`,
   `src/ui/{mod.rs,automations_panel.rs}`,
   `src/app/{mod.rs,view.rs,automation.rs,acceptance.rs}`,
+  `tests/{bundled_manifests.rs,tasks_pane_input_gap.rs}`,
   `docs/{PHASE4-PANE-READINESS.md,PHASE6-TEARDOWN-READINESS.md,ARCHITECTURE.md}`,
   `CLAUDE.md`.
 - Feature gate: everything under `src/plugin/` stays behind
   `#[cfg(feature = "plugins")]`; the snapshot section and the pane's tree builder
   are ungated kernel code, as `session::pane_context` and `session::view_tree`
-  already are. `cargo tree --edges normal | grep -c mlua` stays 0.
+  already are. The runtime is in the default feature set since ADR-40, so the
+  bundled pane is drawn by the binary a user installs.
 - Architecture: no new edge. The section is pure data in `session`, the Lua
   conversion is `plugin → session`, the tree builder is `ui → session`, and
   `app` calls `ui` as it already does. `tests/architecture_rules.rs` is unchanged;
   the one place that must see both `ui::automations_panel` and
   `plugin::PluginHost` is an integration test, outside the library's module graph.
-- Snapshots: none move. Every pinned frame contains the empty automations pane's
-  `none`, and the retained cell-level differential against the pre-port span
-  renderer is what checks that the rendering is unchanged.
+- Snapshots: none move. All seven pinned frames are captured with no active
+  session; none renders pane content, so they are not the oracle here — the
+  retained cell-level differential against the pre-port span renderer is.

@@ -27,6 +27,14 @@ struct Segment {
 /// search) > `normal` — is shared by the session list, tasks panel, and
 /// automations pane so the three lists feel identical. `normal` is the
 /// caller-specific resting style (e.g. status colour, or enabled/disabled).
+///
+/// **Test-only since Phase 4.** Every list pane now names its resting style as a
+/// [`crate::session::view_tree::StyleToken`] and lets the tree's renderer resolve
+/// it, so this stays compiled as the *oracle* the ports are differentiated
+/// against: `tasks_panel` and `automations_panel` each keep their pre-port span
+/// renderer, and this is the function those renderers resolved a row's base
+/// through. Deleting it would delete what proves the token spellings are right.
+#[cfg(test)]
 pub(crate) fn row_base_style(selected: bool, dimmed: bool, normal: Style) -> Style {
     if selected {
         Theme::selected_item()

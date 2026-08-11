@@ -1206,3 +1206,256 @@ narrower but real:
 The order for `docs/PHASE6-TEARDOWN-READINESS.md`'s worklist is unchanged by that:
 the release flip, then the view-write design, then the panes — with this pane's
 model move as a step inside its own handover.
+
+## 17. The sixth port: the automations pane, and the first pane whose keys ship (ADR-41)
+
+The last native pane with no plugin at all. It is also the first port where the
+answer to "and its keys?" is anything other than no — five of its seven ship — and
+the reason is a distinction §15 did not have to draw.
+
+### What sufficed
+
+- **The view tree needed nothing.** A `list` of `line`s, `accent`/`muted`/
+  `secondary` tokens, `bold`/`dim`/`underline`, `selected`, and the list's anchor.
+  Six ports in, the catalogue has stopped growing.
+- **The state channel took a sixth section** with no new mechanism and no new
+  gate — and, for the first time, an **existing capability grew a second reader**
+  rather than a new capability appearing. `automations` already granted
+  `upcomingAutomations()` (the info panel's filtered, countdown-resolved view);
+  the pane needs every automation with the cursor in it. Both answer one sentence
+  a user is asked — "reads the automations you have scheduled" — and splitting
+  them would have asked a user to distinguish "the due ones" from "all of them",
+  which protects nobody and would force the pane that draws the list to demand
+  two grants.
+- **`automations-write` acquired its first consumer.** It has existed since
+  ADR-35 with none: no bundled plugin declared it, so nothing exercised the write
+  seam end to end from a pane. Now `tests/bundled_automations_panel.rs` asserts
+  the plugin's toggle, run and delete keys change the same rows the native keys
+  change, observed in the database rather than in the plugin's own state.
+
+### The summary: parts, not a string
+
+A row's tail is `<schedule> · <action> · <when>`, which makes this the port that
+had to decide whether a **composed display string** is published or its parts are.
+The parts cross; the composition is the plugin's. Two of the three are resolved by
+the kernel because a sandbox cannot derive them — the schedule's human label (a
+cron expression's meaning is thurbox's own vocabulary, shared with the automation
+editor) and the countdown in seconds (a VM has no clock) — while the separator, the
+ordering and the three-way `when` precedence (`disabled` / a countdown / `—`) are
+the pane's.
+
+**A rule that needed sharpening to get there.** ADR-29 states the line as "publish
+the rendering only when two panes must agree about it", and
+`format_automation_summary` *is* shared by two native surfaces — this pane and the
+`Ctrl+P` list modal. Read literally, the rule says publish it. Its purpose, though,
+is to stop a plugin re-deriving a mapping whose drift would be **invisible**:
+`StyleToken::for_status` is published because a plugin's status dot would silently
+disagree with the session list, which no test compares it to. Here the second
+consumer is a modal a plugin cannot reproduce, and the plugin's composition is
+compared against thurbox's rule on every run of the equality test — so drift is
+loud. The rule as it should be stated: **publish a rendering when a plugin's copy of
+it would be unchecked.** Both native surfaces still call one Rust function
+(`ui::automations_panel::row_summary`), so they cannot disagree with each other.
+
+### The anchor and the appearance, confirmed independently
+
+ADR-38 split a list's **scroll anchor** from the **appearance** of its cursor. That
+split came from a pane where the two answers happened to differ; this pane is where
+they differ *by design*: it windows to the cursor's row whether or not it holds
+focus, and highlights it only when it does (or when a global search is previewing a
+row there).
+
+The section publishes `cursor` (the row) and `cursor_visible` (whether it is
+drawn) — two fields where `TasksSnapshot` has an anchor plus a `selected` on every
+row. The difference is deliberate and small: here the whole cursor appears and
+disappears with the pane's focus, so a per-row flag would be `cursor_visible && i
+== cursor` on every row — one fact in `n + 1` places, and a publication could then
+highlight one row while scrolling to another.
+
+**One clamped index, where the pane had two rules.** The pre-port pane clamped the
+index it windowed on and compared the *unclamped* one to decide which row looked
+selected, so a focused pane whose selection was left past the end of a shortened
+list scrolled to the last row and highlighted nothing. Publishing a single anchor
+made that visible, and the host settles it: it refuses a list whose cursor is not an
+index into its children, so "the cursor is drawn, at a row that does not exist" is
+not a state a pane can express. The appearance now follows the anchor — the one
+cell-level behaviour change in this port, pinned against the retained pre-port
+oracle by `a_stale_selection_now_highlights_the_last_row_rather_than_none`, which
+also asserts that only the styling moved.
+
+### The keys, and the distinction that made them portable
+
+§15 recorded the tasks pane's keys as kernel-owned, and one of its two reasons was
+that "the input path and the cursor path are disjoint": a plugin receives keys only
+while its own pane holds focus, and the kernel marks a task row as the cursor's only
+while *thurbox's* pane holds focus. That is exactly right about the **kernel's**
+cursor. As a statement about panes it is too strong, and this port is where that
+shows.
+
+**A plugin pane's cursor is the plugin's own.** One VM per plugin, retained across
+render and key calls, so a cursor is an ordinary module-level local: `onKey` moves
+it, `render` hands it to `ui.list` as both anchor and appearance, and the row the
+user is looking at is the row the plugin drew. Nothing about it needs a view write —
+the plugin is not moving thurbox's cursor, it is drawing its own pane. The published
+`cursor` is still what it starts from (`nil` until the first key), which is what
+keeps an undriven pane an exact copy.
+
+So the keys divide by **what each key needs**, not by whether it is a key:
+
+| Key | Native effect | Ported | Why |
+|---|---|---|---|
+| `j` / `k` (+ arrows) | move the cursor | yes | the plugin's own cursor |
+| `Space` | toggle enabled | yes | `setAutomationEnabled(id, …)` |
+| `r` | run now | yes | `runAutomation(id)` — marks it due |
+| `d` | delete | yes | `deleteAutomation(id)` |
+| `n` | create one | **no** | the write seam has no creation binding, by construction |
+| `Enter` / `e` | central-pane editor | **no** | a seat `PaneSlot` does not offer, a focus a plugin cannot take, and the text authoring `automations-write` excludes |
+
+`r` stays a **request**, and this is the change that gives that property a consumer:
+an automation's action may be `Exec`, so the key can cause a shell command the
+*user* authored to run. The binding writes "due now" and returns; the kernel's own
+pass fires it, on the kernel's thread, under the claim that de-duplicates a running
+TUI and a headless tick. A plugin can neither author nor edit an automation, so the
+set of programs reachable is exactly the set already scheduled —
+`running_marks_the_automation_due_and_executes_nothing` asserts both halves.
+
+Two smaller findings the keys produced:
+
+- **A manifest binding declares one chord where a kernel action declares a list.**
+  `AutomationsNext` defaults to `j` *and* `Down`; a `KeybindingDecl` carries a single
+  `chord`. The plugin declares the letter (which is what the F1 editor shows and
+  rebinds) and handles `up`/`down` as raw key names in `onKey`. The natural closure
+  is `chord` accepting a list, which is a manifest change rather than a pane one.
+- **The chord grammar could not spell the space bar** — a genuine bug this port
+  surfaced rather than worked around. `KeyChord::display` emitted a literal `" "`,
+  which `parse` trims to nothing, so the default chord of the two kernel actions
+  that use the space bar (`AutomationsToggle`, `TasksCycleStatus`) could not
+  round-trip through `keybindings.json` and no manifest could declare it. Now named
+  in both directions, pinned by
+  `the_space_bar_is_a_named_chord_in_both_directions`.
+
+### Who owns the wrap
+
+The native pane and the session list are one continuous **circular** list: `j` past
+the last session drops into the automations pane, `k` at its first row hands focus
+back, `j` past the last automation loops to the top of the session list. All four
+edges are `App` assigning `self.focus` — view state, which the kernel-state channel
+is read-only about and no capability writes.
+
+**The kernel owns the wrap, in both halves, and a plugin pane is a discrete focus
+stop.** The plugin does the half it can honestly make: at its first or last row it
+**declines** the key, which is precisely what a consumed/not-consumed answer is for.
+What is missing is the kernel's half — an unconsumed key from a focused plugin pane
+resolves in `KeyContext::Global` (`App::focus_key_context` maps
+`InputFocus::PluginPane` there), and no global action means "leave this pane
+downward" — so the key visibly does nothing at that edge.
+
+That is the right answer rather than a hole, and the reason comes from the layout
+finding below: **a wrap is a claim about adjacency, and adjacency is layout.** The
+two native panes wrap into each other because they are stacked in one column and
+read as one list. The plugin's pane is in the *right* column, beside the file
+viewer; a `j` there that jumped into the left column would be a lie about what is
+on screen. Completing the wrap needs the pane seated where the native one is, plus
+a plugin-pane key context with a kernel action for leaving a pane by direction
+(`Esc` already leaves, but not directionally).
+
+Rejected, and recorded because it is the tempting one: **the plugin wraps its own
+cursor** (last → first). It would make `j` at the bottom do *something*, and it
+would be a behaviour the native pane does not have, shipped under the word parity.
+`the_wrap_out_of_the_pane_stays_kernel_owned` asserts the decline at both edges
+*and* that nothing completes it, so adding either half fails the test.
+
+### The new host gap: a pane is told nothing about its own focus
+
+The native pane draws its cursor only while focused. The plugin cannot reproduce
+that gating **for its own pane**, because `render(paneId)` is told nothing about
+focus — every published `focused` field describes the *native* surface being
+reproduced, which is right for a read-only copy and wrong for a pane with keys. Two
+consequences, both accepted and enumerated:
+
+- once the plugin has a cursor of its own it draws it whether or not its pane is
+  focused (like the file viewer's native pane does); and
+- it cannot learn that focus *left*, so the highlight persists after `Esc`.
+
+**And it costs behaviour, not only appearance.** While the plugin's pane holds
+focus thurbox's does not, so the published `cursor_visible` is false and the pane
+draws nothing until a movement key gives it a cursor of its own. A `Space` in that
+state would toggle whichever row thurbox's cursor was left on — a row the user
+cannot see. So a **write is refused until the pane draws its own cursor**: press
+`j`/`k` first, and the row acted on is the row highlighted. thurbox's pane can act
+immediately because the kernel knows it is focused; this one refuses rather than
+guessing, which is the one interaction that differs and it is pinned by
+`a_write_is_refused_until_the_pane_draws_its_own_cursor` (including the converse: a
+global-search preview *is* the host drawing a cursor, so the write is permitted
+without the plugin having moved anything).
+
+The closure is one published fact and the mechanism already exists:
+`session::pane_visibility` publishes a per-pane boolean into a process-wide slot the
+render worker reads with no signature change, and a `pane_focus` sibling would be
+the same shape. Not done here because it changes what **every** pane is told — a
+host change arriving inside a pane port, which the five ports before this one were
+careful not to do.
+
+### The layout finding: the reproduction cannot sit where the native pane sits
+
+This is the only pane in the phase that lives in the **left** column, beneath the
+session list, and `PaneSlot` names exactly one slot: `right`. So the reproduction is
+placeable *as a pane* and not placeable *where this pane is*, and the equality
+claims are about the pane's **content**.
+
+Four things a `left` slot needs, and none is the vocabulary:
+
+| Needed | Why it is not a one-liner |
+|---|---|
+| a second `PaneSlot` variant | cheap; it is the other three that follow from it |
+| a plugin region inside `left_column` | the left column is a two-child split with a content-derived middle; a third child changes the arithmetic `automations_pane_appears_below_sessions` and four sibling tests pin |
+| a `RegionId::Plugin(i)` index space that spans columns | `PanelAreas::plugin_panes` is collected by `map_while` over contiguous indices and `App::render_plugin_panes` `zip`s it against the visible-pane list; split across two columns, that zip pairs a pane with another column's rect |
+| a **height policy** for a left plugin pane | the native pane's height is `(count + 2).clamp(3, 10)` — a function of its own row count. The kernel does not know a plugin pane's row count at layout time except by counting its last tree's children, which makes the layout depend on plugin output, a coupling no other pane has |
+
+The last one is the finding's real content: the left column is the one place in
+thurbox where a pane's **geometry is derived from its own content**, and the plugin
+protocol is built the other way round — a plugin is never told its size, and the
+kernel never asks it for one. A `left` slot is therefore a decision about whether
+plugin content may size a region, not a vocabulary addition.
+`the_pane_cannot_be_placed_where_the_native_one_sits` asserts a manifest naming
+`left` is still refused, so adding the slot forces this to be revisited.
+
+### The divergence that is still open, and one that got sharper
+
+§8's geometry row is unchanged and this pane is its loudest consumer. The native
+pane fits a name into `width − prefix − tail` with an ellipsis; the plugin draws the
+whole name and the renderer clips. On a narrow column that is not a punctuation
+difference — the tail is 30-odd columns of summary, so `truncate_ellipsis` returns
+**nothing** rather than a lone `…` that carries no information, and the native pane
+drops the name entirely while the plugin shows it and loses the summary. Two panes
+showing *different information*, pinned by
+`a_name_wider_than_the_column_is_fitted_by_the_kernel_only`. The closure is
+unchanged from ADR-29: an ellipsizing clip plus a flush-right run.
+
+### The formatter case, now made twice
+
+`formatDueIn` in the info-panel plugin and the countdown in this one are the same
+function, character for character, in two bundled plugins — the first evidence for
+§7's `thurbox.format.*` table that is not a prediction. Still not added: it would
+edit a shipped plugin in the change that measures the need, and the right design is
+a table shaped by three or four panes rather than two. The next port should decide
+it.
+
+### What this means for the phase
+
+§16's three blockers, re-verdicted:
+
+1. **the build** — **closed** by ADR-40 (Stage B): the runtime is in the default
+   feature set, so the binary a user installs draws a bundled pane.
+2. **input** — **narrowed, not closed.** A pane whose keys move *its own* cursor
+   and whose effects the capability vocabulary expresses is portable, which this
+   pane demonstrates. What remains blocked is a key that writes **kernel** view
+   state — a cursor thurbox owns, a focus, an active session — plus record
+   creation, text authoring, a central seat, a modal, and reaching an agent. That
+   is still every key of the file viewer and most of the tasks pane's.
+3. **a pane whose module is its model** — unchanged, one pane (the file viewer).
+
+And one blocker is unchanged from §14 for a different reason: a **reproduction is
+not a replacement**. All six ported panes are still drawn natively, so
+`tests/teardown_gate.rs` keeps all seven rows blocked on their own pane-level
+condition rather than on a shared release decision.
