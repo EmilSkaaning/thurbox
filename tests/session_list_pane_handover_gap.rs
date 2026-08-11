@@ -2,10 +2,10 @@
 //!
 //! `docs/PHASE4-PANE-READINESS.md` §13 records that this pane's *rendering* is
 //! reproduced by a bundled plugin — the port ADR-V1 hinges on, which needed no new
-//! node kind, no new style token and no new capability. §18 records the next
-//! step's answer: the pane is **not** handed over, and this file is that half of
-//! the verdict in executable form. [`BLOCKERS`] holds one row per requirement the
-//! handover could not meet, each re-derived from the source.
+//! node kind, no new style token and no new capability. §18 recorded the next step's
+//! answer (no) and §32 re-derives it after three other panes were handed over.
+//! [`BLOCKERS`] holds one row per requirement the handover cannot meet, each
+//! re-derived from the source.
 //!
 //! Why a test rather than only the document, in `tests/global_search_pane_gap.rs`'s
 //! words: a verdict written in markdown is a fact about a build that expires
@@ -13,33 +13,45 @@
 //! true the moment someone adds a view write for an unrelated reason, and nothing
 //! would say so.
 //!
-//! ## Which route this gate measures, since ADR-51 there are two
+//! ## The reason moved, and this is the second verdict
 //!
-//! Every key row below is about a pane whose **keys are the plugin's** — `input`
-//! plus pane-addressed bindings (ADR-34), acting through granted capabilities. That
-//! is the only route that existed when they were written, and the bundled
-//! `session-list` plugin declares neither.
+//! When this gate was written the wall was the **keys**: a handed-over pane was
+//! focused as `InputFocus::PluginPane`, which resolves in `KeyContext::Global`, so all
+//! six `KeyContext::SessionList` actions stopped resolving — and a plugin could not
+//! substitute for them, because `j`/`k` move the **active session**, which is what the
+//! central pane, the info column, the file viewer and the code review are all showing.
 //!
-//! ADR-51 added a second: a pane may declare that it **is** thurbox's pane for a key
-//! context, and the kernel then resolves that context's actions and performs them
-//! itself while the pane holds focus. On that route the three key rows do not apply
-//! — the kernel moves the active session, as it always did — which the first row now
-//! says. What the second route does **not** touch is the rest of this table: the
-//! module that is also the kernel's model, and the three drawing gaps. Those are
-//! what a handover of this pane still costs.
+//! ADR-51 answered that without granting anything: a pane declares that it *is*
+//! thurbox's pane for a key context and the kernel performs that context's actions
+//! itself. Two panes have since been handed over that way (ADR-53, ADR-56), so three
+//! rows here are re-verdicted **closed on a conjunction** — the route exists *and* the
+//! power the row named is still absent. The second half is the load-bearing one: it is
+//! what keeps "the widening was unnecessary" distinguishable from "the widening
+//! happened".
 //!
-//! **The finding this gate exists to keep true** is [`the_panes_scoped_keys_stop_
-//! resolving_when_a_plugin_pane_holds_focus`], because it is the one the spike
-//! could not have seen. `docs/SPIKE-SESSION-LIST.md` measured whether the pane
-//! *could* be a plugin and answered yes on three conditions, the second being
-//! that the cursor stays kernel state — which is right, and is precisely what
-//! makes the handover impossible. A handed-over pane is focused as
-//! `InputFocus::PluginPane`, which `App::focus_key_context` maps to
-//! `KeyContext::Global`, so all six `KeyContext::SessionList` actions stop
-//! resolving; and a plugin cannot substitute for them, because `j`/`k` move the
-//! **active session** — what the central pane, the info panel, the file viewer and
-//! the code review are all showing — and no capability writes kernel view state.
-//! The cursor cannot be kernel state *and* be driven by a plugin pane's keys.
+//! **What decides the verdict now** is [`the_verdict_is_derived_from_the_blockers`]'s
+//! two structural rows, and neither is about keys:
+//!
+//! * `the-window-is-the-list-widgets` — the native pane hands its nodes to a ratatui
+//!   `List`, and *four* behaviours come off that widget's sticky offset: which rows are
+//!   on screen, the `^ N` / `v N` indicators on the border, the click hitboxes (a
+//!   repo-group header travels with the row below it, so a two-line item is one
+//!   hitbox), and where the pending-spawn placeholder is inserted. A seated plugin pane
+//!   windows by the kernel's shared rule over flat children, whose count differs
+//!   because the plugin's index counts those headers. Both keep the cursor visible;
+//!   they do not agree on which other rows are beside it.
+//! * `the-module-is-the-kernels-model` — `src/ui/project_list.rs` owns the comparator
+//!   `Ctrl+J`/`Ctrl+K` navigate by, the reorder, the sort, the snapshot the *plugin*
+//!   reads, and global search's session matcher.
+//!
+//! Two of the rows below were promoted out of `tests/bundled_session_list.rs`'s
+//! enumerated divergences, where they were documented in `///` blocks — which is the
+//! same expiry this gate exists to prevent, one layer down. The port keeps its
+//! `assert_ne!`s: those fail when a divergence *closes*, and these rows fail when the
+//! tree stops matching the recorded verdict.
+//!
+//! The left column's circular wrap is deliberately **not** a row; ADR-56 settled it and
+//! [`the_left_columns_wrap_is_not_a_blocker`] is why.
 //!
 //! Three things this gate is deliberately not:
 //!
@@ -51,14 +63,14 @@
 //!   builds the native pane's view tree, spinner included, and since
 //!   `left-column-pane-oracles` that claim is recorded rather than differential
 //!   (`tests/bundled_session_list.rs`);
-//! - it is **not** a copy of the tasks pane's gate. That pane's keys act on
-//!   *records*, so five of them became expressible when the write seam landed.
-//!   This pane's keys act on the interface itself.
+//! - it is **not** a copy of the automations pane's gate, which is retired: that pane
+//!   was handed over (ADR-56) and its rows are preserved in that ADR because none of
+//!   the powers they named was granted.
 //!
 //! Its probes read the source the way a human auditor would, so the gate runs, and
 //! means the same thing, with or without the `plugins` Cargo feature. The helpers
 //! below duplicate the sibling gates', because an integration test cannot import
-//! another one — the alternative is a shared crate for four readers, which is more
+//! another one — the alternative is a shared crate for three readers, which is more
 //! machinery than the duplication costs, and two readers of source text that drift
 //! answer independently anyway (unlike the *recorder* in
 //! `tests/view_tree_record/`, which is shared for exactly that reason).
@@ -110,72 +122,88 @@ const BLOCKERS: &[Blocker] = &[
         id: "scoped-keys-silenced-by-the-handover",
         needs: "the pane's own keyboard — all six `KeyContext::SessionList` actions (next, \
                 previous, open, move down, move up, sort A→Z), rebindable in the F1 editor",
-        stands: "a pane handed over with **its own** keys is focused as `InputFocus::PluginPane`, \
-                 and `App::focus_key_context` names no arm for it, so it falls to \
-                 `KeyContext::Global` — the pane's scope never activates and none of its six \
-                 actions resolves. A plugin may declare pane-addressed bindings of its own \
-                 (ADR-34), so that route is only survivable for keys whose whole effect a plugin \
-                 can also perform; the rows below are why none of these six is. The **other** \
-                 route closes it (ADR-51): a pane declaring `key_context = \"SessionList\"` is \
-                 focused as `InputFocus::SessionList`, so all six resolve and the *kernel* \
-                 performs them — which is why this row is recorded against the shipped plugin, \
-                 which declares no keyboard, rather than against the pane",
+        stands: "**closed as a handover requirement** (ADR-51), and two panes have since taken \
+                 that route in practice (ADR-53, ADR-56). A pane declaring `key_context = \
+                 \"SessionList\"` is focused as `InputFocus::SessionList`, so all six actions \
+                 resolve and the *kernel* performs them against its own state, still rebindable \
+                 in F1. The route this row was written against — a plugin holding its **own** \
+                 keys via `input` — is still silenced, and still is not survivable for any of \
+                 these six (see the two rows below); the shipped plugin declares no keyboard and \
+                 no `input`, which is what makes it a reproduction rather than a half-handover",
         gap: Gap::Structural,
-        blocked: true,
+        blocked: false,
         probe: |root| {
-            // Three halves, because any one alone would be the wrong claim: the
-            // focus exists, the scope resolver ignores it, and there is a scope
-            // that would be silenced.
-            let plugin_pane_is_its_own_focus =
-                variant_names(&block(root, "src/app/mod.rs", "pub enum InputFocus"))
-                    .iter()
-                    .any(|v| v == "PluginPane");
-            let resolver = method_body(
+            // Four halves, because any one alone would be the wrong claim: the context
+            // must be declarable, it must map to *this* pane's focus, the kernel must
+            // still resolve that focus to this context, and the shipped plugin must
+            // still hold no keys of its own — asserted here so "closed" can never come
+            // to mean "the plugin was given the keyboard".
+            let declarable =
+                method_body(root, "src/session/keybindings.rs", "pub fn pane_keyboards(")
+                    .contains("KeyContext::SessionList");
+            let maps_to_the_focus =
+                method_body(root, "src/app/mod.rs", "pub(crate) fn focus_for_keyboard")
+                    .contains("KeyContext::SessionList => Some(InputFocus::SessionList)");
+            let kernel_still_dispatches = method_body(
                 root,
                 "src/app/key_handlers.rs",
                 "pub(crate) fn focus_key_context",
-            );
-            let falls_through_to_global =
-                !resolver.contains("PluginPane") && resolver.contains("_ => KeyContext::Global");
-            plugin_pane_is_its_own_focus
-                && falls_through_to_global
-                && !session_list_actions(root).is_empty()
+            )
+            .contains("InputFocus::SessionList => KeyContext::SessionList");
+            let plugin_holds_no_keys =
+                !source(root, "src/plugin/bundled/session-list/plugin.toml").contains("\"input\"");
+            !(declarable
+                && maps_to_the_focus
+                && kernel_still_dispatches
+                && plugin_holds_no_keys
+                && !session_list_actions(root).is_empty())
         },
     },
     Blocker {
         id: "no-active-session-write",
         needs: "`j`/`k`/`Enter`, which move the **active session** — and so change what the \
                 central pane, the info panel, the file viewer and the code review are all showing",
-        stands: "no binding writes *view* state. A plugin may change records it was granted \
-                 (ADR-35); nothing it holds moves a cursor, takes focus, or switches the active \
-                 session. This is the widest grant the model has refused, because the thing being \
-                 written decides what the whole interface displays",
+        stands: "**closed as a handover requirement, and the write was not granted** — which is \
+                 the finding, because this row was written expecting the opposite. The kernel \
+                 keeps the keys (ADR-51), so `App::switch_session_forward` and its siblings move \
+                 the active session exactly as they do today; no binding writes view state, \
+                 nothing a plugin holds moves a cursor or takes focus, and the reproduction \
+                 declares no `input`. This row is now what stops \"the grant was unnecessary\" \
+                 from quietly becoming \"the grant happened\"",
         gap: Gap::Structural,
-        blocked: true,
-        probe: |root| !a_view_write_binding_exists(root),
+        blocked: false,
+        probe: |root| {
+            let the_kernel_keeps_the_keys =
+                method_body(root, "src/app/mod.rs", "pub(crate) fn focus_for_keyboard")
+                    .contains("KeyContext::SessionList => Some(InputFocus::SessionList)");
+            let no_view_write_was_granted = !a_view_write_binding_exists(root);
+            !(the_kernel_keeps_the_keys && no_view_write_was_granted)
+        },
     },
     Blocker {
         id: "no-session-record-write",
         needs: "`Shift+J`/`Shift+K`, which renumber `sessions.display_order` densely and persist \
                 it, and `Shift+S`, which sorts every session within its repo group in one \
                 keystroke",
-        stands:
-            "the write seam's five operations each address a task or an automation by id; none \
-                 addresses a session, and none reorders anything. Both keys are the right *shape* \
-                 for it — one operation per single-keystroke effect, ADR-35's rule — so the \
-                 missing piece is an operation and not a principle. It is recorded rather than \
-                 added: the key would still act on the row the user is looking at, which for this \
-                 pane is the kernel's cursor, so the grant would widen a plugin's reach over the \
-                 database while the pane it exists for still could not use it",
+        stands: "**closed as a handover requirement, and no session operation was added** to the \
+                 write seam — whose five operations still each address a task or an automation by \
+                 id. The kernel performs `SessionListMoveDown`/`MoveUp`/`SortAlphabetically` \
+                 (ADR-51), so it renumbers `display_order` densely and persists it exactly as \
+                 today. Adding the operation would have widened a plugin's reach over the \
+                 database for a pane that still could not name the row to act on, since this \
+                 pane's cursor is the kernel's",
         gap: Gap::Structural,
-        blocked: true,
+        blocked: false,
         probe: |root| {
-            let methods = writer_methods(root);
-            !methods.iter().any(|m| {
+            let the_kernel_keeps_the_keys =
+                method_body(root, "src/app/mod.rs", "pub(crate) fn focus_for_keyboard")
+                    .contains("KeyContext::SessionList => Some(InputFocus::SessionList)");
+            let no_session_operation = !writer_methods(root).iter().any(|m| {
                 ["session", "order", "reorder", "sort", "move"]
                     .iter()
                     .any(|n| m.contains(n))
-            })
+            });
+            !(the_kernel_keeps_the_keys && no_session_operation)
         },
     },
     Blocker {
@@ -196,6 +224,51 @@ const BLOCKERS: &[Blocker] = &[
             let native_stands_down = method_body(root, "src/app/view.rs", "fn render_left_panel")
                 .contains("seat_taken(PaneSlot::Left)");
             !(seat_exists && native_stands_down)
+        },
+    },
+    Blocker {
+        id: "the-window-is-the-list-widgets",
+        needs: "which rows are on screen when the list overflows — and the three things the \
+                native pane derives from the same offset: the `^ N` / `v N` clipped-row \
+                indicators on the block border, the click hitboxes (a repo-group header travels \
+                with the row below it, so a two-line item is **one** hitbox), and the index the \
+                pending-spawn placeholder is inserted at",
+        stands: "`render_session_section` hands its nodes to a ratatui `List` with a `ListState`, \
+                 and reads `list_state.offset()` back **after** the stateful render for all three \
+                 of the above. A seated plugin pane declares its cursor and the kernel windows it \
+                 with `ui::file_viewer::visible_window` over flat single rows — a different rule, \
+                 over a different row count, since the plugin's index counts the headers the \
+                 native item folds in (`the_two_panes_window_a_long_list_by_different_rules`). So \
+                 both keep the cursor visible and they do **not** agree on which other rows are \
+                 beside it: a handover would change which sessions are on screen whenever the \
+                 list overflows, in the pane whose selection decides what the central pane, the \
+                 info column, the file viewer and the code review are all showing. Not closable \
+                 by teaching `visible_window` the widget's sticky offset — that helper is what \
+                 every plugin list and three native panes scroll by, so a change for this pane \
+                 changes all of them (the hazard ADR-39 recorded from the other side). The \
+                 port's own file calls this Phase 6 work; this row is what that work is",
+        gap: Gap::Structural,
+        blocked: true,
+        probe: |root| {
+            // Four halves, one per behaviour derived from the offset, because a probe
+            // reading only the window would report a wiring detail where there are four
+            // consumers. Plus the plugin side, so "the two windows differ" is derived
+            // rather than assumed.
+            let pane = source(root, "src/ui/project_list.rs");
+            let widget_owns_the_window =
+                pane.contains("render_stateful_widget") && pane.contains("ListState");
+            let indicators_come_off_it = pane.contains("render_scroll_indicators_variable");
+            let hitboxes_come_off_it = pane.contains("skip(list_state.offset())");
+            let placeholder_comes_off_it = pane.contains("items.insert(slot.index");
+            // And a plugin pane's window is the kernel's shared helper over the tree's
+            // own children, which is a different rule over a different count.
+            let plugin_window_is_the_shared_rule =
+                source(root, "src/ui/plugin_pane.rs").contains("file_viewer::visible_window");
+            widget_owns_the_window
+                && indicators_come_off_it
+                && hitboxes_come_off_it
+                && placeholder_comes_off_it
+                && plugin_window_is_the_shared_rule
         },
     },
     Blocker {
@@ -317,6 +390,31 @@ const BLOCKERS: &[Blocker] = &[
             let native_owns_the_slot =
                 source(root, "src/ui/project_list.rs").contains("pub fn pending_spawn_slot");
             publishes_no_pending && native_owns_the_slot
+        },
+    },
+    Blocker {
+        id: "non-ascii-whitespace-is-the-kernels-trim",
+        needs: "the agent activity text a row shows, trimmed the way the kernel trims it: \
+                `str::trim`, which is Unicode-aware",
+        stands: "the plugin trims with Luau's `%s`, which is ASCII-only, so a no-break space \
+                 around an activity title survives in its copy \
+                 (`non_ascii_whitespace_is_trimmed_by_the_kernel_only`). Left open by the port \
+                 rather than closed by publishing the *trimmed* text, because a trim is a \
+                 presentation decision about the pane's own row and the port's rule is that the \
+                 kernel publishes no rendering — so closing it needs either a Unicode-aware \
+                 predicate a plugin can reach or a decision to reverse that rule. Small, and a \
+                 row because a handover would ship it",
+        gap: Gap::Vocabulary,
+        blocked: true,
+        probe: |root| {
+            // Both sides, so the row is about a *difference* rather than about either
+            // implementation: the kernel's trim is Rust's, and the plugin's is Luau's
+            // ASCII class.
+            let kernel_trims_unicode =
+                source(root, "src/ui/project_list.rs").contains(".map(str::trim)");
+            let plugin_trims_ascii = source(root, "src/plugin/bundled/session-list/init.luau")
+                .contains(r#"string.match(activity, "^%s*(.-)%s*$")"#);
+            kernel_trims_unicode && plugin_trims_ascii
         },
     },
 ];
@@ -562,11 +660,32 @@ fn the_verdict_is_derived_from_the_blockers() {
     );
     assert!(!outstanding(BLOCKERS, Gap::Vocabulary).is_empty());
     let structural = outstanding(BLOCKERS, Gap::Structural);
+    // The two that decide it, and they are **not** the two this gate was written
+    // around. Those were the keys (`scoped-keys-silenced-by-the-handover`,
+    // `no-active-session-write`), which ADR-51 answered without granting anything;
+    // what is left is the widget the pane windows through and the module that is the
+    // kernel's own navigation (ADR-57).
     assert!(
-        structural.contains(&"scoped-keys-silenced-by-the-handover")
-            && structural.contains(&"no-active-session-write"),
+        structural.contains(&"the-window-is-the-list-widgets")
+            && structural.contains(&"the-module-is-the-kernels-model"),
         "the two rows that decide this verdict must be structural: {structural:?}"
     );
+    // And the three the route retired are not blockers of any kind. Asserted
+    // positively so a regression that reopened one — a plugin handed `input`, a view
+    // write, a session operation on the seam — fails here with the reason attached
+    // rather than merely growing the table.
+    for closed in [
+        "scoped-keys-silenced-by-the-handover",
+        "no-active-session-write",
+        "no-session-record-write",
+    ] {
+        assert!(
+            !structural.contains(&closed),
+            "`{closed}` is closed by ADR-51 *without* a grant; if it is outstanding \
+             again, either the route regressed or a power was granted — and the second \
+             is the one this row exists to catch: {structural:?}"
+        );
+    }
 
     // The other direction: a table where every row landed permits the handover.
     let all_met: Vec<Blocker> = BLOCKERS
@@ -579,12 +698,108 @@ fn the_verdict_is_derived_from_the_blockers() {
     assert!(handover_is_possible(&all_met));
 }
 
-/// **The finding.** A handed-over pane is focused as a plugin pane, and that focus
-/// resolves keys in the global scope — so every action scoped to the session list
-/// stops resolving, and there are six of them.
+/// **The left column's circular wrap is not one of this pane's blockers**, and that
+/// is asserted rather than described because a reader will re-derive it as one.
+///
+/// It was a row in the *automations* pane's gate for as long as that pane held its own
+/// keys: a plugin declined the movement key at its edge, and nothing completed the
+/// wrap, because moving focus is view state no capability writes. ADR-56 handed that
+/// pane over on the kernel-keyboard route and the row disappeared rather than closing —
+/// two facts make the wrap a non-issue, and this pins both:
+///
+/// * both ends are **kernel focuses** whoever draws either pane, since a pane declaring
+///   a keyboard is focused as thurbox's own pane of that name; and
+/// * the wrap's condition is already "a pane provides that list" rather than a
+///   `[features]` flag, so it is correct for a handed-over pane on either side.
+///
+/// So a handover of this pane inherits the wrap unchanged, and the gate above does not
+/// list it.
+#[test]
+fn the_left_columns_wrap_is_not_a_blocker() {
+    let root = repo_root();
+
+    // Both ends of the wrap are kernel focuses a declared keyboard resolves to.
+    let table = method_body(&root, "src/app/mod.rs", "pub(crate) fn focus_for_keyboard");
+    for arm in [
+        "KeyContext::SessionList => Some(InputFocus::SessionList)",
+        "KeyContext::Automations => Some(InputFocus::Automations)",
+    ] {
+        assert!(
+            table.contains(arm),
+            "the wrap's two ends must both be focuses a declared keyboard reaches: {table}"
+        );
+    }
+
+    // And the kernel's own handlers are what move focus between them, gated on the
+    // *pane* rather than on the feature flag (ADR-56).
+    let handlers = source(&root, "src/app/key_handlers.rs");
+    assert!(
+        handlers.contains("fn automations_pane_provided"),
+        "the wrap's condition should be that a pane provides the automations list"
+    );
+    let next = method_body(&root, "src/app/key_handlers.rs", "fn act_session_list_next");
+    assert!(
+        next.contains("self.automations_pane_provided()")
+            && next.contains("InputFocus::Automations"),
+        "`j` at the last session should still enter the automations pane: {next}"
+    );
+    assert!(
+        !next.contains("features.automations"),
+        "the wrap is gated on the pane, not on the flag — a flag can be on with no band \
+         on screen: {next}"
+    );
+}
+
+/// The order the work would be done in, asserted from the rows rather than argued in
+/// prose.
+///
+/// The window is first because three of the other rows are **functions** of it — the
+/// border indicators, the click hitboxes and the pending-spawn slot are all read off
+/// `ListState::offset()` — and because `resolve_rows`, which the module row would
+/// relocate, is what feeds both panes. A change that closed the chrome first would have
+/// built it against a window that is about to change.
+#[test]
+fn the_window_is_settled_before_what_depends_on_it() {
+    let deciders = [
+        "the-window-is-the-list-widgets",
+        "the-module-is-the-kernels-model",
+    ];
+    let dependents = ["no-pane-chrome", "no-pending-spawn-row"];
+    let ids: Vec<&str> = BLOCKERS.iter().map(|b| b.id).collect();
+    let position = |id: &str| ids.iter().position(|x| *x == id).expect(id);
+    for decider in deciders {
+        for dependent in dependents {
+            assert!(
+                position(decider) < position(dependent),
+                "`{decider}` must be listed before `{dependent}`: the table's order is \
+                 the ordering of the work, and the chrome and the placeholder are both \
+                 read off the window"
+            );
+        }
+    }
+    // And the two dependents are still outstanding, or the ordering claim is vacuous.
+    for dependent in dependents {
+        assert!(
+            BLOCKERS.iter().any(|b| b.id == dependent && b.blocked),
+            "`{dependent}` should still be outstanding"
+        );
+    }
+}
+
+/// **The finding this gate was written for, kept scoped to the route it is true of.**
+/// A pane handed over with its **own** keys is focused as a plugin pane, and that focus
+/// resolves keys in the global scope — so every action scoped to the session list stops
+/// resolving, and there are six of them.
+///
+/// Still true, and no longer the verdict: ADR-51's route is focused as
+/// `InputFocus::SessionList` instead, which is why
+/// `scoped-keys-silenced-by-the-handover` is closed. Kept because it is what makes
+/// giving *this* pane's keys to a plugin unsurvivable, and because a change that added
+/// a `PluginPane` arm to the resolver would be reversing a decision rather than fixing
+/// a bug.
 ///
 /// This is not a restatement of the probe. It names the actions, so a failure says
-/// *which keyboard* the handover would silence, and it pins the two facts that
+/// *which keyboard* the plugin-keys route would silence, and it pins the two facts that
 /// together make the silence certain: the resolver has no arm for the plugin-pane
 /// focus, and the scope it falls through to is the global one.
 #[test]

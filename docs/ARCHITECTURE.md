@@ -3697,3 +3697,98 @@ door to `InputFocus::Automations`. It is a smaller loss than the tasks pane's:
 keeper still fires them headless, and `Ctrl+P` still opens the list modal and its
 overlay editor, which is a complete authoring surface reached through a `Modal` rather
 than a pane. `plugins` is in the default feature set, so no install is in this position.
+
+## ADR-57: The session list is not handed over — the window, not the keys
+
+**Context.** With the automations pane handed over (ADR-56) the session list is the left
+column's only native pane, and it is the pane ADR-V1 hinges on: the v2 design says every
+user-visible surface is a plugin *including the session list*, so a session list that
+could only be kernel-drawn would make the plugin surface second-class by demonstration.
+`docs/SPIKE-SESSION-LIST.md` measured whether it *could* be a plugin and answered yes on
+three conditions, all of which now hold.
+
+`tests/session_list_pane_handover_gap.rs` recorded nine rows. Three of them were about
+the pane's **keys** — the wall the gate was written around — and ADR-51 answered all
+three without granting anything.
+
+**Decision.** The pane stays. `src/ui/project_list.rs` is not deleted, and the gate is
+re-verdicted rather than left to expire.
+
+*Three rows close on a conjunction*, in ADR-54's shape: the route is declarable, maps to
+`InputFocus::SessionList`, is still resolved by `focus_key_context`, **and** the power
+the row named is still absent. The second half is load-bearing — a probe reading only
+the route would report `closed` after someone granted a view write, and the record that
+the grant was *unnecessary* would be gone.
+
+| Row | What it named | Granted? |
+|---|---|---|
+| `scoped-keys-silenced-by-the-handover` | a plugin pane whose scoped keyboard resolves | no — the *kernel's* pane of that name resolves it |
+| `no-active-session-write` | a binding that moves the active session | **no**, and the row now asserts that |
+| `no-session-record-write` | a seam operation addressing a session | **no**, still five task/automation operations |
+
+*What decides the verdict is the **window**.* `render_session_section` hands its nodes to
+a ratatui `List` with a `ListState`, and four behaviours are read back off that widget's
+sticky `offset()`:
+
+| Behaviour | Native | A seated plugin pane |
+|---|---|---|
+| Which rows are on screen | ratatui's sticky offset, over **items** | `visible_window(len, cursor, height)`, over **children** |
+| `▲ N` / `▼ N` indicators | `render_scroll_indicators_variable`, from the offset and per-item heights, painted **on the border** | nothing — no chrome node |
+| Click hitboxes | computed *after* the stateful render; a two-line item (group header + row) is **one** hitbox | one per child, so a header is separately clickable |
+| The pending-spawn placeholder | inserted into the **items** vector at a computed index | nothing published says a row is a spawn in flight |
+
+And the counts differ: the native item list folds a repo-group header into the row below
+it, so eight sessions in one group is eight items and nine lines, while the plugin's list
+is nine children whose declared cursor index counts the header — which
+`the_two_panes_window_a_long_list_by_different_rules` already asserts. So "both keep the
+cursor visible" is true and insufficient: at any height where the list overflows the two
+panes show **different sessions**, in the pane whose selection decides what the central
+pane, the info column, the file viewer and the code review are all displaying. That is a
+behavioural change, not a rendering divergence, and it is why a degraded session list
+would be a broken product rather than a cosmetic regression.
+
+*Two rows are promoted out of the oracle.* `tests/bundled_session_list.rs` documented
+three enumerated divergences in `///` blocks, of which only the centred empty state had
+a gate row — for no recorded reason. The windowing rule and the non-ASCII trim (the
+kernel uses `str::trim`, the plugin Luau's ASCII-only `%s`, so a no-break space around an
+activity title survives) are now rows too. The port keeps its `assert_ne!`s: those fail
+when a divergence *closes*; the rows fail when the tree stops matching the verdict. A
+divergence documented only in a test's doc comment is a verdict written in prose, which
+is the expiry the gate exists to prevent.
+
+*The wrap is not a blocker, and that is asserted.* The left column's circular list looked
+like a question this handover would owe an answer to. ADR-56 settled it: both ends are
+kernel focuses whoever draws either pane, and the condition is already "a pane provides
+that list". `the_left_columns_wrap_is_not_a_blocker` pins both facts, because the wrap
+*was* a row in the automations pane's gate for as long as that pane held its own keys, and
+a reader will otherwise re-derive it as one here.
+
+**Rejected.** *Teach `visible_window` the widget's sticky offset* — that helper is what
+every plugin list and three native panes scroll by, so a change for one pane changes all
+of them; ADR-39 recorded the same hazard from the other side, when the file viewer's
+handover was found to have to *relocate* it. *Move the native pane off its list widget as
+groundwork* — the honest closure, and refused **here** rather than outright: four
+behaviours come off `ListState` and each has a consumer that is not the paint (border
+chrome, the click registry, `App::pending_spawn`), so doing it in the same change that
+re-verdicts a table is how a regression in primary navigation ships. It is item one of the
+ordering. *Relocate the module now* — ADR-54 refused the same thing for the file viewer
+and the reason holds: `resolve_rows` is one of the functions a windowing seam moves, so
+its destination is decided by a rule that is not written. *Publish a resolved width or a
+pre-windowed row set* — the fifth and sixth refusals of publishing geometry (ADR-55
+carries the argument). *Hand it over and enumerate the window as a divergence* — that is
+what the port did, correctly, for a *reproduction*; a reproduction may differ and a
+replacement may not.
+
+**Consequences.** The gate is eleven rows: two structural (the window, the module), three
+vocabulary (the border chrome, the centred empty state, the pending-spawn row) plus the
+trim, no wiring, and four recorded closed. `the_window_is_settled_before_what_depends_on_it`
+asserts the ordering — the window first, because the indicators, the hitboxes and the
+placeholder are all functions of it and because `resolve_rows` feeds both panes; then the
+module; then the drawing rows. `the_verdict_is_derived_from_the_blockers` asserts
+positively that the three closed rows are **not** structural blockers, so a change that
+granted one of the powers they named fails there with the reason attached.
+
+Four panes remain native. Two of the four (this one and the file viewer) are now blocked
+on the *same class* of thing — a module that is simultaneously the pane's renderer and the
+kernel's model — which is a shared host decision rather than two pane problems, and is
+worth taking as one piece.

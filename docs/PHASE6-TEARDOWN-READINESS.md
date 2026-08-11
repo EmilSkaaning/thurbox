@@ -81,7 +81,7 @@ written for now has one.
 | File viewer | `src/ui/file_viewer.rs` | `file-viewer` | the native pane (refused, ADR-54: three decisions, no capability) |
 | Global search | `src/ui/global_search.rs` | none possible yet (PHASE4 §10) | the native pane |
 | Code review | `src/ui/code_review.rs` | `code-review` (the diff stream only, PHASE4 §11) | the native pane |
-| Session list | `src/ui/project_list.rs` | `session-list` (its rows, PHASE4 §13) | the native pane |
+| Session list | `src/ui/project_list.rs` | `session-list` (its rows, PHASE4 §13) | the native pane (refused twice, ADR-57: the window and the module, no capability) |
 
 `docs/PHASE4-PANE-READINESS.md` is the audit of what the plugin API could not
 express for the *first* of those panes; all five of its gaps are now closed
@@ -129,11 +129,18 @@ kernel performs the actions. The one row that was real work was the module's sec
 consumer — `row_summary`, shared with the `Ctrl+P` modal — and it moved to that modal's
 own module.
 
-The session list's row was refused the same day as the automations one, for a reason that
-still stands: its keys move the **active session**, which is kernel view state no
-capability writes. ADR-51 answers that (the kernel moves it, as it always did), so what
-holds the pane now is three drawing rows and a module that is the kernel's navigation,
-reorder, sort and search model.
+The session list's row was refused the same day as the automations one, and has since been
+refused a **second** time with the reason moved (ADR-57, PHASE4 §32). Its keys are no longer
+the wall: ADR-51's route closes all three key rows, and each closes on a conjunction that
+also asserts the power it named is still *not* granted. What holds the pane now is the
+**window** — `render_session_section` hands its nodes to a ratatui `List`, and four
+behaviours come off that widget's sticky offset (which rows are on screen, the `▲ N`/`▼ N`
+border indicators, the click hitboxes, and where the pending-spawn placeholder lands), so
+a handover would change which sessions are visible whenever the list overflows — plus the
+module that is the kernel's navigation, reorder, sort and search model, and three drawing
+rows. Two of the port's enumerated divergences were promoted into the gate in the same
+change, because a divergence recorded only in a test's doc comment expires the same way a
+document does.
 
 **Three panes are handed over.** The automations pane went third (ADR-56, PHASE4 §31)
 and is the first that was **always on screen**: it seeds visible, binds no toggle action
@@ -359,3 +366,10 @@ What the three *did* establish is that a pane's keyboard costs no grant (ADR-51,
 twice), that a handover's evidence is its recording (ADR-42/48, held three times with the
 `.snap` files unmoved), and that a handover may make a plugin's reach **smaller** rather
 than larger (ADR-56). The remaining four are not blocked on any of those.
+
+Two of the four are blocked on the **same class** of thing, which is worth taking as one
+piece rather than as two pane problems: `src/ui/project_list.rs` and
+`src/ui/file_viewer.rs` are each simultaneously a pane's renderer and the kernel's model
+(navigation/reorder/sort/search in the first, the file tree's state machine plus
+`visible_window` in the second). ADR-54 and ADR-57 both refuse the relocation for the same
+reason — its destination is decided by a rule that is not written yet.

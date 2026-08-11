@@ -51,6 +51,12 @@
 //! The three enumerated divergences below record **inequality**, so no recording
 //! is attached to them: an expectation states what the pane should be, and a case
 //! that exists to differ has nothing for one to say.
+//!
+//! Each of the three is **also** a row in `tests/session_list_pane_handover_gap.rs`
+//! (ADR-57), and the pair is deliberate: these assertions fail when a divergence
+//! *closes*, forcing this port to be revisited; those rows fail when the tree stops
+//! matching the recorded handover verdict. A divergence documented only here would be a
+//! verdict written in prose, which is the expiry that gate exists to prevent.
 
 #![cfg(feature = "plugins")]
 
@@ -629,7 +635,7 @@ fn the_plugins_animation_is_the_kernels_animation() {
 /// words left-aligned.
 ///
 /// This is the port's one new vocabulary gap, and closing it is an alignment on a
-/// line node.
+/// line node. Recorded as `no-centred-line` in the handover gate.
 #[test]
 fn the_empty_pane_is_the_one_place_the_plugin_differs() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
@@ -668,9 +674,11 @@ fn the_empty_pane_is_the_one_place_the_plugin_differs() {
 /// not agree on which other rows are beside it, and the plugin's index counts the
 /// group headers the native pane folds into the row below.
 ///
-/// Closing it would mean moving the native pane off its list widget, which is what
-/// its scroll offsets and click hitboxes are derived from — Phase 6 work, not a
-/// port's.
+/// Closing it would mean moving the native pane off its list widget, which is what its
+/// scroll offsets, its border indicators, its click hitboxes and the pending-spawn
+/// placeholder's position are all derived from — Phase 6 work, not a port's. It is
+/// `the-window-is-the-list-widgets` in the handover gate, which is where that work is
+/// enumerated, and it is one of the two rows deciding that verdict (ADR-57).
 #[test]
 fn the_two_panes_window_a_long_list_by_different_rules() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
@@ -723,7 +731,8 @@ fn the_two_panes_window_a_long_list_by_different_rules() {
 ///
 /// Left open rather than closed by publishing the trimmed text: the trim is a
 /// presentation decision about the pane's own row, and the port's rule is that the
-/// kernel publishes no rendering.
+/// kernel publishes no rendering. Recorded as
+/// `non-ascii-whitespace-is-the-kernels-trim` in the handover gate.
 #[test]
 fn non_ascii_whitespace_is_trimmed_by_the_kernel_only() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
