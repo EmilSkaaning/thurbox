@@ -1833,7 +1833,12 @@ resolution, and a release-engineering change with its own measurement: it raises
 the effective MSRV from 1.86 to 1.88 (`mlua`'s floor, which cargo cannot express
 per feature), puts vendored Luau C sources in the path of four release targets
 including a cross-built `musl` and a cross-compiled `aarch64-apple-darwin`, and
-contradicts a specified release invariant plus a required CI assertion. *Ship the
+contradicts a specified release invariant plus a required CI assertion. Rejected
+*for this change*, not on the merits, and taken with that measurement in
+[ADR-40](#adr-40-the-plugin-runtime-ships-in-the-build-a-user-installs-stage-b) —
+which also corrects two details of this paragraph: the sources are C++ rather than
+C, and `aarch64-apple-darwin` is built natively on an arm64 runner rather than
+cross-compiled. *Ship the
 pane's replacement ungated* — vacuous: an ungated Luau program needs an ungated
 VM, and rewriting the plugin in Rust to dodge the gate reproduces
 `src/ui/info_panel.rs` under a new name while destroying the only thing the port
@@ -2028,3 +2033,116 @@ reports a cursor the plugin does not own, so no drag target is recorded for it �
 one more consequence of the missing view write, pinned in the gate beside the
 others. And the file-viewer teardown row stays blocked for three independent
 reasons now: ADR-37's build, the view write, and the module that is the model.
+
+## ADR-40: The plugin runtime ships in the build a user installs (Stage B)
+
+**Context.** ADR-37 stopped the first pane handover on a finding that was not
+about the info panel: nothing a plugin draws reaches a released binary.
+`Cargo.toml` read `default = []`, a required CI step asserted the default
+dependency tree carried no `mlua`, and `release/workflow-invariants` *specified*
+that `cd.yml` never builds with the plugin feature. A bundled pane is a Luau
+program, so handing any pane over would have deleted it from every install while
+the `--features plugins` test run stayed green.
+
+ADR-37 recorded flipping the default as its rejected alternative, "the honest
+resolution, and a release-engineering change with its own measurement", and
+`docs/PHASE6-TEARDOWN-READINESS.md` §4 placed it upstream of all seven handovers.
+This is that change, with the measurement.
+
+**Decision.** `plugins` joins the default feature set. Four consequences follow,
+each handled rather than discovered:
+
+- **`rust-version` rises 1.86 → 1.88**, with `clippy.toml` following. `mlua`
+  declares 1.88 and cargo cannot express a per-feature minimum; with the runtime
+  in `default`, its floor *is* the crate's floor, so the workaround the manifest
+  comment described is gone rather than restated. Four documents claimed 1.75,
+  which `ratatui 0.30` had already made false. An MSRV rise is also a **lint**
+  change: `clippy::manual_is_multiple_of` is msrv-gated (`u64::is_multiple_of`
+  stabilised in 1.87), so eight `% N == 0` tick-cadence checks began failing
+  `-D warnings` and were rewritten rather than allowed. That, not the runtime, is
+  the whole `src/` logic diff.
+- **The CI assertion inverts and stays required.** The `plugins` job asserted the
+  default tree *excludes* `mlua`; it now asserts it *includes* it, which is the
+  fact `tests/teardown_gate.rs` reads from `Cargo.toml` to decide whether a pane
+  may be handed over. The job also gains the configuration nothing else covers
+  any more — `--no-default-features`, the fallback for a platform where the
+  vendored C++ will not build — and its pinned 1.88 toolchain stops being a
+  workaround and becomes a real MSRV floor check.
+- **Release invariant 2 is replaced, not deleted.** "cd.yml never builds *with*
+  the plugin feature" is not merely obsolete: after the flip no release job asks
+  for the feature and every release binary contains it, so the check would report
+  `ok` about exactly what it claimed to forbid. It is removed with its reason and
+  replaced by its inverse — never build *without* the runtime, rejecting
+  `--no-default-features` and a manifest edit to the default list — because the
+  hazard reversed direction. A handed-over pane is drawn by the runtime, so a
+  release that drops it ships an empty column.
+- **The bundled example pane is seeded hidden.** `PaneDecl::default_visible`
+  defaults to `true`, which is right for a plugin an author installed and wrong
+  for one that arrives inside the binary. `hello` omitted the seed, which nobody
+  could see while no installed binary ran a plugin at all; in a default build it
+  would open a demo pane in every fresh install's right column.
+  `tests/bundled_manifests.rs` holds the rule for the whole bundled set.
+
+**The measurement**, since a release that fails to build on one platform is the
+worst outcome available here. `mlua` vendors Luau as **C++17** sources
+(`luau0-src`, `.std("c++17").cpp(true)`), so every release target needs a C++
+compiler and, cross-compiling, a C++ standard library for that target — where
+before it needed only the C compiler `rusqlite`'s bundled SQLite already required.
+
+| Target | Verified | How |
+|---|---|---|
+| `x86_64-unknown-linux-gnu` | yes | local release build |
+| `x86_64-unknown-linux-musl` | yes | local release build against a `musl-cross` GCC with C++, the toolchain `cross`'s image supplies as `CXX_x86_64_unknown_linux_musl`; static-pie, Luau linked in |
+| `x86_64-pc-windows-msvc` | no | no MSVC off Windows. The nearest proxy — a local `x86_64-pc-windows-gnu` cross-build with mingw `g++` — passes, so the sources survive a Windows ABI; `cl.exe`'s dialect and standard library stay untested |
+| `aarch64-apple-darwin` | no | needs macOS and the Apple SDK. It is a **native** build on the `macos-14` arm64 runner, not a cross-compile as ADR-37 stated |
+
+On the default target the runtime costs **+2.44 MB** on `thurbox` (12.02 → 14.46
+MB) and **+2.40 MB** on `thurbox-cli` (9.85 → 12.24 MB), and **~60 s** of
+build-script time compiling vendored Luau — next to the ~72 s the release already
+spends on bundled SQLite. So the artifact-size premise the Luau choice rested on
+holds: a few megabytes, not the tens a bundled JavaScript runtime would have cost,
+and no packaging channel (`packaging/`: brew, AUR, Chocolatey, winget) changes.
+
+**Why now, and why as its own change.** Stage B was always a release decision
+rather than pane work, which is why ADR-37 refused to take it inside a pane port.
+Taking it separately means the MSRV rise, the inverted assertion, the replaced
+invariant and the four-target measurement each get argued once, in a diff whose
+only `src/` edit is one manifest line — so a bisect over a pane handover never
+also lands a release-engineering change.
+
+**Rejected.**
+
+- *Keep `plugins` optional and hand panes over anyway* — the deletion ADR-37
+  refused: an empty column on every install, green in the only build that can
+  draw the replacement.
+- *Select between the native and plugin renderer on the feature* — nothing is
+  handed over, and two renderings of one pane that differ by build are comparable
+  as trees but never as the frames a user sees.
+- *Add a runtime `[features] plugins` flag defaulting to `false`*, as the earlier
+  prose design set had it. It would gate nothing a user can see: with every
+  bundled pane seeded hidden the host is additive — discovery over a directory
+  that usually does not exist, no VM until a plugin is found. A switch whose only
+  effect is to skip work that already costs nothing is a settings row that has to
+  be explained.
+- *Drop the `plugins` feature entirely* — that is Stage C. Keeping it is what
+  makes `--no-default-features` a real answer for a platform whose toolchain
+  cannot build the vendored C++, and the CI leg above keeps that answer compiling.
+- *Delete release invariant 2 outright*, as its own header instructed for Stage C.
+  Correct about the mechanism — a check should be removed in the diff that
+  retires it, not switched off — but it would have dropped a property that had
+  merely reversed. The removal is recorded with its reason and its inverse takes
+  its place.
+
+**Consequences.** Every install gains the plugin host: discovery, the
+`thurbox-cli plugin`/`command` verbs, `F10`, and the bundled plugins materialized
+under the data dir. Nothing is taken away — all seven native panes stay, drawn by
+the same renderers — and no bundled pane appears unasked, so a fresh launch looks
+like the launch before it. The seven teardown pane rows are no longer blocked by a
+release decision: each is now blocked only by its own pane-level reason, which
+`tests/teardown_gate.rs`'s
+`the_build_condition_holds_and_still_gates_a_handover` asserts row by row. The
+build condition stays checked rather than retired, because it is what a later
+change removing the runtime from `default` would violate — at which point every
+pane already handed over would empty with nothing failing. Two release targets
+remain unverified by anything but the release build itself, which is stated here
+rather than assumed away.

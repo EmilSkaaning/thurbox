@@ -122,8 +122,9 @@ like §4's, but they are not service state: no pane requests them. They refresh 
 the kernel's own cadence and feed the header, the info panel and the perf
 snapshot.
 
-**Plugin host (4, gated).** `plugin_panes`, `plugin_events`, `plugin_keys`,
-`motion` — present only with `--features plugins`.
+**Plugin host (4).** `plugin_panes`, `plugin_events`, `plugin_keys`, `motion` —
+present in every default build since Stage B (ADR-40), and absent only from one
+built with `--no-default-features`.
 
 All four are the *host's* state, not a plugin's, and the distinction is the whole
 architecture:

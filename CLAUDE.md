@@ -370,12 +370,15 @@ the one structural check that reads `.github/` rather than `src/`. It enforces
 four release-delivery invariants, each cheap to check and expensive to discover
 broken: (1) `cd.yml`'s `push` trigger carries exactly `branches: [main]` and no
 other key (parsed structurally, so a `tags:` beside the branch list fails where a
-grep would pass); (2) `cd.yml` never asks for the plugin feature —
-`--features plugins`, `--features=plugins`, `--all-features`, or a `features`
-list — since a v1 release binary containing the v2 runtime voids the whole point
-of the compile-time gate (whole-line comments are stripped, so `cd.yml` may
-document the rule; **Stage C deletes this check** rather than switching it off,
-so the flip is a visible line in a diff); (3) `nightly.yml` runs no
+grep would pass); (2) `cd.yml` never builds **without** the plugin runtime — no
+`--no-default-features`, no manifest edit rewriting the `default` feature list —
+since a handed-over pane is drawn by that runtime, so a release that drops it
+ships an empty column (whole-line comments are stripped, so `cd.yml` may document
+the rule). This invariant **reversed** at Stage B (ADR-40): it used to forbid
+`--features plugins`, which after the default flip would have kept reporting `ok`
+about a release binary carrying exactly what it claimed to forbid, so it was
+removed with its reason and replaced by its inverse rather than dropped;
+(3) `nightly.yml` runs no
 package-channel publish — no `publish-*` job, none of the four channel secrets,
 no `choco push`/`wingetcreate`/tap/AUR tooling — because Chocolatey and winget
 are moderated and a nightly there burns a human review; (4) every nightly release
@@ -929,9 +932,10 @@ startup when the flag is on), `notify`
 (diagnose OS desktop notifications: prints the detected delivery backend
 and last error; `--test` fires a sample — see OS notifications below), `perf`
 (print the perf snapshot a running TUI publishes while `THURBOX_PERF_LOG`
-or its perf HUD is active — see `docs/PERFORMANCE.md`), and — only in a build
-with the **`plugins`** Cargo feature (the v2 plugin host; absent from stable
-builds rather than present and refusing) — `plugin`
+or its perf HUD is active — see `docs/PERFORMANCE.md`), and — from the
+**`plugins`** Cargo feature (the v2 plugin host, in the default set since Stage B
+so every install has it; absent only from a `--no-default-features` build, rather
+than present and refusing) — `plugin`
 (list/status/doctor: what the host discovered, each plugin's lifecycle state
 and granted capabilities, and everything discovery rejected with its cause.
 `list`/`status` **start** the plugins they report, since a compile or `init`
@@ -2625,7 +2629,8 @@ cargo crate — `scripts/install-dev-tools.sh` prints a reminder).
 
 ## Key Technical Details
 
-- MSRV: 1.75, Edition 2021
+- MSRV: 1.88, Edition 2021 (set by `mlua`, which the default
+  feature set carries — see ADR-40)
 - Async runtime: tokio (multi-threaded)
 - Session backend: `TmuxBackend` over a `TmuxTransport`
   (local `tmux -L thurbox`, or `ssh <dest> tmux …` for

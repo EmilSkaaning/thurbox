@@ -4818,7 +4818,7 @@ impl App {
 
         // Refresh cached automations + tasks for the UI (same cadence). The
         // first tick primes the caches so the panels aren't empty on open.
-        if self.metrics.tick_count == 1 || self.metrics.tick_count % 100 == 0 {
+        if self.metrics.tick_count == 1 || self.metrics.tick_count.is_multiple_of(100) {
             self.refresh_automations();
             self.refresh_tasks();
         }
@@ -4847,8 +4847,8 @@ impl App {
     /// (`thurbox-cli perf`); a default run publishes nothing.
     fn tick_perf_window(&mut self) {
         let tick = self.metrics.tick_count;
-        let window_due = self.perf_log_env && tick % PERF_WINDOW_TICKS == 0;
-        let snapshot_due = self.show_perf_hud && tick % PERF_SNAPSHOT_TICKS == 0;
+        let window_due = self.perf_log_env && tick.is_multiple_of(PERF_WINDOW_TICKS);
+        let snapshot_due = self.show_perf_hud && tick.is_multiple_of(PERF_SNAPSHOT_TICKS);
         if !window_due && !snapshot_due {
             return;
         }
@@ -5155,10 +5155,14 @@ impl App {
         self.poll_git_stats();
         self.poll_disk_usage();
 
-        if self.metrics.tick_count % METRICS_REFRESH_TICKS == 0 {
+        if self
+            .metrics
+            .tick_count
+            .is_multiple_of(METRICS_REFRESH_TICKS)
+        {
             self.start_metrics_refresh();
         }
-        if self.metrics.tick_count % GIT_REFRESH_TICKS == 0 {
+        if self.metrics.tick_count.is_multiple_of(GIT_REFRESH_TICKS) {
             self.start_git_stats_refresh();
         }
         // Fire ~1 s after startup, then once a minute (folder size is slow to
@@ -5169,7 +5173,7 @@ impl App {
         if self.metrics.tick_count % DISK_USAGE_REFRESH_TICKS == METRICS_REFRESH_TICKS {
             self.start_disk_usage_refresh();
         }
-        if self.metrics.tick_count % CONFIG_RELOAD_TICKS == 0 {
+        if self.metrics.tick_count.is_multiple_of(CONFIG_RELOAD_TICKS) {
             self.poll_config_reload();
         }
 
@@ -5211,7 +5215,10 @@ impl App {
         // case an external signal shows ~100 ms late, under any perceptible
         // threshold. See `docs/PERFORMANCE.md` (ADR-P6 + ADR-P10).
         let version_check_due = self.hook_states_version.is_none()
-            || self.metrics.tick_count % HOOK_VERSION_CHECK_TICKS == 0;
+            || self
+                .metrics
+                .tick_count
+                .is_multiple_of(HOOK_VERSION_CHECK_TICKS);
         if version_check_due {
             self.metrics.bump(|p| &mut p.data_version_checks);
             let version = self.db.data_version().ok();

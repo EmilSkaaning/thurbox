@@ -14,15 +14,18 @@ description = "A TUI for orchestrating multiple coding-agent CLI sessions in per
 repository = "https://github.com/Thurbeen/thurbox"
 keywords = ["tui", "agent", "tmux", "git", "cli"]
 categories = ["command-line-utilities"]
-# Floor for the default feature set. `ratatui 0.30` is the binding constraint;
-# the `plugins` feature needs 1.88 (mlua), which cargo cannot express per
-# feature — the plugin CI job pins a toolchain that satisfies it.
-rust-version = "1.86"
+# Floor for the default feature set, which now carries the plugin host: `mlua`
+# declares 1.88, above `ratatui 0.30`'s 1.86, so the runtime's floor *is* the
+# crate's floor. Cargo cannot express a per-feature MSRV, and with `plugins`
+# in `default` it no longer needs to.
+rust-version = "1.88"
 
-# v2 plugin host. Absent from stable release builds: enabling it embeds a Luau
-# VM and pulls a C toolchain in through mlua's vendored Luau sources.
+# v2 plugin host, in the default feature set since Stage B (ADR-40): the Luau VM
+# is part of every build a user installs, because a bundled pane is a Luau
+# program and a pane no released binary can draw is not a pane. Building it needs
+# a C++ toolchain for mlua's vendored Luau sources on every release target.
 [features]
-default = []
+default = ["plugins"]
 plugins = ["dep:mlua"]
 
 [dependencies]

@@ -114,40 +114,44 @@ YAML
   [[ "$output" == *"does not exist"* ]]
 }
 
-# --- Invariant 2: the plugin feature ----------------------------------------
+# --- Invariant 2: the plugin runtime stays in the release build --------------
+#
+# The invariant reversed at Stage B: the release build carries the runtime
+# through the default feature set, so what must fail is a build that *drops* it.
 
-@test "invariant 2 fails on --features plugins" {
+@test "invariant 2 fails on --no-default-features" {
+  write_cd
+  printf '      - run: cargo build --release --no-default-features\n' >> "$FIXTURE/cd.yml"
+  run LINT "$FIXTURE"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"does not build without the plugin runtime"* ]]
+}
+
+@test "invariant 2 fails on --no-default-features before other flags" {
+  write_cd
+  printf '      - run: cross build --no-default-features --release --target x86_64-unknown-linux-musl\n' >> "$FIXTURE/cd.yml"
+  run LINT "$FIXTURE"
+  [ "$status" -ne 0 ]
+}
+
+@test "invariant 2 fails on a manifest edit rewriting the default feature list" {
+  write_cd
+  printf '      - run: sed -i '\''s/^default = .*/default = []/'\'' Cargo.toml\n' >> "$FIXTURE/cd.yml"
+  run LINT "$FIXTURE"
+  [ "$status" -ne 0 ]
+}
+
+@test "invariant 2 allows an explicit request for the feature" {
   write_cd
   printf '      - run: cargo build --release --features plugins\n' >> "$FIXTURE/cd.yml"
-  run LINT "$FIXTURE"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"does not build with the plugin feature"* ]]
-}
-
-@test "invariant 2 fails on --features=plugins" {
-  write_cd
-  printf '      - run: cargo build --features=plugins\n' >> "$FIXTURE/cd.yml"
-  run LINT "$FIXTURE"
-  [ "$status" -ne 0 ]
-}
-
-@test "invariant 2 fails on --all-features" {
-  write_cd
   printf '      - run: cargo build --release --all-features\n' >> "$FIXTURE/cd.yml"
   run LINT "$FIXTURE"
-  [ "$status" -ne 0 ]
+  [ "$status" -eq 0 ]
 }
 
-@test "invariant 2 fails on a manifest edit adding the feature" {
+@test "invariant 2 tolerates a comment naming the flag it forbids" {
   write_cd
-  printf '      - run: sed -i '\''s/^/features = ["plugins"]/'\'' Cargo.toml\n' >> "$FIXTURE/cd.yml"
-  run LINT "$FIXTURE"
-  [ "$status" -ne 0 ]
-}
-
-@test "invariant 2 tolerates a comment naming the feature it forbids" {
-  write_cd
-  printf '      # Never add --features plugins here: see RELEASE invariant 2.\n' >> "$FIXTURE/cd.yml"
+  printf '      # Never add --no-default-features here: see RELEASE invariant 2.\n' >> "$FIXTURE/cd.yml"
   run LINT "$FIXTURE"
   [ "$status" -eq 0 ]
 }
@@ -173,7 +177,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - run: cargo build --release --features plugins
+      - run: cargo build --release
 YAML
   run LINT "$FIXTURE"
   [ "$status" -eq 0 ]

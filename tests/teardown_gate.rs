@@ -66,10 +66,11 @@ struct TeardownUnit {
 ///
 /// The pane rows are the bundled-plugin half of the same question: a native pane
 /// may only be deleted once a plugin renders it **in the build a user installs**,
-/// and today none does — five panes have a plugin that reproduces them, none is
-/// what the interface draws, and the runtime behind all of them is an optional
-/// dependency the release workflow may not enable. See [`pane`] for the three
-/// conditions and which mistake each rules out.
+/// and today none does — five panes have a plugin that reproduces them, and none
+/// is what the interface draws. Since Stage B (ADR-40) the runtime behind them is
+/// in the default feature set, so what remains blocking is per-pane rather than
+/// shared. See [`pane`] for the three conditions and which mistake each rules
+/// out.
 const REPLACEMENTS: &[Replacement] = &[
     Replacement {
         id: "hooks-in-kernel",
@@ -173,17 +174,21 @@ const REPLACEMENTS: &[Replacement] = &[
 /// `a_reproduced_pane_is_not_a_replaced_one` asserts.
 ///
 /// Condition 3 rules out the quiet one, which the first two together permit. A
-/// bundled pane is a Luau program, the VM behind it is an optional dependency,
-/// and `release/workflow-invariants` forbids the release workflow from enabling
-/// it — so handing a pane to that runtime today removes the pane from every
-/// install while `--features plugins` stays green, since the only build able to
-/// draw the replacement is one no installer produces.
-/// `a_pane_drawn_only_by_a_gated_build_is_not_handed_over` pins that.
+/// bundled pane is a Luau program, so a build without the VM draws it as an empty
+/// column. While the runtime was an optional dependency that
+/// `release/workflow-invariants` forbade the release workflow from enabling,
+/// handing a pane to it would have removed that pane from every install while
+/// `--features plugins` stayed green — the only build able to draw the
+/// replacement was one no installer produced. Stage B (ADR-40) put the runtime in
+/// the default feature set, so the condition now **holds**; it stays checked
+/// rather than retired, because it records a release decision a later change
+/// could reverse, and every pane already handed over would empty silently.
+/// `the_build_condition_holds_and_still_gates_a_handover` pins both halves.
 ///
 /// Condition 3 is a fact about the build rather than about any one pane, so all
-/// seven rows carry it. That is the real dependency structure: one release
-/// decision unblocks them together, and stating it once stops it reading as seven
-/// independent pane problems.
+/// seven rows carry it. That was the real dependency structure while it blocked:
+/// one release decision unblocked them together, and stating it once stopped it
+/// reading as seven independent pane problems.
 const fn pane(
     id: &'static str,
     v1_capability: &'static str,
@@ -224,9 +229,9 @@ fn pane_is_handed_over(
 ///
 /// Read from `Cargo.toml`'s default feature list, not from
 /// `cfg!(feature = "plugins")`. The `cfg!` answers "was *this test binary* built
-/// with the feature", which under `cargo nextest run --all --features plugins` is
-/// `true` — precisely the answer that would permit deleting a pane no released
-/// binary can draw. Reading the manifest keeps one verdict in both
+/// with the feature", which under `cargo nextest run --all --no-default-features`
+/// is `false` and under a plain run is `true` — neither is a fact about what an
+/// installer produces. Reading the manifest keeps one verdict in both
 /// configurations, which is the property the module note above depends on.
 fn plugin_host_reaches_the_installed_build(root: &Path) -> bool {
     let manifest = source(root, "Cargo.toml");
@@ -561,46 +566,61 @@ fn a_reproduced_pane_is_not_a_replaced_one() {
 }
 
 /// The other half of the pane probe that is easy to get wrong: a pane handed to a
-/// runtime the user does not have is **not** handed over.
+/// runtime the user does not have is **not** handed over — and that condition is
+/// satisfied today, which is a fact worth asserting rather than assuming.
 ///
 /// This is the quiet case, and the two-condition probe permitted it. Delete a
 /// pane's native renderer plus its call in `src/app/view.rs`, and conditions 1
 /// and 2 both hold: the row would be recorded ready,
 /// `recorded_verdicts_match_the_tree` would *require* that, and
 /// `every_listed_path_survives_until_its_unit_is_ready` would stop protecting the
-/// renderer — signing off the deletion of a pane no released binary can draw,
-/// while the `--features plugins` test run stayed green.
+/// renderer — signing off the deletion of a pane no released binary can draw.
+///
+/// Stage B (ADR-40) put the runtime in the default feature set, so the tree now
+/// satisfies the condition. The rule is kept because it is what a change removing
+/// the runtime from `default` — or a release built with default features
+/// suppressed — would violate, at which point every handed-over pane becomes an
+/// empty column with nothing failing. So this asserts the condition *holds*, and
+/// separately that it still decides a handover.
 #[test]
-fn a_pane_drawn_only_by_a_gated_build_is_not_handed_over() {
+fn the_build_condition_holds_and_still_gates_a_handover() {
     let root = repo_root();
     assert!(
-        !plugin_host_reaches_the_installed_build(&root),
-        "the plugin runtime is expected to be optional: `plugins` is not in \
-         Cargo.toml's default features, and release/workflow-invariants keeps \
-         cd.yml from enabling it. If that changed, this whole row is a release \
-         decision to revisit rather than a probe to update"
+        plugin_host_reaches_the_installed_build(&root),
+        "the plugin runtime is expected to be in Cargo.toml's default features \
+         since Stage B, so that a bundled pane is drawn by the binary users \
+         install. If it left the default list, that is a release decision to \
+         revisit — with every pane already handed over — rather than a probe to \
+         update"
     );
-    // The case the tree cannot exhibit, which is why the rule is pure: plugin
-    // present, native renderer no longer drawn, runtime absent from the build.
+    // The case the tree can no longer exhibit, which is why the rule is pure:
+    // plugin present, native renderer no longer drawn, runtime absent from the
+    // build.
     assert!(
         !pane_is_handed_over(true, false, false),
         "a pane whose replacement only runs behind a compile-time feature the \
          released binary does not enable has not been handed over — deleting its \
          renderer would remove the pane from every install"
     );
-    // And it is a handover once the runtime ships, so the condition gates the
-    // release decision rather than forbidding handover outright.
+    // And it is a handover once the runtime ships, which is the state the tree is
+    // in: the condition gated a release decision rather than forbidding handover.
     assert!(pane_is_handed_over(true, false, true));
 
-    // Consequence today: the build condition alone blocks every pane row,
-    // whatever each pane's plugin renders and whatever the interface draws.
+    // Consequence today: with the build condition met, each pane row is blocked
+    // by its own pane-level reason — the interface still draws all seven native
+    // renderers — so a handover is now pane work rather than a release decision.
     for r in REPLACEMENTS
         .iter()
         .filter(|r| r.v2_home.contains("bundled"))
     {
         assert!(
+            view_draws_native_pane(&root, r.id),
+            "{}: expected the native pane to still be drawn",
+            r.id
+        );
+        assert!(
             !(r.probe)(&root, r.id),
-            "{}: the build condition should block it",
+            "{}: the native renderer is still drawn, so the row must be blocked",
             r.id
         );
     }

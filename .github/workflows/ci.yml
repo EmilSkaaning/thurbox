@@ -203,13 +203,25 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo test --test architecture_rules
 
-  # The v2 plugin host is behind the `plugins` Cargo feature and absent from
-  # every other job's build, so without this nothing would compile it. It needs
-  # a newer toolchain than the crate's own `rust-version` (mlua declares 1.88)
-  # and a C compiler for mlua's vendored Luau sources — cargo cannot express a
-  # per-feature MSRV, so the requirement is pinned here instead.
+  # The plugin runtime's own leg. Since Stage B (ADR-40) `plugins` is in the
+  # default feature set, so every other Rust job compiles the host and this job
+  # no longer exists to be the only one that does. What it covers is what the
+  # others cannot:
+  #
+  #   * the declared MSRV floor — `mlua` sets it at 1.88, and every other job
+  #     runs `stable`, which would keep passing long after the floor was wrong;
+  #   * the `--no-default-features` build, which is the documented fallback for a
+  #     platform where mlua's vendored C++ will not compile. It is the only
+  #     configuration nothing else builds now, and 147 `cfg(feature = "plugins")`
+  #     sites would rot in silence without it;
+  #   * the bundled Luau sources, which no Rust job type-checks; and
+  #   * that the runtime actually *reaches* the default dependency tree, which is
+  #     what a handed-over pane is drawn by.
+  #
+  # The job id stays `plugins` because `all-checks.needs` and branch protection
+  # name it; only what it verifies changed.
   plugins:
-    name: Plugin Host (feature-gated)
+    name: Plugin Runtime (MSRV floor + no-runtime fallback)
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
@@ -223,9 +235,8 @@ jobs:
       - uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
         with:
           tool: cargo-nextest
-      # Type-check the bundled Luau plugins. `docs/v2/` asks for the Luau
-      # toolchain before Luau ships; without this the `.luau` files in the
-      # binary are checked by nothing.
+      # Type-check the bundled Luau plugins — without this the `.luau` files in
+      # the binary are checked by nothing.
       - name: Install luau-analyze
         run: |
           set -euo pipefail
@@ -236,14 +247,22 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Type-check bundled Luau plugins
         run: ./scripts/dev/lint-luau.sh
-      - run: cargo clippy --all-targets --features plugins -- -D warnings
-      - run: cargo nextest run --all --features plugins --profile ci
-      # Stable builds must not gain the runtime: if mlua ever leaks out of the
-      # optional dependency, this is where it surfaces.
-      - name: Assert the default build excludes the plugin runtime
+      # The default build at the declared floor: proves `rust-version = 1.88` is
+      # the real minimum for the feature set users get, vendored Luau included.
+      - run: cargo clippy --all-targets -- -D warnings
+      # The fallback build, at the same floor. Kept green so the feature stays a
+      # usable switch rather than a dead `cfg`.
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings
+      - run: cargo nextest run --all --no-default-features --profile ci
+      # A bundled pane is a Luau program, so a released binary without the VM
+      # draws it as an empty column. This asserts the runtime is in the build
+      # every installer produces — the inverse of the assertion that stood here
+      # while `plugins` was optional, and the fact `tests/teardown_gate.rs`
+      # reads from `Cargo.toml` to decide whether a pane may be handed over.
+      - name: Assert the default build includes the plugin runtime
         run: |
-          if cargo tree --edges normal | grep -q mlua; then
-            echo "::error::mlua reached the default dependency tree"
+          if ! cargo tree --edges normal | grep -q mlua; then
+            echo "::error::mlua is absent from the default dependency tree"
             exit 1
           fi
 
@@ -486,9 +505,11 @@ jobs:
       - fmt
       - clippy
       - nextest
-      # The v2 plugin host's own leg. MIGRATION.md Phase 0 asks for it
-      # "required rather than advisory" — without it here the job can fail red
-      # while the gate still reports green, so a plugins-only break merges.
+      # The plugin runtime's leg: the MSRV floor, the no-runtime fallback build,
+      # the Luau type-check, and the assertion that the runtime is in the default
+      # dependency tree. Required rather than advisory — without it here the job
+      # can fail red while the gate still reports green, and the thing it guards
+      # is the composition of the binary users install.
       - plugins
       - acceptance
       - architecture

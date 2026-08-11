@@ -1,7 +1,7 @@
 # Minimum supported Rust version. Mirrors `rust-version` in Cargo.toml — the
-# floor is set by ratatui 0.30 (1.86), not by thurbox's own code. The `plugins`
-# feature needs 1.88 on top of this.
-msrv = "1.86"
+# floor is set by mlua (1.88), which the default feature set carries since the
+# plugin host joined it, not by thurbox's own code.
+msrv = "1.88"
 
 # Lint configuration
 avoid-breaking-exported-api = false

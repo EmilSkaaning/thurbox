@@ -19,20 +19,21 @@
 #   scripts/dev/sandbox.sh -- session list # run `thurbox-cli <args>` in the sandbox
 #   scripts/dev/sandbox.sh --clean [name]  # kill + wipe a persistent profile, then exit
 #
-# v2 plugin host (absent from stable builds, so it needs an explicit build):
-#   scripts/dev/sandbox.sh --plugins       # build with --features plugins and launch
-#   scripts/dev/sandbox.sh --plugins --show tasks,file-viewer
-#                                          # …and make those bundled panes visible
-#   scripts/dev/sandbox.sh --plugins --show all
-#                                          # every bundled pane (see the note below)
+# v2 plugin host — in every default build since Stage B (ADR-40), so no flag is
+# needed to get it. `--plugins` remains as an explicit `--features plugins`:
+#   scripts/dev/sandbox.sh --show tasks,file-viewer
+#                                          # make those bundled panes visible
+#   scripts/dev/sandbox.sh --show all      # every bundled pane (see the note below)
+#   scripts/dev/sandbox.sh --plugins       # ask for the feature explicitly (redundant)
 #
-# The bundled panes that reproduce a native pane ship `default_visible = false`,
-# because the native pane is still what draws the interface — a visible copy
-# would show two of the same pane. `--show` flips them on through the generated
-# `<plugin>.<pane>.show` commands, and the choice persists in the sandbox DB.
-# `--show all` turns on six panes at once, which overflows the right-hand column
-# on a normal terminal; it is useful for checking that they *load*, less so for
-# looking at them. Prefer naming one or two.
+# Every bundled pane ships `default_visible = false`: five reproduce a native pane
+# that still draws the interface (a visible copy would show two of the same pane),
+# and `hello` is a worked example — with the host in the default build, a visible
+# seed would open a pane in every install. `--show` flips them on through the
+# generated `<plugin>.<pane>.show` commands, and the choice persists in the
+# sandbox DB. `--show all` turns on six panes at once, which overflows the
+# right-hand column on a normal terminal; it is useful for checking that they
+# *load*, less so for looking at them. Prefer naming one or two.
 #
 # State (persistent mode): target/dev-sandbox/<profile>/ (gitignored). Sessions
 # survive across runs — its tmux-dev server is left alive on exit. `--clean`
@@ -71,7 +72,7 @@ while [ $# -gt 0 ]; do
         --shell) action="shell"; shift ;;
         --clean) action="clean"; shift; case "${1:-}" in ""|-*) ;; *) profile="$1"; shift ;; esac ;;
         --) shift; action="cli"; cli_args=("$@"); break ;;
-        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
         *) die "unknown argument: $1 (try --help)" ;;
     esac
 done
@@ -84,11 +85,10 @@ if [ "$action" = "clean" ]; then
     exit 0
 fi
 
-# Build the dev binaries BEFORE the HOME override (so cargo finds ~/.cargo).
-if [ -n "$show_panes" ] && [ ${#features[@]} -eq 0 ]; then
-    die "--show needs --plugins (the plugin host is absent from a default build)"
-fi
+# `--show` no longer needs `--plugins`: the default build carries the host, so
+# the `<plugin>.<pane>.show` commands exist either way.
 
+# Build the dev binaries BEFORE the HOME override (so cargo finds ~/.cargo).
 log "building thurbox (dev${features[*]+ ${features[*]}})"
 ( cd "$TBX_REPO_ROOT" && cargo build --bin thurbox --bin thurbox-cli "${features[@]+${features[@]}}" >&2 )
 

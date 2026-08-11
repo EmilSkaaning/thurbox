@@ -47,7 +47,8 @@ website linters), and `git`. The full walkthrough — including the runtime
 sandbox for trying thurbox in isolation — lives in
 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
-- **MSRV:** Rust 1.75, Edition 2021.
+- **MSRV:** Rust 1.88, Edition 2021 — set by `mlua`, whose vendored Luau the
+  default feature set builds. A C++ compiler is therefore a build requirement.
 
 ## Everyday tasks (`just`)
 

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Enforce the release-delivery invariants over the GitHub Actions workflows.
 #
-# v2 lands on `main` behind a Cargo feature while v1 keeps releasing from the
-# same trunk. Four properties of the workflow files keep those two facts from
-# colliding, and each is one line away from being false, invisible in review (the
-# diff looks like ordinary CI maintenance), and discovered only by a user who
-# installed the wrong thing:
+# v2 lands on `main` while v1 keeps releasing from the same trunk. Four
+# properties of the workflow files keep those two facts from colliding, and each
+# is one line away from being false, invisible in review (the diff looks like
+# ordinary CI maintenance), and discovered only by a user who installed the wrong
+# thing:
 #
 #   1. cd.yml's push trigger names `main` and nothing else.
-#   2. cd.yml never builds with the plugin feature (before Stage C).
+#   2. cd.yml never builds without the plugin runtime (since Stage B).
 #   3. No package-channel publish job runs from nightly.yml.
 #   4. Every nightly GitHub release is marked prerelease.
 #
@@ -127,22 +127,31 @@ invariant_push_trigger() {
     return 0
 }
 
-# --- Invariant 2: cd.yml never builds with the plugin feature ---------------
+# --- Invariant 2: cd.yml never builds without the plugin runtime ------------
 #
-# The compile-time gate's whole guarantee is that a v1 release binary cannot
-# contain the v2 runtime; a release job asking for the feature voids it.
-# `--all-features` counts, because the plugin feature is among them.
+# This invariant used to run the other way: it forbade cd.yml from asking for
+# `--features plugins`, because a v1 release binary containing the v2 runtime
+# voided the compile-time gate. Stage B put `plugins` in the crate's *default*
+# feature set, which retires that property deliberately — and, worse, makes the
+# old check dishonest: no release job asks for the feature any more, so the check
+# would report `ok` while every release binary carried exactly what it claimed to
+# forbid. A check that has stopped tracking its own property is worse than none,
+# because green is trusted.
 #
-# At Stage C the release build gains the feature deliberately and this check is
-# DELETED in the PR that flips the default — there is intentionally no switch. A
-# toggle can be flipped in the same diff that introduces what it guarded; a
-# removed check is a line in a diff that has to justify itself.
+# The hazard reversed direction. Once a native pane is handed over to its bundled
+# plugin, the runtime is what *draws* that pane, so a release built with default
+# features suppressed ships an empty column where the pane was — the same silent
+# failure, arrived at from the other side. Hence: no `--no-default-features`, and
+# no manifest edit rewriting the default feature list.
+#
+# Asking for the feature explicitly is now allowed and merely redundant: it
+# requests the runtime the release is required to carry.
 #
 # Whole-line comments are stripped first, so cd.yml may document this invariant
 # without the documentation tripping it. Trailing comments are left alone: they
 # cannot hide a violation, since the code before them is still scanned.
-invariant_no_plugin_feature() {
-    local name='invariant 2: cd.yml does not build with the plugin feature'
+invariant_keeps_plugin_runtime() {
+    local name='invariant 2: cd.yml does not build without the plugin runtime'
     local before=$FAILED hits
 
     if [ ! -f "$CD" ]; then
@@ -150,9 +159,9 @@ invariant_no_plugin_feature() {
         return 0
     fi
 
-    hits=$(grep -nE -- '--features[ =]+[^ ]*plugins|--all-features|features[[:space:]]*=[[:space:]]*\[[^]]*plugins' "$CD" |
+    hits=$(grep -nE -- '--no-default-features|default[[:space:]]*=[[:space:]]*\[' "$CD" |
         grep -vE '^[0-9]+:[[:space:]]*#' || true)
-    fail_each "$name — $CD requests it" "$hits"
+    fail_each "$name — $CD drops it" "$hits"
 
     [ "$FAILED" -eq "$before" ] && printf '  ok  %s\n' "$name"
     return 0
@@ -249,7 +258,7 @@ invariant_nightly_prerelease() {
 
 printf 'Checking release-delivery invariants in %s\n' "$WORKFLOWS"
 invariant_push_trigger
-invariant_no_plugin_feature
+invariant_keeps_plugin_runtime
 invariant_nightly_no_channels
 invariant_nightly_prerelease
 

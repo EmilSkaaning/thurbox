@@ -12,7 +12,7 @@ context: |
   binary knows only how to launch a CLI with the right `command + args`.
 
   ## Tech stack
-  - Rust (edition 2021, MSRV 1.75), async runtime tokio (multi-threaded)
+  - Rust (edition 2021, MSRV 1.88), async runtime tokio (multi-threaded)
   - ratatui + tui-term + vt100 for rendering; crossterm for terminal I/O
   - SQLite (rusqlite) for persistence at `~/.local/share/thurbox/thurbox.db`
   - tmux (>= 3.2) / psmux (Windows) as the session backend, driven over
@@ -58,8 +58,10 @@ context: |
   - Plugins declare capabilities; the host enforces them.
   - The render loop is demand-driven (paint only when dirty, 250 ms floor).
     Plugins must not defeat it — perf is a spec'd requirement, not a hope.
-  - v2 lands on `main` behind a compile-time Cargo feature gate; v1 keeps
-    releasing on its normal cadence throughout. No long-lived v2 branch.
+  - v2 lands on `main` while v1 keeps releasing on its normal cadence. No
+    long-lived v2 branch. The `plugins` Cargo feature that gated it is in the
+    default set since Stage B (ADR-40), so the host ships in every install;
+    `--no-default-features` is the build without it.
 
   `docs/v2/` on the `thurbox-v2` branch holds an earlier prose design set. It
   is **loose reference only** — v2 is being re-derived spec-first here. Do not

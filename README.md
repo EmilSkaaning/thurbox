@@ -428,7 +428,8 @@ switched live with `Ctrl+Y` (or `F4`) and persisted across restarts.
   [claude](https://github.com/anthropics/claude-code), codex,
   antigravity, opencode, or aider (whichever agents you plan to run)
 - **git** (required for worktree features)
-- **Rust 1.75+** (only to build from source)
+- **Rust 1.88+** and a **C++ toolchain** (only to build from source — the
+  bundled Luau plugin runtime is compiled from vendored C++ sources)
 
 ## Uninstall
 

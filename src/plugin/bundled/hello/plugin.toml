@@ -9,3 +9,8 @@ capabilities = ["render"]
 id = "hello"
 title = "Hello"
 slot = "right"
+# Off by default. The seed defaults to *visible*, which is right for a plugin an
+# author installed on purpose and wrong for one that arrives inside the binary:
+# since the host joined the default feature set (ADR-40) an omitted seed would
+# open a demo pane in every fresh install's right column. `F10` shows it.
+default_visible = false

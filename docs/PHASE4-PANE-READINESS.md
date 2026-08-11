@@ -904,6 +904,14 @@ absent from the build that ships and invisible in the build that is tested
 hardest. It blocks all seven panes identically, which is why ADR-37 states the
 condition once and applies it to every row.
 
+**Resolved by Stage B (ADR-40).** Three rows of that table have since changed:
+`default = ["plugins"]`, the CI job asserts the default dependency tree *contains*
+`mlua`, and release invariant 2 is replaced by its inverse (never build *without*
+the runtime). The condition itself is unchanged and still checked — it is now
+satisfied rather than violated, and `tests/teardown_gate.rs` asserts that, so
+removing the runtime from the default list fails the gate. What blocks this pane's
+handover is therefore only what §14 lists below.
+
 ### The gate permitted exactly this, which is the finding worth carrying
 
 `tests/teardown_gate.rs` derived a pane's readiness from two conditions — the
@@ -923,7 +931,7 @@ rather than from `cfg!(feature = "plugins")` — the `cfg!` answers "was this te
 binary built with the feature", which under `--features plugins` is the answer
 that permits the deletion.
 
-### Three pane-level requirements the release blocker hides
+### Three pane-level requirements the release blocker hid
 
 None is closed here: each is useful only once a plugin pane can reach a user, and
 this phase has twice refused to design from one blocked consumer (§7's

@@ -75,7 +75,7 @@ impl App {
         if !self.features.automations {
             return;
         }
-        if !force && self.metrics.tick_count % 100 != 0 {
+        if !force && !self.metrics.tick_count.is_multiple_of(100) {
             return;
         }
         let now = crate::sync::current_time_millis();

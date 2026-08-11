@@ -95,10 +95,10 @@ one of its blockers is told to revisit it.
 The tasks row is the first on which a **handover** was attempted with keys in the
 way, and PHASE4 §15 is the record: its rendering is now reproduced to the frame
 (the plugin's copy scrolls with the cursor, ADR-38), and eight of its ten keys
-need a power a plugin pane is not given. That is a second blocker beside ADR-37's,
-and a different kind — the build blocker is one release decision, this one is a
-question about what an installed plugin may do to the interface. It is step 8 of
-§4's worklist.
+need a power a plugin pane is not given. That was a second blocker beside
+ADR-37's, and a different kind — the build blocker was one release decision, taken
+since (ADR-40); this one is a question about what an installed plugin may do to the
+interface, and it is now the binding constraint. It is step 8 of §4's worklist.
 
 The code-review row is the first that is **partly** filled: the bundled plugin
 reproduces the unified diff stream's lines and nothing else, and §11 of the same
@@ -119,30 +119,36 @@ looking at. So `tests/teardown_gate.rs`'s pane probe is a conjunction, and
 
 **And a third condition, because the first two together permitted the mistake**
 (ADR-37): the runtime that draws the replacement must reach the build a user
-installs. A bundled pane is Luau, `mlua` is an optional dependency
-(`default = []`), the `plugins` CI job asserts the default dependency tree does not
-carry it, and `release/workflow-invariants` forbids `cd.yml` from enabling it — so
-handing a pane over today removes it from every install while the `--features
-plugins` test run stays green. Without the third conjunct, deleting a pane's
-renderer *and* its call in `src/app/view.rs` satisfied the probe, the row would
-have been recorded ready, and this gate would have stopped protecting the
-renderer. `a_pane_drawn_only_by_a_gated_build_is_not_handed_over` pins it. Because
-the condition is a fact about the build, it blocks all seven rows together: one
-release decision, not seven pane problems.
+installs. A bundled pane is Luau, so a build without the VM draws it as an empty
+column. While `mlua` was optional (`default = []`), the `plugins` CI job asserted
+the default dependency tree did not carry it and `release/workflow-invariants`
+forbade `cd.yml` from enabling it — so handing a pane over would have removed it
+from every install while the `--features plugins` test run stayed green. Without
+the third conjunct, deleting a pane's renderer *and* its call in `src/app/view.rs`
+satisfied the probe, the row would have been recorded ready, and this gate would
+have stopped protecting the renderer. Because the condition is a fact about the
+build, it blocked all seven rows together: one release decision, not seven pane
+problems.
+
+**Stage B has since taken that decision** (ADR-40): `Cargo.toml` reads
+`default = ["plugins"]`, the CI assertion is inverted to require the runtime in
+the default dependency tree, and release invariant 2 is replaced by its inverse.
+So the third condition now **holds**, and it stays checked rather than retired —
+`the_build_condition_holds_and_still_gates_a_handover` asserts both that it holds
+and that each pane row is now blocked only by its own pane-level reason, so a
+later change removing the runtime from `default` fails the gate instead of quietly
+emptying every handed-over pane.
 
 Handing a pane over is therefore its own step, distinct from writing its plugin:
-it means `App::view` drawing the plugin's pane in the native one's place, in a
-build that ships the host. On top of the release decision that needs the plugin
-pane to be reachable from the keyboard (PHASE4 §5, done), to be seatable in the
-native pane's region and answer its action and feature flag (PHASE4 §14), and to
-render on events rather than on a 1 s poll (PHASE4 §7 and §13, and the
-session-list spike's third condition). Only the first is done.
+it means `App::view` drawing the plugin's pane in the native one's place. Which
+needs the plugin pane to be reachable from the keyboard (PHASE4 §5, done), to be
+seatable in the native pane's region and answer its action and feature flag
+(PHASE4 §14), and to render on events rather than on a 1 s poll (PHASE4 §7 and
+§13, and the session-list spike's third condition). Only the first is done.
 
-Stage B has not happened either — `Cargo.toml` reads `default = []`, so no user
-has ever run the plugin host, and Stage B's exit criterion ("at least one plugin
-that thurbox did not write") cannot have been met. That is not merely upstream of
-Phase 6 but upstream of **every pane handover**, which is what the third condition
-above makes checkable. Phase 6 is two milestones downstream of where the tree is.
+Stage B's *exit* criterion ("at least one plugin that thurbox did not write") is a
+separate matter and cannot be met until a release carrying the host has shipped —
+that gates Stage C and `2.0.0`, not the handovers.
 
 ## 4. Worklist, in dependency order
 
@@ -165,10 +171,15 @@ above makes checkable. Phase 6 is two milestones downstream of where the tree is
    and asserting the same rendering. The info panel has landed this way
    (ADR-27, tree equality rather than a frame snapshot). Writing a pane's plugin
    does **not** unblock its unit.
-7. **Stage B and the Cargo default flip.** Listed here rather than after the
-   handovers, which is where it sat until ADR-37: no pane can be handed over
-   before it, because a Luau pane in a build with no Luau VM is a pane the user
-   does not have. Then the remaining flips: runtime default, `2.0.0`.
+7. ~~**Stage B and the Cargo default flip.**~~ **Done** (ADR-40). Listed here
+   rather than after the handovers, which is where it sat until ADR-37: no pane
+   can be handed over before it, because a Luau pane in a build with no Luau VM is
+   a pane the user does not have. `default = ["plugins"]`, MSRV 1.88, the CI
+   assertion inverted, release invariant 2 replaced by its inverse, and the
+   bundled example pane seeded hidden so a fresh launch still looks like v1. Two
+   of the four release targets (`x86_64-pc-windows-msvc`, `aarch64-apple-darwin`)
+   are verified only by the release build itself; ADR-40 records which and why.
+   Remaining flip: `2.0.0`.
 8. **A view-write channel, or the panes with keys stay kernel.** New, and it is
    not a pane's own work: five of the seven panes answer keys that move a cursor,
    take focus, scroll another pane, create a record or start a session, and

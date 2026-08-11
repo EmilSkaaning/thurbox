@@ -27,7 +27,8 @@ app      → session, agent, ui
 
 `agent` and `ui` never import each other. This keeps the side-effect
 layer (PTY management) completely decoupled from the rendering layer.
-`plugin` (the v2 plugin host, behind the `plugins` Cargo feature) is
+`plugin` (the v2 plugin host, in the `plugins` Cargo feature — part of the
+default set since Stage B, ADR-40) is
 deliberately narrower than `agent`: it reads manifests from `session`
 and resolves its directory through `paths`, and reaches nothing else.
 `ui`/`app` would put plugin execution on the render path, while
