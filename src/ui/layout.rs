@@ -65,23 +65,33 @@ const CENTER_MIN_COLS: u16 = 20;
 /// pane without touching this file.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LayoutParams {
-    /// Show the session list (and, with it, the whole left column).
+    /// Show the left column, whose upper seat the session list occupies.
+    ///
+    /// "Show the seat", not "show the kernel's pane": since ADR-46 a plugin pane
+    /// may occupy it instead, and the caller sets this when *either* occupant
+    /// wants it. The geometry is the same either way, which is why seating
+    /// changed no rect.
     pub show_session_list: bool,
-    /// Show the info panel, left of the terminal.
+    /// Show the column left of the terminal, whose seat the info panel occupies.
     pub show_info_panel: bool,
     /// Show the tasks panel in the right column.
     pub show_tasks_panel: bool,
     /// Show the file viewer in the right column.
     pub show_file_viewer: bool,
-    /// How many plugin-contributed panes are visible. Each gets its own region
-    /// in the right column: a plugin may publish several panes, so the layout
-    /// counts them rather than asking whether there is one.
+    /// How many plugin panes the **right column** should seat. Each gets its own
+    /// region there: a plugin may publish several panes, so the layout counts
+    /// them rather than asking whether there is one. A pane in any other slot is
+    /// a single seat this struct already carries a flag for (ADR-46), so it is
+    /// not counted here.
     pub plugin_panes: usize,
     /// Show the full-width global-search strip above the footer.
     pub show_global_search: bool,
-    /// Show the automations pane beneath the session list.
+    /// Show the band beneath the session list, whose seat the automations pane
+    /// occupies.
     pub show_automations_pane: bool,
-    /// How many automations there are; drives the automations pane's height.
+    /// Content rows that band's occupant has; drives its height. The automation
+    /// count for the native pane, or the row count of a plugin pane seated there
+    /// — the height policy is the kernel's either way (ADR-46).
     pub automation_count: usize,
     /// Show the transient full-width status-message band above the footer.
     pub show_status_row: bool,
@@ -226,12 +236,13 @@ fn band_constraints(header: u16, search: u16, status: u16) -> [Constraint; 5] {
     ]
 }
 
-/// The left column: the session list, with the automations pane beneath it when
-/// it is enabled and the column is tall enough for both lists.
+/// The left column: its upper seat, with the lower band beneath it when that band
+/// is enabled and the column is tall enough for both.
 ///
-/// The pane's height grows with `automation_count` between a minimum (so an
-/// empty pane is still discoverable) and a cap; below the minimum the column is
-/// the session list alone rather than two unusably short lists.
+/// The band's height grows with `automation_count` — its occupant's content rows,
+/// whichever pane that is — between a minimum (so an empty band is still
+/// discoverable) and a cap; below the minimum the column is the upper seat alone
+/// rather than two unusably short lists.
 fn left_column(sizing: Sizing, p: LayoutParams, column_rows: u16) -> Node {
     if !p.show_automations_pane {
         return Node::pane(sizing, RegionId::SessionList);
@@ -383,12 +394,12 @@ fn default_preset(area: Rect, p: LayoutParams) -> Node {
 /// `list? | info? | terminal | tasks? | file_viewer?` with info (15%), tasks
 /// (20%), and file_viewer (20%) appearing only when requested. The tasks panel
 /// sits between the terminal and the file viewer (both right-side columns). The
-/// left column is further split into a session list and an automations pane
-/// beneath it (whenever the column is tall enough and `show_automations_pane`
-/// is set — false when the `automations` feature flag is off);
-/// `automation_count` only sizes that pane. When `show_session_list` is false
-/// the whole left column (sessions + automations) is dropped and the terminal
-/// expands — the right-side panels are unaffected.
+/// left column is further split into an upper seat (the session list) and a band
+/// beneath it (the automations pane) whenever the column is tall enough and
+/// `show_automations_pane` is set — false when the `automations` feature flag is
+/// off and nothing else claims that seat; `automation_count` only sizes the band.
+/// When `show_session_list` is false the whole left column (both seats) is dropped
+/// and the terminal expands — the right-side panels are unaffected.
 ///
 /// `show_status_row` carves a transient full-width 1-row band directly above the
 /// footer for the active status/error message (or the sync spinner), so a long

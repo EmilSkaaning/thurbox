@@ -160,16 +160,20 @@ const BLOCKERS: &[Blocker] = &[
     Blocker {
         id: "no-central-seat",
         needs: "the central pane the task editor is drawn into (`n`, `e`/`Enter`)",
-        stands: "`PaneSlot` is a closed set whose only member is the right-hand column, while the \
-                 editor is drawn into the centre and the pane it replaces is a right-column one",
+        stands: "**closed as a seat** (ADR-46). `PaneSlot::Center` names `RegionId::Center` and \
+                 `App::render_central_pane` stands down for a pane that claims it, so a plugin \
+                 may declare its list in one slot and its editor in the centre. What the editor \
+                 still lacks is what to write when it is typed into — no operation authors a \
+                 task's text (`no-record-creation`) — and the kernel's central chrome is not \
+                 drawn over a plugin-owned centre",
         gap: Gap::Structural,
-        blocked: true,
+        blocked: false,
         probe: |root| {
-            variant_names(&block(
-                root,
-                "src/session/plugin_manifest.rs",
-                "pub enum PaneSlot",
-            )) == ["Right"]
+            let seat_exists = method_body(root, "src/session/plugin_manifest.rs", "pub fn seat(")
+                .contains("Some(RegionId::Center)");
+            let native_stands_down = method_body(root, "src/app/view.rs", "fn render_central_pane")
+                .contains("seat_taken(PaneSlot::Center)");
+            !(seat_exists && native_stands_down)
         },
     },
     Blocker {

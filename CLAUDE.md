@@ -1121,6 +1121,26 @@ transferable finding is a measurement: a row of real code costs ~26 nodes so
 **execution** budget first — so the ceiling on a plugin diff pane is instructions,
 not nodes, and `MAX_REVIEW_ROWS` (60) caps the published section accordingly.
 
+A pane declares the **seat** it occupies (`slot`, ADR-46): `right` (the default —
+the right-hand column, which holds any number of panes), `left` (the left column,
+where the session list is), `left-bottom` (the band beneath it, the automations
+pane's), `center-left` (the narrow column left of centre, the info panel's) or
+`center` (the pane the agent terminal, the shell and the code review share).
+`PaneSlot::seat()` is the single mapping from that vocabulary to the `RegionId` the
+workspace tree already places, so a slot adds no geometry: a **visible** pane
+claiming a seat is drawn into exactly the rect the kernel's own pane for it would
+have had, and that native renderer stands down for the frame (hiding the pane hands
+the seat back). A claim also *carves* the seat, so a pane in `center-left` shows
+whether or not the user has the info panel open; with no claim every rect is
+unchanged. Two claimants for one seat resolve by publication order — the first is
+drawn, the second is not drawn at all. The lower-left band is the one seat whose
+height follows its content, and the policy stays the kernel's: it sizes the band
+from `ViewNode::stacked_row_count` (the seated pane's outermost stack), because a
+plugin is never told its rect. The central seat carries **no kernel chrome** — the
+`Agent · Review · Shell` tab strip and the F9 chevron select views that are then not
+on screen. No slot reaches the header, the footer, the global-search strip, the
+status band, or the file-viewer column.
+
 Pane **visibility is kernel
 state**: the manifest seeds it (`default_visible`), `F10`
 (rebindable `TogglePluginPane`) decides it, and the choice is persisted per

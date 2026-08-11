@@ -12,6 +12,7 @@ use ratatui::{
     Frame,
 };
 
+use crate::session::plugin_manifest::PaneSlot;
 use crate::session::{KeyBindings, KeyChord, SessionInfo};
 use crate::ui::selection;
 use crate::ui::theme::Theme;
@@ -22,6 +23,8 @@ use crate::ui::{
     terminal_view, theme_picker_modal, worktree_name_modal,
 };
 
+#[cfg(feature = "plugins")]
+use super::{layout, motion_state};
 use super::{
     App, CentralTab, ClickAction, ClickTarget, InputFocus, ScrollTarget, ScrollbarHit, TerminalView,
 };
@@ -155,7 +158,7 @@ impl App {
         self.render_info_panel(frame, areas.info_panel);
         self.render_tasks_panel(frame, areas.tasks_panel);
         #[cfg(feature = "plugins")]
-        self.render_plugin_panes(frame, &areas.plugin_panes);
+        self.render_plugin_panes(frame, &areas);
         self.render_file_viewer(frame, areas.file_viewer);
         self.render_central_pane(frame, areas.terminal);
         if let Some(search_area) = areas.global_search {
@@ -311,10 +314,16 @@ impl App {
     }
 
     /// Render the flat session list in the left panel (when present).
+    ///
+    /// A plugin pane that claimed this seat draws it instead (ADR-46), and
+    /// `render_plugin_panes` paints into the same rect.
     fn render_left_panel(&mut self, frame: &mut Frame, left_area: Option<Rect>) {
         let Some(left_area) = left_area else {
             return;
         };
+        if self.seat_taken(PaneSlot::Left) {
+            return;
+        }
 
         // Rebuild the cached ordering only when its inputs changed (content
         // signature). The order is status-independent, so most frames — including
@@ -417,10 +426,15 @@ impl App {
     }
 
     /// Render the automations pane beneath the session list (when present).
+    ///
+    /// A plugin pane that claimed this seat draws it instead (ADR-46).
     fn render_automations_pane(&mut self, frame: &mut Frame, auto_area: Option<Rect>) {
         let Some(auto_area) = auto_area else {
             return;
         };
+        if self.seat_taken(PaneSlot::LeftBottom) {
+            return;
+        }
         let now = crate::sync::current_time_millis();
         self.metrics.bump(|p| &mut p.automation_entries_built);
         let search = self.global_search_query();
@@ -486,10 +500,15 @@ impl App {
     }
 
     /// Render the info panel for the active session (when present).
+    ///
+    /// A plugin pane that claimed this seat draws it instead (ADR-46).
     fn render_info_panel(&self, frame: &mut Frame, info_area: Option<Rect>) {
         let Some(info_area) = info_area else {
             return;
         };
+        if self.seat_taken(PaneSlot::CenterLeft) {
+            return;
+        }
         let Some(info) = self.sessions.get(self.active_index).map(|s| &s.info) else {
             return;
         };
@@ -533,81 +552,47 @@ impl App {
 
     /// Draw each visible plugin pane into the region the layout gave it.
     ///
-    /// `regions` is the right column's plugin regions in publication order, and
-    /// it can be **shorter** than the visible-pane list when the terminal has
-    /// room for only some of them — `zip` is what leaves the rest unpainted.
+    /// Two kinds of placement, and one painter for both (ADR-46). A pane whose
+    /// slot names a **seat** is painted into that seat's rect — the same rect the
+    /// kernel's own pane for it would have had, which is why the guards in
+    /// `render_left_panel`, `render_automations_pane`, `render_info_panel` and
+    /// `render_central_pane` step aside. Every other visible pane is a right-column
+    /// occupant, zipped against `areas.plugin_panes` — which can be **shorter**
+    /// than that list when the terminal has room for only some of them, and the
+    /// `zip` is what leaves the rest unpainted.
     ///
     /// Paints from the tree already cached on the pane — this never calls into
     /// a plugin, and could not: the view tree is pure data in `session` with no
     /// reference back to a VM.
     #[cfg(feature = "plugins")]
-    fn render_plugin_panes(&mut self, frame: &mut Frame, regions: &[Rect]) {
-        use crate::ui::{focus_block, FocusLevel};
-
+    fn render_plugin_panes(&mut self, frame: &mut Frame, areas: &layout::PanelAreas) {
         // What each pane painted, collected while `self` is borrowed immutably and
         // recorded afterwards — the click registry needs `&mut self`, and a pane's
         // hitboxes have to come from the paint that produced them.
         let mut painted: Vec<(String, String, Rect, Vec<crate::ui::RowHitbox>)> = Vec::new();
-        let visible = self.plugin_panes.iter().filter(|p| p.visible);
-        for (pane, &area) in visible.zip(regions) {
-            // An error is shown in the title rather than over the content, so a
-            // failing render keeps the last good tree readable underneath it.
-            let title = match pane.error() {
-                Some(_) => format!(" {} (error) ", pane.title),
-                None => format!(" {} ", pane.title),
-            };
-            let block = focus_block(&title, FocusLevel::Inactive);
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
 
-            let palette = crate::ui::theme::current();
-            // Which frame each animated node is showing was resolved on the
-            // tick, from the kernel clock; the paint only reads it.
-            let frames = self
-                .motion
-                .table_for(&pane.plugin, &pane.id)
-                .cloned()
-                .unwrap_or_default();
-            let rows = match pane.tree() {
-                Some(tree) => crate::ui::plugin_pane::render_tree_rows(
-                    tree,
-                    inner,
-                    &palette,
-                    &frames,
-                    frame.buffer_mut(),
-                ),
-                None => {
-                    // Never rendered: say which, rather than showing an empty
-                    // box the user cannot tell from a working-but-quiet plugin.
-                    let msg = match pane.error() {
-                        Some(e) => crate::session::view_tree::ViewNode::styled(
-                            format!("failed: {e}"),
-                            crate::session::view_tree::TextStyle {
-                                token: Some(crate::session::view_tree::StyleToken::Danger),
-                                ..crate::session::view_tree::TextStyle::default()
-                            },
-                        ),
-                        None => crate::session::view_tree::ViewNode::styled(
-                            "loading…",
-                            crate::session::view_tree::TextStyle {
-                                token: Some(crate::session::view_tree::StyleToken::Muted),
-                                ..crate::session::view_tree::TextStyle::default()
-                            },
-                        ),
-                    };
-                    crate::ui::plugin_pane::render_tree(
-                        &msg,
-                        inner,
-                        &palette,
-                        &frames,
-                        frame.buffer_mut(),
-                    );
-                    // A loading or failed pane has no rows to click, but it is
-                    // still a pane: the whole-rect fallback below focuses it.
-                    Vec::new()
-                }
+        // Seats first, in the order the native panes are drawn in. Each holds one
+        // pane, so a second claimant is simply not placed.
+        for (slot, rect) in [
+            (PaneSlot::Left, areas.left_panel),
+            (PaneSlot::LeftBottom, areas.automations_panel),
+            (PaneSlot::CenterLeft, areas.info_panel),
+            (PaneSlot::Center, Some(areas.terminal)),
+        ] {
+            let (Some(pane), Some(rect)) = (self.plugin_seat(slot), rect) else {
+                continue;
             };
-            painted.push((pane.plugin.clone(), pane.id.clone(), area, rows));
+            let rows = Self::paint_plugin_pane(frame, pane, rect, &self.motion);
+            painted.push((pane.plugin.clone(), pane.id.clone(), rect, rows));
+        }
+
+        let column = self
+            .plugin_panes
+            .iter()
+            .filter(|p| p.visible && p.slot == PaneSlot::Right);
+        for (pane, &rect) in column.zip(&areas.plugin_panes) {
+            let rows = Self::paint_plugin_pane(frame, pane, rect, &self.motion);
+            painted.push((pane.plugin.clone(), pane.id.clone(), rect, rows));
         }
 
         // Rows first, then the pane's whole rect — the registry's first match
@@ -632,6 +617,79 @@ impl App {
                     row: None,
                 },
             );
+        }
+    }
+
+    /// Paint one plugin pane into `rect`, returning its clickable rows.
+    ///
+    /// Shared by both placements so a seated pane and a right-column pane cannot
+    /// differ in frame, title, error surfacing or hitboxes — the seat decides
+    /// *where*, never *how*. Associated rather than a method because the caller
+    /// holds a borrow of the pane it is painting.
+    #[cfg(feature = "plugins")]
+    fn paint_plugin_pane(
+        frame: &mut Frame,
+        pane: &crate::plugin::PluginPane,
+        rect: Rect,
+        motion: &motion_state::MotionState,
+    ) -> Vec<crate::ui::RowHitbox> {
+        use crate::ui::{focus_block, FocusLevel};
+
+        // An error is shown in the title rather than over the content, so a
+        // failing render keeps the last good tree readable underneath it.
+        let title = match pane.error() {
+            Some(_) => format!(" {} (error) ", pane.title),
+            None => format!(" {} ", pane.title),
+        };
+        let block = focus_block(&title, FocusLevel::Inactive);
+        let inner = block.inner(rect);
+        frame.render_widget(block, rect);
+
+        let palette = crate::ui::theme::current();
+        // Which frame each animated node is showing was resolved on the tick,
+        // from the kernel clock; the paint only reads it.
+        let frames = motion
+            .table_for(&pane.plugin, &pane.id)
+            .cloned()
+            .unwrap_or_default();
+        match pane.tree() {
+            Some(tree) => crate::ui::plugin_pane::render_tree_rows(
+                tree,
+                inner,
+                &palette,
+                &frames,
+                frame.buffer_mut(),
+            ),
+            None => {
+                // Never rendered: say which, rather than showing an empty box the
+                // user cannot tell from a working-but-quiet plugin.
+                let msg = match pane.error() {
+                    Some(e) => crate::session::view_tree::ViewNode::styled(
+                        format!("failed: {e}"),
+                        crate::session::view_tree::TextStyle {
+                            token: Some(crate::session::view_tree::StyleToken::Danger),
+                            ..crate::session::view_tree::TextStyle::default()
+                        },
+                    ),
+                    None => crate::session::view_tree::ViewNode::styled(
+                        "loading…",
+                        crate::session::view_tree::TextStyle {
+                            token: Some(crate::session::view_tree::StyleToken::Muted),
+                            ..crate::session::view_tree::TextStyle::default()
+                        },
+                    ),
+                };
+                crate::ui::plugin_pane::render_tree(
+                    &msg,
+                    inner,
+                    &palette,
+                    &frames,
+                    frame.buffer_mut(),
+                );
+                // A loading or failed pane has no rows to click, but it is still a
+                // pane: the caller's whole-rect fallback focuses it.
+                Vec::new()
+            }
         }
     }
 
@@ -744,7 +802,14 @@ impl App {
     /// while the list is focused, editable once the editor itself is focused —
     /// with the scoped automation's run history beneath it. Everything else
     /// shows the session terminal.
+    ///
+    /// A plugin pane that claimed the central seat draws it instead (ADR-46) —
+    /// including the tab strip and the collapse chevron this function paints on
+    /// the pane's border, since both select surfaces that are then not on screen.
     fn render_central_pane(&mut self, frame: &mut Frame, terminal: Rect) {
+        if self.seat_taken(PaneSlot::Center) {
+            return;
+        }
         if matches!(
             self.focus,
             InputFocus::Automations

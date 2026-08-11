@@ -17,6 +17,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use super::workspace_tree::RegionId;
+
 /// Plugin API version this build implements.
 ///
 /// A manifest declaring anything else is refused before its VM is created —
@@ -226,12 +228,84 @@ impl fmt::Display for UnknownCapability {
 /// A closed set: a plugin picks a slot, and the kernel decides the geometry —
 /// the same deal the native side panels get. Letting a plugin position itself
 /// would make every pane's layout a negotiation with every other pane's.
+///
+/// The names are **geometric** rather than named after the pane that occupies a
+/// seat today. A slot says *where*, which is all the kernel decides; naming one
+/// `info` would freeze the pane a seat exists for at the moment the point is
+/// that any pane may sit there.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PaneSlot {
     /// The right-hand column, beside the file viewer and tasks panel.
+    ///
+    /// The one slot that is a *column* rather than a seat: it holds any number
+    /// of panes, each in its own region, which is why [`PaneSlot::seat`] gives
+    /// it none.
     #[default]
     Right,
+    /// The left column — the seat the session list occupies.
+    Left,
+    /// The band beneath the left column — the seat the automations pane
+    /// occupies. The one seat whose height is a function of its content.
+    LeftBottom,
+    /// The narrow column between the left column and the centre — the seat the
+    /// info panel occupies.
+    CenterLeft,
+    /// The central pane, which the agent terminal, the shell view and the code
+    /// review share.
+    Center,
+}
+
+impl PaneSlot {
+    /// The wire name used in a manifest.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PaneSlot::Right => "right",
+            PaneSlot::Left => "left",
+            PaneSlot::LeftBottom => "left-bottom",
+            PaneSlot::CenterLeft => "center-left",
+            PaneSlot::Center => "center",
+        }
+    }
+
+    /// Every slot the host recognizes, for error messages and exhaustive tests.
+    pub fn all() -> &'static [PaneSlot] {
+        &[
+            PaneSlot::Right,
+            PaneSlot::Left,
+            PaneSlot::LeftBottom,
+            PaneSlot::CenterLeft,
+            PaneSlot::Center,
+        ]
+    }
+
+    /// The layout region a pane in this slot is drawn into, for the slots that
+    /// are a single **seat**.
+    ///
+    /// The single mapping from the plugin-facing vocabulary to the kernel's own
+    /// region names, so no two consumers can disagree about where a slot is —
+    /// and so a reader (or a gate probe) can answer "which seats does a plugin
+    /// have" from one table. Only pane seats appear: the header, the footer, the
+    /// full-width search strip and the transient status band are kernel chrome
+    /// and no slot reaches them.
+    ///
+    /// [`PaneSlot::Right`] has none because it is a column of
+    /// [`RegionId::Plugin`] regions rather than one seat.
+    pub fn seat(self) -> Option<RegionId> {
+        match self {
+            PaneSlot::Right => None,
+            PaneSlot::Left => Some(RegionId::SessionList),
+            PaneSlot::LeftBottom => Some(RegionId::Automations),
+            PaneSlot::CenterLeft => Some(RegionId::Info),
+            PaneSlot::Center => Some(RegionId::Center),
+        }
+    }
+}
+
+impl fmt::Display for PaneSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// A pane a plugin contributes.
@@ -1404,16 +1478,73 @@ mod tests {
 
     #[test]
     fn a_pane_may_name_its_slot() {
-        let text = r#"
-            name = "demo"
-            api_version = 1
-            capabilities = ["render"]
-            [[panes]]
-            id = "board"
-            slot = "right"
-        "#;
-        let m = parse(text).expect("valid");
-        assert_eq!(m.panes[0].slot, PaneSlot::Right);
+        for slot in PaneSlot::all() {
+            let text = format!(
+                "name = \"demo\"\napi_version = 1\ncapabilities = [\"render\"]\n\
+                 [[panes]]\nid = \"board\"\nslot = \"{slot}\"\n"
+            );
+            let m = parse(&text).unwrap_or_else(|e| panic!("`{slot}` must parse: {e}"));
+            assert_eq!(m.panes[0].slot, *slot);
+        }
+    }
+
+    /// Each seat is one region, and they are distinct: two slots resolving to the
+    /// same region would put two panes in one rect with nothing to arbitrate.
+    #[test]
+    fn every_slot_but_the_right_column_names_one_distinct_seat() {
+        let mut seats = Vec::new();
+        for slot in PaneSlot::all() {
+            match slot.seat() {
+                Some(region) => seats.push(region),
+                None => assert_eq!(
+                    *slot,
+                    PaneSlot::Right,
+                    "only the right-hand column is a column rather than a seat"
+                ),
+            }
+        }
+        let mut unique = seats.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            seats.len(),
+            unique.len(),
+            "two slots share a seat: {seats:?}"
+        );
+        assert_eq!(seats.len(), PaneSlot::all().len() - 1);
+    }
+
+    /// The vocabulary reaches pane seats only. A slot naming the header, the
+    /// footer, the search strip or the status band would make kernel chrome
+    /// addressable from a manifest, which is a far wider surface than the seats
+    /// a handover needs.
+    #[test]
+    fn no_slot_names_kernel_chrome() {
+        for slot in PaneSlot::all() {
+            let Some(region) = slot.seat() else { continue };
+            assert!(
+                !matches!(
+                    region,
+                    RegionId::Header
+                        | RegionId::Footer
+                        | RegionId::GlobalSearch
+                        | RegionId::StatusMessage
+                ),
+                "`{slot}` reaches kernel chrome ({region:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn slot_names_round_trip() {
+        for slot in PaneSlot::all() {
+            let text = format!(
+                "name = \"demo\"\napi_version = 1\ncapabilities = [\"render\"]\n\
+                 [[panes]]\nid = \"board\"\nslot = \"{}\"\n",
+                slot.as_str()
+            );
+            assert_eq!(parse(&text).expect("valid").panes[0].slot, *slot);
+        }
     }
 
     #[test]

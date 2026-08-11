@@ -22,11 +22,12 @@
 //!   the key at its edge and nothing completes it
 //!   ([`the_wrap_out_of_the_pane_stays_kernel_owned`]).
 //!
-//! Two divergences are enumerated rather than absorbed by weakening a claim: the
-//! pane's **placement** (`PaneSlot` names only the right column, so the
-//! reproduction cannot sit where the native pane sits — the equality is about the
-//! pane's *content*) and the **fitted name** (the kernel fits a name to a width the
-//! plugin is never told).
+//! One divergence is enumerated rather than absorbed by weakening a claim: the
+//! **fitted name** (the kernel fits a name to a width the plugin is never told).
+//! The pane's **placement** used to be a second one — `PaneSlot` named only the
+//! right column — and ADR-46 retired it: the reproduction now declares the seat its
+//! native counterpart occupies, so showing it compares the two panes in one rect
+//! ([`the_pane_is_placed_where_the_native_one_sits`]).
 //!
 //! It lives in `tests/` for its predecessors' reason: this is the one place that
 //! must see both `ui::automations_panel` and `plugin::PluginHost`, and an
@@ -730,7 +731,7 @@ fn the_plugin_paints_the_native_frame_when_the_pane_scrolls() {
     );
 }
 
-/// **Enumerated divergence 1: a name wider than the column.** The kernel fits it
+/// **The remaining divergence: a name wider than the column.** The kernel fits it
 /// with an ellipsis, reserving the marker's and the whole summary's room, using a
 /// width the plugin is never told. The plugin draws the whole name and the renderer
 /// clips it at the pane edge — so a long name loses its ellipsis *and* its summary
@@ -789,21 +790,34 @@ fn a_name_wider_than_the_column_is_fitted_by_the_kernel_only() {
     assert!(text_of(&plugin).contains("an automation name far wider than the column"));
 }
 
-/// **Enumerated divergence 2: the pane's placement.** `PaneSlot` names one slot,
-/// the right-hand column, and the native pane sits in the left one beneath the
-/// session list. So the reproduction is placeable *as a pane* and not placeable
-/// *where this pane is*, and the equality claims above are about the pane's
-/// content.
+/// **The retired divergence: the pane's placement.** The reproduction used to be
+/// placeable *as a pane* and not placeable *where this pane is* — `PaneSlot` named
+/// only the right-hand column, while the native pane is the band beneath the
+/// session list. ADR-46 gave that band a slot, and this pane declares it.
 ///
-/// Pinned rather than described: a manifest asking for the native pane's column is
-/// refused today, and when someone adds the slot this fails and points at the
-/// finding — a left plugin region needs a second slot, a region inside
-/// `left_column`, a `RegionId::Plugin(i)` index space that spans columns, and a
-/// height policy for a pane whose row count the kernel does not know.
+/// Kept rather than deleted, pointing the other way: it now pins that the shipped
+/// manifest names the seat its native counterpart occupies, so the two panes are
+/// compared in the same rect. A regression to the right column would make every
+/// equality claim above one about content alone again.
 #[test]
-fn the_pane_cannot_be_placed_where_the_native_one_sits() {
-    use thurbox::session::plugin_manifest::PluginManifest;
+fn the_pane_is_placed_where_the_native_one_sits() {
+    use thurbox::session::plugin_manifest::{PaneSlot, PluginManifest};
 
+    let outcome = discovery::discover_in(&[plugin_dir()], None);
+    let plugin = outcome.get("automations").expect("discovered");
+    assert_eq!(
+        plugin.manifest.panes[0].slot,
+        PaneSlot::LeftBottom,
+        "the pane should name the seat the native automations pane occupies"
+    );
+    // And that seat is the native pane's region rather than a lookalike: the slot
+    // resolves to the region `ui::layout` places beneath the session list.
+    assert_eq!(
+        PaneSlot::LeftBottom.seat(),
+        Some(thurbox::session::workspace_tree::RegionId::Automations)
+    );
+    // The vocabulary is still closed, so a typo in that seat's name is an error
+    // rather than a silent default into the right column.
     let manifest = |slot: &str| {
         format!(
             "name = \"copy\"\napi_version = 1\ncapabilities = [\"render\"]\n\
@@ -811,22 +825,14 @@ fn the_pane_cannot_be_placed_where_the_native_one_sits() {
         )
     };
     assert!(
-        PluginManifest::from_toml(Path::new("/p/copy/plugin.toml"), &manifest("right")).is_ok(),
-        "the slot that exists must parse, or this test proves nothing"
+        PluginManifest::from_toml(Path::new("/p/copy/plugin.toml"), &manifest("left-bottom"))
+            .is_ok(),
+        "the seat this pane names must parse, or this test proves nothing"
     );
     assert!(
-        PluginManifest::from_toml(Path::new("/p/copy/plugin.toml"), &manifest("left")).is_err(),
-        "a `left` slot is still refused — if it was added, the automations pane's \
-         reproduction should move into the column its native counterpart occupies, \
-         and this divergence should be retired with the layout work"
-    );
-    // And the shipped pane names the only slot there is, rather than defaulting
-    // into it silently.
-    let outcome = discovery::discover_in(&[plugin_dir()], None);
-    let plugin = outcome.get("automations").expect("discovered");
-    assert_eq!(
-        plugin.manifest.panes[0].slot,
-        thurbox::session::plugin_manifest::PaneSlot::Right
+        PluginManifest::from_toml(Path::new("/p/copy/plugin.toml"), &manifest("bottom-left"))
+            .is_err(),
+        "an unrecognized slot must be refused rather than defaulted"
     );
 }
 

@@ -33,6 +33,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::agent::{BackendRegistry, GenericProvider, Session, SessionBackend};
 use crate::git;
+use crate::session::plugin_manifest::PaneSlot;
 use crate::session::{
     AgentDef, AgentRegistry, SessionConfig, SessionId, SessionInfo, SessionStatus, WorktreeInfo,
     DEFAULT_AGENT_NAME,
@@ -8262,15 +8263,82 @@ impl App {
     /// the layout is then byte-identical to a build without the plugin host. It
     /// is a count rather than a flag because a plugin may publish several panes
     /// and the workspace tree seats each one.
+    ///
+    /// Counts only panes in the right-hand column: every other slot is a single
+    /// **seat** whose region the tree already places, so a pane there is not one
+    /// of this column's occupants (ADR-46).
     #[cfg(feature = "plugins")]
     pub(crate) fn visible_plugin_panes(&self) -> usize {
-        self.plugin_panes.iter().filter(|p| p.visible).count()
+        self.plugin_panes
+            .iter()
+            .filter(|p| p.visible && p.slot == PaneSlot::Right)
+            .count()
     }
 
     /// Without the plugin feature there is never a pane to place.
     #[cfg(not(feature = "plugins"))]
     pub(crate) fn visible_plugin_panes(&self) -> usize {
         0
+    }
+
+    /// The plugin pane occupying `slot`, if one does.
+    ///
+    /// Precedence is the plugin's: a visible pane **takes** the seat and the
+    /// kernel's own pane for it is not drawn that frame (see
+    /// [`Self::seat_taken`]). The kernel keeps its own pane's visibility state,
+    /// so hiding the plugin pane hands the seat straight back — which is what
+    /// makes a handover reversible while both panes exist.
+    ///
+    /// With two claimants the **first in publication order** wins and the other
+    /// is not placed at all, mirroring how the right column drops occupants it
+    /// cannot fit: a second claimant is a silent no-show rather than an overdraw.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn plugin_seat(&self, slot: PaneSlot) -> Option<&crate::plugin::PluginPane> {
+        self.plugin_panes
+            .iter()
+            .find(|p| p.visible && p.slot == slot)
+    }
+
+    /// Whether a plugin pane has taken `slot`, so the kernel's own pane for that
+    /// seat must not be drawn.
+    ///
+    /// Answered here rather than at each call site so the view's four guards read
+    /// the same way and need no `cfg` of their own.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn seat_taken(&self, slot: PaneSlot) -> bool {
+        self.plugin_seat(slot).is_some()
+    }
+
+    /// Without the plugin feature no seat is ever taken, so every native pane
+    /// draws exactly as it did before seats existed.
+    #[cfg(not(feature = "plugins"))]
+    pub(crate) fn seat_taken(&self, _slot: PaneSlot) -> bool {
+        false
+    }
+
+    /// Content rows the left column's lower band should be sized for.
+    ///
+    /// The band's height is the one place in thurbox where a pane's geometry
+    /// follows from its own content, and a plugin is never told its rect — so the
+    /// kernel keeps the policy and reads the count off the seated pane's tree
+    /// (ADR-46). A pane that has not rendered yet counts as one row, which is
+    /// what its "loading…" line occupies.
+    #[cfg(feature = "plugins")]
+    fn lower_left_rows(&self) -> usize {
+        match self.plugin_seat(PaneSlot::LeftBottom) {
+            Some(pane) => pane
+                .tree()
+                .map(crate::session::view_tree::ViewNode::stacked_row_count)
+                .unwrap_or(1),
+            None => self.automation_ui.cached_automations.len(),
+        }
+    }
+
+    /// Without the plugin feature the band's occupant is always the automations
+    /// pane.
+    #[cfg(not(feature = "plugins"))]
+    fn lower_left_rows(&self) -> usize {
+        self.automation_ui.cached_automations.len()
     }
 
     /// Replace the plugin panes, reporting whether what the user sees changed.
@@ -8348,20 +8416,25 @@ impl App {
     /// Compute the panel layout for `area` from the current panel visibility
     /// and feature flags — the single funnel into `layout::compute_layout`,
     /// so the view, mouse routing, and content sizing can never disagree.
+    ///
+    /// A seat is carved when **either** occupant wants it: the kernel's own pane,
+    /// or a plugin pane that claimed the seat (ADR-46). Without a claim every
+    /// expression below is what it was, which is why seating changed no geometry.
     pub(crate) fn layout_for(&self, area: Rect) -> layout::PanelAreas {
         layout::compute_layout(
             area,
             layout::LayoutParams {
-                show_session_list: self.show_session_list,
-                show_info_panel: self.show_info_panel,
+                show_session_list: self.show_session_list || self.seat_taken(PaneSlot::Left),
+                show_info_panel: self.show_info_panel || self.seat_taken(PaneSlot::CenterLeft),
                 show_tasks_panel: self.show_tasks_panel,
                 // The review's changed-files list lives in the file-viewer
                 // column, so force that column present while a review is open.
                 show_file_viewer: self.show_file_viewer || self.active_review().is_some(),
                 plugin_panes: self.visible_plugin_panes(),
                 show_global_search: self.global_search.active,
-                show_automations_pane: self.features.automations,
-                automation_count: self.automation_ui.cached_automations.len(),
+                show_automations_pane: self.features.automations
+                    || self.seat_taken(PaneSlot::LeftBottom),
+                automation_count: self.lower_left_rows(),
                 // Carve the transient status row whenever there's a message to
                 // show (a status/error toast, the live sync spinner, or a spawn
                 // in flight) — must match what `render_status_message_row`

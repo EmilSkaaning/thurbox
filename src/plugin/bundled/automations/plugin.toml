@@ -15,9 +15,8 @@
 # Five of the pane's seven keys ship: `j`/`k` (and the arrows) move the cursor,
 # `Space` toggles enabled, `r` runs now, `d` deletes. The two that do not are
 # `n` (creating an automation — the write seam has no creation binding, by
-# construction) and `Enter`/`e` (the central-pane editor — a seat `PaneSlot` does
-# not offer, a focus a plugin cannot take, and text authoring
-# `automations-write` is defined to exclude).
+# construction) and `Enter`/`e` (the central-pane editor — text authoring
+# `automations-write` is defined to exclude, into a focus a plugin cannot take).
 #
 # `r` is a **request**, and the property matters here because an automation the
 # *user* authored may run a shell command: the binding marks it due and the
@@ -30,10 +29,12 @@
 # focused, and it changes the three things `automations-write` defines. It reads
 # no session, runs no command, and touches no file.
 #
-# A *reproduction*, not a replacement — the native pane is still what the left
-# column shows, and `tests/bundled_automations_panel.rs` asserts this plugin
-# builds the identical view tree, paints the identical frame when the pane
-# scrolls, and reaches the same database rows its keys do.
+# A *reproduction*, not a replacement — the pane seeds hidden, so the native pane
+# is what the left column shows until a user asks for this one, and the kernel
+# keeps every key and every surface the native pane has (its editor, its run
+# history, its wrap into the session list). `tests/bundled_automations_panel.rs`
+# asserts this plugin builds the identical view tree, paints the identical frame
+# when the pane scrolls, and reaches the same database rows its keys do.
 name = "automations"
 api_version = 1
 
@@ -42,15 +43,14 @@ capabilities = ["render", "automations", "input", "automations-write"]
 [[panes]]
 id = "automations"
 title = "Automations (plugin)"
-# The native pane sits in the **left** column, beneath the session list, and
-# `PaneSlot` names only `right`. So the reproduction is placeable as a pane and
-# not placeable where this pane is: the equality claim is about its *content*.
-# `the_pane_cannot_be_placed_where_the_native_one_sits` pins the refusal so
-# adding the slot forces the finding to be revisited.
-slot = "right"
-# Off by default. The native pane is still what the left column draws, so shipping
-# this visible would put two automations lists on screen for every user. Turn it
-# on to compare them — and, since this one has keys, to drive it.
+# The seat the native pane occupies: the band beneath the session list, whose
+# height the kernel grows with the row count this pane's tree stacks (ADR-46).
+# Showing this pane therefore compares the two in the *same* rect rather than in
+# two different ones.
+slot = "left-bottom"
+# Off by default. The native pane is still what the band draws until this one is
+# shown, and a bundled pane must not arrive on screen unasked. Turn it on to
+# compare them — and, since this one has keys, to drive it.
 default_visible = false
 
 # One binding per ported key. A `[[keybindings]]` entry carries **one** chord

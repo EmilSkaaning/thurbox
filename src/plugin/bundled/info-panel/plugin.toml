@@ -20,8 +20,11 @@ capabilities = ["render", "sessions", "metrics", "automations"]
 [[panes]]
 id = "info"
 title = "Info (plugin)"
-slot = "right"
-# Off by default. The native info panel is still on screen, so shipping this
-# visible would put two of the same pane side by side on every install. Turn it
-# on to compare them.
+# The seat the native info panel occupies: the narrow column left of centre
+# (ADR-46). Showing this pane draws it there and stands the native one down, so
+# the two are compared in one rect rather than side by side.
+slot = "center-left"
+# Off by default: a bundled pane must not arrive on screen unasked, and until it
+# is shown the native info panel is what that column draws. Turn it on to compare
+# them.
 default_visible = false

@@ -26,8 +26,11 @@ capabilities = ["render", "sessions"]
 [[panes]]
 id = "sessions"
 title = "Sessions (plugin)"
-slot = "right"
-# Off by default. The native session list is still what the left column shows, so
-# shipping this visible would put two session lists on screen for every user. Turn
-# it on to compare them.
+# The seat the native session list occupies: the left column (ADR-46). Showing
+# this pane draws it there and stands the native list down — its keys, though, are
+# still the kernel's, so navigation keeps working through the native keyboard.
+slot = "left"
+# Off by default: a bundled pane must not arrive on screen unasked, and until it
+# is shown the native session list is what the left column draws. Turn it on to
+# compare them.
 default_visible = false

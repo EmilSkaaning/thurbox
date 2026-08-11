@@ -163,19 +163,20 @@ const BLOCKERS: &[Blocker] = &[
         id: "no-left-seat",
         needs: "the pane's seat: the session list **is** the left column, above the automations \
                 pane",
-        stands: "`PaneSlot` is a closed set whose only member is the right-hand column, so the \
-                 reproduction is placeable as a pane and not placeable where this pane is. \
-                 `docs/PHASE4-PANE-READINESS.md` §17 tabulates the four things a `left` slot \
-                 needs, of which the load-bearing one is a height policy: the left column is the \
-                 one place in thurbox where a pane's geometry is derived from its own content",
+        stands: "**closed** (ADR-46). `PaneSlot::Left` names `RegionId::SessionList`, a visible \
+                 pane claiming it is drawn into that rect, and `App::render_left_panel` stands \
+                 down for it — so the reproduction is now placeable *where this pane is*, and it \
+                 ships in that seat. It closes the seat only: the pane drawn there is still \
+                 focused as a plugin pane, which is what \
+                 `scoped-keys-silenced-by-the-handover` is about",
         gap: Gap::Structural,
-        blocked: true,
+        blocked: false,
         probe: |root| {
-            variant_names(&block(
-                root,
-                "src/session/plugin_manifest.rs",
-                "pub enum PaneSlot",
-            )) == ["Right"]
+            let seat_exists = method_body(root, "src/session/plugin_manifest.rs", "pub fn seat(")
+                .contains("Some(RegionId::SessionList)");
+            let native_stands_down = method_body(root, "src/app/view.rs", "fn render_left_panel")
+                .contains("seat_taken(PaneSlot::Left)");
+            !(seat_exists && native_stands_down)
         },
     },
     Blocker {

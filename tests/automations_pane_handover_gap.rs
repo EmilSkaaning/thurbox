@@ -37,8 +37,10 @@
 //!   same database rows its five keys do;
 //! - it is **not** the session list's gate. That pane's wall is its **keys** — its
 //!   cursor is the active session. This pane's keys are five-sevenths ported and
-//!   its wall is its **seat**, in both columns it needs: the left column it is
-//!   drawn in, and the central pane it drives.
+//!   its wall is its **seat** — of the two columns it needs, the left column it is
+//!   drawn in is now a slot a manifest can name (ADR-46), and the central pane it
+//!   drives is still opened by the *native* pane's focus rather than by any pane's
+//!   identity.
 //!
 //! Its probes read the source the way a human auditor would, so the gate runs, and
 //! means the same thing, with or without the `plugins` Cargo feature. The helpers
@@ -124,30 +126,34 @@ const BLOCKERS: &[Blocker] = &[
         needs:
             "the pane's seat: the native pane is the **bottom** of the left column, beneath the \
                 session list, and its height grows with the automation count",
-        stands: "`PaneSlot` is a closed set whose only member is the right-hand column, so the \
-                 reproduction is placeable as a pane and not placeable where this pane is. \
-                 `docs/PHASE4-PANE-READINESS.md` §17 tabulates the four things a `left` slot \
-                 needs, of which the load-bearing one is a height policy: `ui::layout`'s \
-                 `left_column` sizes this pane as `(count + 2).clamp(3, 10)`, so the left column \
-                 is the one place in thurbox where a pane's geometry is derived from its own \
-                 content — and a plugin is never told its size",
+        stands: "**closed** (ADR-46). `PaneSlot::LeftBottom` names `RegionId::Automations` — the \
+                 region the native pane occupies — and a visible pane claiming it is drawn into \
+                 that rect while `App::render_automations_pane` stands down. The load-bearing \
+                 half was the height, since the left column is the one place in thurbox where a \
+                 pane's geometry follows from its own content: the kernel keeps its \
+                 `(count + 2).clamp(3, 10)` policy and reads the count off the seated pane's \
+                 tree (`ViewNode::stacked_row_count`), so a plugin still learns nothing about \
+                 its size. The reproduction ships in this seat",
         gap: Gap::Structural,
-        blocked: true,
+        blocked: false,
         probe: |root| {
-            let only_right = variant_names(&block(
-                root,
-                "src/session/plugin_manifest.rs",
-                "pub enum PaneSlot",
-            )) == ["Right"];
-            // The other half: the seat the slot would have to name is a region the
-            // kernel derives from the automation count. `block` rather than
-            // `method_body` because `left_column` is a free function, so rustfmt
-            // closes it in column zero.
+            let seats = method_body(root, "src/session/plugin_manifest.rs", "pub fn seat(");
+            let seat_exists = seats.contains("Some(RegionId::Automations)");
+            // The seat is only real if the kernel steps aside for it.
+            let native_stands_down =
+                method_body(root, "src/app/view.rs", "fn render_automations_pane")
+                    .contains("seat_taken(PaneSlot::LeftBottom)");
+            // And the height half: the kernel's own policy still sizes the band,
+            // with the count coming off the seated pane's tree rather than out of
+            // the automation list. `block` rather than `method_body` because
+            // `left_column` is a free function, so rustfmt closes it in column zero.
             let column = block(root, "src/ui/layout.rs", "fn left_column(");
-            let height_is_content_derived = column.contains("p.automation_count")
+            let policy_kept = column.contains("AUTOMATIONS_PANE_MIN_ROWS")
                 && column.contains("RegionId::Automations")
                 && column.contains("RegionId::SessionList");
-            only_right && height_is_content_derived
+            let count_from_the_pane = method_body(root, "src/app/mod.rs", "fn lower_left_rows(")
+                .contains("stacked_row_count");
+            !(seat_exists && native_stands_down && policy_kept && count_from_the_pane)
         },
     },
     Blocker {
@@ -260,15 +266,16 @@ const BLOCKERS: &[Blocker] = &[
         id: "focused-pane-draws-an-unfocused-border",
         needs: "the pane's focused border — the native pane switches to the accent frame while it \
                 holds focus, which is how a user sees where the keyboard is",
-        stands: "`App::render_plugin_panes` builds every pane's block at `FocusLevel::Inactive`, \
-                 unconditionally. Unlike the row above this is not a fact the host lacks — it \
-                 knows `self.focus == InputFocus::PluginPane` — it simply does not use it, so a \
+        stands: "`App::paint_plugin_pane` — the one painter both placements share since ADR-46 — \
+                 builds every pane's block at `FocusLevel::Inactive`, unconditionally. Unlike the \
+                 row above this is not a fact the host lacks — it knows \
+                 `self.focus == InputFocus::PluginPane` — it simply does not pass it, so a \
                  handed-over pane would take keys while looking unfocused",
         gap: Gap::Wiring,
         blocked: true,
         probe: |root| {
-            let render = method_body(root, "src/app/view.rs", "fn render_plugin_panes");
-            render.contains("FocusLevel::Inactive") && !render.contains("InputFocus::PluginPane")
+            let paint = method_body(root, "src/app/view.rs", "fn paint_plugin_pane");
+            paint.contains("FocusLevel::Inactive") && !paint.contains("InputFocus::PluginPane")
         },
     },
     Blocker {
@@ -503,10 +510,17 @@ fn the_verdict_is_derived_from_the_blockers() {
     assert!(!outstanding(BLOCKERS, Gap::Wiring).is_empty());
     assert!(!outstanding(BLOCKERS, Gap::Vocabulary).is_empty());
     let structural = outstanding(BLOCKERS, Gap::Structural);
+    // The pane's own seat closed with ADR-46; what still decides the verdict is
+    // the **central** seat, which the native pane's focus — not the pane's
+    // identity — is what opens.
     assert!(
-        structural.contains(&"central-seat-follows-the-native-focus")
-            && structural.contains(&"no-left-seat"),
-        "the two seats are what decide this verdict, and both are structural: {structural:?}"
+        structural.contains(&"central-seat-follows-the-native-focus"),
+        "the central seat is what decides this verdict, and it is structural: {structural:?}"
+    );
+    assert!(
+        !structural.contains(&"no-left-seat"),
+        "the pane's own seat is closed (ADR-46) — a table that records it outstanding again means \
+         the seating regressed: {structural:?}"
     );
 
     // The other direction: a table where every row landed permits the handover.

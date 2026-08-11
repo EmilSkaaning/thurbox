@@ -2578,3 +2578,98 @@ change adding a central slot, a review write, a cursor write, a review key conte
 wider click event fails the gate and is told which row moved and what to revisit. The
 teardown inventory is unchanged: `src/ui/code_review.rs` was already protected, for the
 same reason as before.
+
+## ADR-46: A plugin pane's slot names a kernel region, and the plugin wins the seat
+
+**Context.** `PaneSlot` had exactly one member, `Right`. So a plugin pane was
+placeable *as a pane* and not placeable *where any of thurbox's own panes are*: the
+session list **is** the left column, the automations pane is the band beneath it,
+the info panel is its own `Percent(15)` column left of centre, and the code review
+owns the central pane. Six rows across five handover gates recorded that one fact
+(`no-left-seat` twice, `no-central-seat` twice, plus the review's second seat and
+global search's band), and `docs/PHASE4-PANE-READINESS.md` §14 lists "the same
+seat" first among the five requirements a handover has. It is the one requirement
+shared by five of the six remaining handovers, so closing it per pane would be
+closing it five times.
+
+Nothing in the geometry needed inventing. The workspace tree (ADR-24) already
+places `RegionId::SessionList`, `Automations`, `Info` and `Center`; what was
+missing was a way for a **manifest** to name one of them, and a rule for what
+happens when a plugin pane and the kernel's own pane both want it.
+
+**Decision.** Four seats, one table, and the plugin wins.
+
+1. **`PaneSlot` grows to five members** — `right` (unchanged default), `left`,
+   `left-bottom`, `center-left`, `center` — named **geometrically**. A slot says
+   *where*; naming one `info` would freeze the pane a seat exists for at the exact
+   moment the point is that any pane may sit there.
+2. **`PaneSlot::seat() -> Option<RegionId>`** is the single mapping from the
+   plugin-facing vocabulary to the kernel's region names, with `Right` mapping to
+   `None` because it is a *column* of `RegionId::Plugin(i)` regions rather than one
+   seat. One table means no two consumers can disagree about where a slot is — and
+   it is what the gates now probe, so "no slot reaches `RegionId::GlobalSearch`" is
+   a statement about *this* region rather than about how many slots exist.
+3. **A visible plugin pane takes its seat and the kernel's pane for it is not
+   drawn.** The kernel keeps its own pane's visibility state, so hiding the plugin
+   pane hands the seat straight back. Two claimants are decided rather than
+   undefined: the first in publication order is drawn and the second is not drawn
+   at all, the rule the right column already applies when it runs out of columns.
+4. **A claim carves the seat.** `App::layout_for` ORs each claim into the flag that
+   carves that seat, so a pane in `center-left` appears whether or not the user has
+   the info panel open. With no claim every expression is what it was, which is why
+   `compute_layout` gained no branch, no geometry test moved and no snapshot
+   changed.
+5. **The one content-derived height stays the kernel's.** The lower-left band is
+   sized `(rows + 2).clamp(3, 10)`, and a plugin is never told its rect (ADR-26,
+   ADR-29, ADR-30, ADR-31) — so the kernel keeps the policy and counts the rows
+   itself, from `ViewNode::stacked_row_count` (the outermost stack's child count).
+6. **The centre carries no kernel chrome.** A `center` pane is drawn with the frame
+   every plugin pane gets; the tab strip and the F9 collapse chevron are not drawn
+   over it, because both select surfaces that are then not on screen.
+
+The three bundled reproductions whose native seat is not the right column now
+declare it (`session-list` → `left`, `automations` → `left-bottom`, `info-panel` →
+`center-left`). All three still seed hidden, so no install's screen changes;
+showing one compares the two panes in the **same** rect, which is what
+`tests/bundled_automations_panel.rs`'s placement divergence asked for and why that
+divergence is retired.
+
+**Rejected alternatives.**
+
+- *The native pane wins while it exists.* The conservative reading, and it makes
+  the whole change unexercisable: no seat could be occupied until the renderer it
+  replaces had already been deleted, so the first handover would also be the first
+  test of the seating — the big-bang shape every gate in this phase exists to
+  prevent.
+- *Let a manifest name a `RegionId` directly.* It would expose the header, the
+  footer, the search strip and the status band as addressable, a far wider surface
+  than four seats, and would tie the plugin-facing vocabulary to the kernel's
+  region names forever.
+- *Name the slots after the panes that occupy them today* (`info`, `session-list`).
+  See above: after a handover "the info slot" names the plugin's own pane.
+- *Add slots for the tasks panel and the file viewer.* Both are right-column
+  occupants and `right` already seats a plugin pane in that column. The review's
+  changed-files list wants `RegionId::FileViewer` *specifically* — the column an
+  open review forces present — and that row stays blocked rather than being
+  approximated.
+- *A band slot for global search.* The strip is a mode, not a pane (ADR-31's
+  neighbour finding, §10 of the readiness doc), and `tests/global_search_pane_gap.rs`
+  keeps its verdict.
+- *Let the manifest declare the lower band's height, or measure the pane's rendered
+  height.* The first is geometry by another name and cannot track a list that
+  grows; the second needs a width, and the width is downstream of the height it
+  would feed.
+- *Suppress the kernel action that toggles the native pane.* Then the seat would be
+  empty and unreachable whenever the plugin pane was hidden or not placed. Binding
+  a pane to a kernel action is a separate declaration (§14's second row) and a
+  separate change.
+
+**Consequences.** Five of the six remaining handovers no longer need a seat; what
+they still need is input (a focus, and the scoped keyboards it silences) and, for
+three of them, a module that is also the kernel's model. `no-left-seat` closes in
+both left-column gates and `no-central-seat` in both central ones, each re-verdicted
+with a probe that reads the seat table and the guard together — a slot with no guard
+would be a seat a plugin could name and not be drawn in. The centre's missing chrome
+and the untouched focus story are recorded as gaps, not absorbed: a `center` pane
+today loses the tab strip, and a seated pane is still focused as
+`InputFocus::PluginPane`.

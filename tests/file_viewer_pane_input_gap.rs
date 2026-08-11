@@ -645,11 +645,14 @@ fn a_plugin_panes_scroll_track_is_not_draggable() {
         "no scroll target names a plugin pane: a drag would have to move a cursor the plugin does \
          not own"
     );
-    assert!(
-        !method_body(&root, "src/app/view.rs", "fn render_plugin_panes")
-            .contains("record_scrollbar"),
-        "a plugin pane is expected to record no scrollbar drag target"
-    );
+    // Both halves of the plugin-pane paint: the loop that places each pane, and
+    // the painter both placements share since ADR-46.
+    for f in ["fn render_plugin_panes", "fn paint_plugin_pane"] {
+        assert!(
+            !method_body(&root, "src/app/view.rs", f).contains("record_scrollbar"),
+            "a plugin pane is expected to record no scrollbar drag target, and `{f}` does"
+        );
+    }
 }
 
 /// The verdict and the shipped plugin must not disagree: a pane that declared keys

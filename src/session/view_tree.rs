@@ -471,6 +471,26 @@ impl ViewNode {
             .sum::<usize>()
     }
 
+    /// How many rows this tree's outermost stack holds.
+    ///
+    /// The quantity a **content-derived seat** is sized from: the band beneath
+    /// the left column grows with its occupant's row count, and a plugin is
+    /// never told its rect, so the kernel keeps the policy and counts the rows
+    /// itself. A stacking container's children are one row each; anything else
+    /// is one row's worth.
+    ///
+    /// Deliberately not a rendered height. A [`ViewNode::Paragraph`] wraps and a
+    /// [`ViewNode::Gauge`] is two rows, neither knowable without a width — and
+    /// the width is downstream of the height this feeds. Counting stacked
+    /// children is width-free, which is what makes it usable before the rect
+    /// exists.
+    pub fn stacked_row_count(&self) -> usize {
+        match self {
+            ViewNode::List { children, .. } | ViewNode::Column(children) => children.len(),
+            _ => 1,
+        }
+    }
+
     /// Deepest nesting in this subtree; a leaf is depth 1.
     pub fn depth(&self) -> usize {
         1 + self
@@ -793,6 +813,40 @@ mod tests {
         let tree = ViewNode::Column(vec![]);
         assert_eq!(tree.node_count(), 1);
         assert_eq!(tree.depth(), 1);
+    }
+
+    #[test]
+    fn stacked_row_count_counts_the_outermost_stacks_children() {
+        let rows = vec![
+            ViewNode::text("a"),
+            ViewNode::text("b"),
+            ViewNode::text("c"),
+        ];
+        assert_eq!(ViewNode::list(rows.clone()).stacked_row_count(), 3);
+        assert_eq!(ViewNode::Column(rows).stacked_row_count(), 3);
+        assert_eq!(ViewNode::list(vec![]).stacked_row_count(), 0);
+    }
+
+    /// A nested list does not count: the seat is sized from what its occupant
+    /// stacks at the top, the same rows a click and a cursor address (ADR-36).
+    #[test]
+    fn stacked_row_count_ignores_nesting() {
+        let tree = ViewNode::list(vec![
+            ViewNode::text("one"),
+            ViewNode::list(vec![ViewNode::text("a"), ViewNode::text("b")]),
+        ]);
+        assert_eq!(tree.stacked_row_count(), 2);
+    }
+
+    #[test]
+    fn a_tree_that_does_not_stack_is_one_row() {
+        assert_eq!(ViewNode::text("x").stacked_row_count(), 1);
+        assert_eq!(ViewNode::Divider.stacked_row_count(), 1);
+        assert_eq!(
+            ViewNode::Row(vec![ViewNode::text("a"), ViewNode::text("b")]).stacked_row_count(),
+            1,
+            "a row is one row however many cells it divides into"
+        );
     }
 
     #[test]

@@ -19,7 +19,8 @@
 //!   changed-files list in the **file-viewer column** — its own focus
 //!   (`InputFocus::ReviewFiles`), its own keys, and force-shown by `App::layout_for`
 //!   for as long as a review is open. One plugin would have to be granted, focused
-//!   and navigated in two columns at once.
+//!   and navigated in two columns at once. ADR-46 gave a plugin the first of the two
+//!   and deliberately not the second, so the finding narrowed rather than closed.
 //! - [`the_reviews_keyboard_resolves_no_action`]. The tasks, automations and
 //!   session-list refusals could each name the scoped `Action`s a plugin binding
 //!   would replace. This pane's keys are **not actions at all**: `KeyContext` has six
@@ -109,23 +110,24 @@ const BLOCKERS: &[Blocker] = &[
         id: "no-central-seat",
         needs: "the seat the diff is drawn in: the review owns the **central** pane, the one the \
                 agent terminal and the shell share, selected from the tab strip",
-        stands: "`PaneSlot` is a closed set whose only member is the right-hand column, so the \
-                 reproduction is placeable as a pane and not placeable where this pane is. The \
-                 same row blocked the tasks pane's editor (ADR-38) and the automations pane's \
-                 (ADR-43); what is new here is that the *whole* pane wants the seat rather than \
-                 an editor beside it",
+        stands: "**closed as a seat** (ADR-46). `PaneSlot::Center` names `RegionId::Center` and \
+                 `App::render_central_pane` stands down for a pane that claims it, so the diff \
+                 is placeable where the review is drawn. Two things the seat does not carry, and \
+                 both are recorded rather than absorbed: the tab strip that *selects* this view \
+                 is kernel chrome and is not drawn over a plugin-owned centre, and the review's \
+                 second seat is a different row below",
         gap: Gap::Structural,
-        blocked: true,
+        blocked: false,
         probe: |root| {
-            let only_right = variant_names(&block(
-                root,
-                "src/session/plugin_manifest.rs",
-                "pub enum PaneSlot",
-            )) == ["Right"];
-            // And the central pane is where the review is drawn, from the one file
-            // that draws it.
+            let seat_exists = method_body(root, "src/session/plugin_manifest.rs", "pub fn seat(")
+                .contains("Some(RegionId::Center)");
+            let native_stands_down = method_body(root, "src/app/view.rs", "fn render_central_pane")
+                .contains("seat_taken(PaneSlot::Center)");
+            // And the central pane is still where the review is drawn, from the one
+            // file that draws it — a seat for a surface drawn elsewhere would prove
+            // nothing.
             let central = source(root, "src/app/view.rs").contains("code_review::render(");
-            only_right && central
+            !(seat_exists && native_stands_down && central)
         },
     },
     Blocker {
@@ -136,11 +138,12 @@ const BLOCKERS: &[Blocker] = &[
         stands: "`App::layout_for` forces the file-viewer column present for as long as a review \
                  is open, and `InputFocus::ReviewFiles` is a focus ring stop of its own. The \
                  workspace tree seats this list as `RegionId::FileViewer` and a plugin pane as \
-                 `RegionId::Plugin(n)` — a *separate* region — and `PaneSlot` offers a plugin only \
-                 the right column. So handing over the diff alone would leave the interface \
-                 drawing a native changed-files list beside a plugin diff, and handing over both \
-                 needs two seats in two different columns for one plugin, which no earlier refusal \
-                 required",
+                 `RegionId::Plugin(n)` — a *separate* region. ADR-46 gave a plugin four seats and \
+                 this is not one of them: no slot names `RegionId::FileViewer`, deliberately, \
+                 because that column's occupant is the native list a review forces present. So \
+                 handing over the diff alone would leave the interface drawing a native \
+                 changed-files list beside a plugin diff, and handing over both still needs a \
+                 second seat this pane's column does not offer",
         gap: Gap::Structural,
         blocked: true,
         probe: |root| {
@@ -149,7 +152,9 @@ const BLOCKERS: &[Blocker] = &[
             let own_focus = source(root, "src/app/view.rs").contains("render_files_list(");
             let is_a_focus = source(root, "src/app/key_handlers.rs").contains("ReviewFiles");
             // The seats themselves: this list is the file-viewer region, a plugin
-            // pane is its own indexed region, and a plugin is offered one column.
+            // pane is its own indexed region, and no slot reaches that region. Read
+            // from the slot→region table rather than from the variant list, so a
+            // slot added for another seat does not flip this row.
             let regions = variant_names(&block(
                 root,
                 "src/session/workspace_tree.rs",
@@ -157,12 +162,10 @@ const BLOCKERS: &[Blocker] = &[
             ));
             let separate_regions = regions.contains(&"FileViewer".to_string())
                 && regions.contains(&"Plugin".to_string());
-            let only_right = variant_names(&block(
-                root,
-                "src/session/plugin_manifest.rs",
-                "pub enum PaneSlot",
-            )) == ["Right"];
-            forces_column && own_focus && is_a_focus && separate_regions && only_right
+            let no_slot_reaches_it =
+                !method_body(root, "src/session/plugin_manifest.rs", "pub fn seat(")
+                    .contains("RegionId::FileViewer");
+            forces_column && own_focus && is_a_focus && separate_regions && no_slot_reaches_it
         },
     },
     Blocker {
@@ -558,12 +561,18 @@ fn the_verdict_is_derived_from_the_blockers() {
     assert!(!outstanding(BLOCKERS, Gap::Wiring).is_empty());
     assert!(!outstanding(BLOCKERS, Gap::Vocabulary).is_empty());
     let structural = outstanding(BLOCKERS, Gap::Structural);
+    // The central seat closed with ADR-46; the review's *second* seat did not, and
+    // with the capture-keyed keyboard it is what still decides the verdict.
     assert!(
-        structural.contains(&"no-central-seat")
-            && structural.contains(&"no-second-seat-for-the-changed-files-list")
+        structural.contains(&"no-second-seat-for-the-changed-files-list")
             && structural.contains(&"keys-are-a-capture-not-actions"),
-        "the two seats and the capture-keyed keyboard are what decide this verdict, and all three \
+        "the second seat and the capture-keyed keyboard are what decide this verdict, and both \
          are structural: {structural:?}"
+    );
+    assert!(
+        !structural.contains(&"no-central-seat"),
+        "the central seat is closed (ADR-46) — a table recording it outstanding again means the \
+         seating regressed: {structural:?}"
     );
 
     // The other direction: a table where every row landed permits the handover.
@@ -616,16 +625,19 @@ fn the_review_is_two_seats_not_one() {
         "the changed-files list should be a focus of its own"
     );
 
-    // A plugin, meanwhile, is seated in one column only.
-    assert_eq!(
-        variant_names(&block(
-            &root,
-            "src/session/plugin_manifest.rs",
-            "pub enum PaneSlot"
-        )),
-        ["Right"],
-        "a plugin pane now has more than one slot — re-verdict both seat rows and check what a \
-         two-seat surface would need"
+    // A plugin, meanwhile, reaches exactly one of the two: ADR-46 gave it the
+    // central seat and deliberately not the file-viewer column, whose occupant is
+    // the native list a review forces present. Read from the slot→region table, so
+    // the assertion says which seat is missing rather than how many slots exist.
+    let seats = method_body(&root, "src/session/plugin_manifest.rs", "pub fn seat(");
+    assert!(
+        seats.contains("Some(RegionId::Center)"),
+        "a plugin should reach the central seat (ADR-46): {seats}"
+    );
+    assert!(
+        !seats.contains("RegionId::FileViewer"),
+        "a plugin pane now reaches the file-viewer column — re-verdict the second seat row and \
+         check what a two-seat surface would need: {seats}"
     );
 }
 

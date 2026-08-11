@@ -5438,3 +5438,257 @@ fn pane_context_has_no_session_when_none_is_open() {
         "an empty thurbox is the normal case, not an error"
     );
 }
+
+/// A pane seated in a native pane's rect, proved on a real frame: the plugin's
+/// content is where the info panel's labels were, and the native pane is gone.
+///
+/// The seat is the first of §14's five handover requirements (ADR-46), and the
+/// assertion is deliberately two-sided — content present *and* the native pane's
+/// own labels absent — because a pane merely drawn *somewhere* is what the
+/// right-column reproduction already did.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_plugin_pane_takes_the_info_panels_seat() {
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::view_tree::ViewNode;
+
+    let mut h = Harness::new(160, 40, 1);
+    h.app.show_info_panel = true;
+    let native = h.render();
+    assert!(
+        native.contains("Agent:"),
+        "the native pane draws first:\n{native}"
+    );
+    let native_rect = h
+        .app
+        .screen_layout()
+        .info_panel
+        .expect("the info column is carved at 160 cols");
+
+    let mut pane = crate::plugin::PluginPane::loading(
+        "info-panel",
+        "info",
+        "Info",
+        PaneSlot::CenterLeft,
+        true,
+    );
+    pane.apply(Ok(ViewNode::list(vec![ViewNode::text("PLUGIN INFO")])));
+    h.app.set_plugin_panes(vec![pane]);
+
+    let seated = h.render();
+    assert!(
+        seated.contains("PLUGIN INFO"),
+        "the seated pane draws:\n{seated}"
+    );
+    assert!(
+        !seated.contains("Agent:"),
+        "the native info panel must stand down for the pane that took its seat:\n{seated}"
+    );
+    assert_eq!(
+        h.app.screen_layout().info_panel,
+        Some(native_rect),
+        "a seated pane gets the native pane's rect, not a new one"
+    );
+
+    // And the seat goes back: hiding the pane restores the native one in the state
+    // it was left in, which is what makes a handover reversible while both exist.
+    h.app.set_plugin_pane_visible("info-panel", "info", false);
+    let restored = h.render();
+    assert!(
+        restored.contains("Agent:"),
+        "the native pane returns:\n{restored}"
+    );
+    assert!(!restored.contains("PLUGIN INFO"));
+}
+
+/// A claim carves the seat on its own. Without this a pane in a seat whose kernel
+/// pane is toggled off would silently never appear — the failure the manifest's
+/// closed vocabulary exists to prevent, reached one layer down.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_seat_is_carved_for_a_claim_alone() {
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::view_tree::ViewNode;
+
+    let mut h = Harness::new(160, 40, 1);
+    h.app.show_info_panel = false;
+    assert!(
+        h.app.screen_layout().info_panel.is_none(),
+        "nothing wants the seat, so it is not carved"
+    );
+
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "board", "Board", PaneSlot::CenterLeft, true);
+    pane.apply(Ok(ViewNode::list(vec![ViewNode::text("CLAIMED")])));
+    h.app.set_plugin_panes(vec![pane]);
+
+    assert!(
+        h.app.screen_layout().info_panel.is_some(),
+        "the claim carves it"
+    );
+    let frame = h.render();
+    assert!(
+        frame.contains("CLAIMED"),
+        "and the pane is on screen:\n{frame}"
+    );
+}
+
+/// The one seat whose height follows its content: the kernel keeps its own
+/// `(rows + 2)` clamp and counts the rows off the seated pane's tree, so a plugin
+/// still learns nothing about its size.
+#[cfg(feature = "plugins")]
+#[test]
+fn the_lower_left_seat_grows_with_the_seated_panes_rows() {
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::view_tree::ViewNode;
+
+    let rows_for = |count: usize| {
+        let mut h = Harness::new(160, 40, 1);
+        let mut pane =
+            crate::plugin::PluginPane::loading("demo", "band", "Band", PaneSlot::LeftBottom, true);
+        pane.apply(Ok(ViewNode::list(
+            (0..count)
+                .map(|i| ViewNode::text(format!("row {i}")))
+                .collect(),
+        )));
+        h.app.set_plugin_panes(vec![pane]);
+        h.app
+            .screen_layout()
+            .automations_panel
+            .expect("the band is carved by the claim")
+            .height
+    };
+
+    // Two rows plus the pane's borders, and the kernel's own cap at the top end —
+    // the same policy the automations pane is sized by.
+    assert_eq!(rows_for(2), 4);
+    assert_eq!(rows_for(5), 7);
+    assert_eq!(rows_for(50), 10, "the kernel's cap still applies");
+}
+
+/// The central seat: a claim replaces the central view, and handing it back
+/// restores the view *and* the tab strip the kernel paints on its border.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_plugin_pane_takes_the_central_seat_and_hands_it_back() {
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::view_tree::ViewNode;
+
+    let mut h = Harness::new(160, 40, 1);
+    let native = h.render();
+    assert!(
+        native.contains("Agent"),
+        "the tab strip is drawn first:\n{native}"
+    );
+
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "diff", "Diff", PaneSlot::Center, true);
+    pane.apply(Ok(ViewNode::list(vec![ViewNode::text("PLUGIN CENTRE")])));
+    h.app.set_plugin_panes(vec![pane]);
+
+    let seated = h.render();
+    assert!(seated.contains("PLUGIN CENTRE"), "{seated}");
+    assert!(
+        !seated.contains("Review · F7"),
+        "the kernel's central chrome selects views that are not on screen, so it is \
+         not drawn over a plugin-owned centre:\n{seated}"
+    );
+
+    h.app.set_plugin_pane_visible("demo", "diff", false);
+    let restored = h.render();
+    assert!(!restored.contains("PLUGIN CENTRE"));
+    assert!(
+        restored.contains("Agent"),
+        "the tab strip returns:\n{restored}"
+    );
+}
+
+/// One seat, one pane. Two claimants is decided rather than undefined: the first
+/// in publication order is drawn and the second is not drawn anywhere.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_second_claimant_for_one_seat_is_not_drawn() {
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::view_tree::ViewNode;
+
+    let mut h = Harness::new(160, 40, 1);
+    h.app.show_info_panel = true;
+    let mut first =
+        crate::plugin::PluginPane::loading("alpha", "info", "Alpha", PaneSlot::CenterLeft, true);
+    first.apply(Ok(ViewNode::list(vec![ViewNode::text("FIRST CLAIM")])));
+    let mut second =
+        crate::plugin::PluginPane::loading("beta", "info", "Beta", PaneSlot::CenterLeft, true);
+    second.apply(Ok(ViewNode::list(vec![ViewNode::text("SECOND CLAIM")])));
+    h.app.set_plugin_panes(vec![first, second]);
+
+    let frame = h.render();
+    assert!(frame.contains("FIRST CLAIM"), "{frame}");
+    assert!(
+        !frame.contains("SECOND CLAIM"),
+        "a second claimant is a no-show, not an overdraw and not a right-column \
+         consolation seat:\n{frame}"
+    );
+}
+
+/// A seated pane is not one of the right column's occupants, so it neither takes a
+/// plugin column nor pushes the centre around. The property that makes "no claim
+/// changes no geometry" hold for a mixed pane set as well as for none.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_seated_pane_does_not_consume_a_right_column() {
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let mut h = Harness::new(160, 40, 1);
+    h.app.show_info_panel = true;
+    let baseline = h.app.screen_layout();
+
+    h.app
+        .set_plugin_panes(vec![crate::plugin::PluginPane::loading(
+            "demo",
+            "info",
+            "Info",
+            PaneSlot::CenterLeft,
+            true,
+        )]);
+    let seated = h.app.screen_layout();
+    assert_eq!(h.app.visible_plugin_panes(), 0, "a seat is not a column");
+    assert!(seated.plugin_panes.is_empty());
+    assert_eq!(
+        seated.terminal, baseline.terminal,
+        "the centre does not move"
+    );
+    assert_eq!(seated.info_panel, baseline.info_panel);
+
+    // A right-column pane alongside it still gets its own region.
+    h.app.set_plugin_panes(vec![
+        crate::plugin::PluginPane::loading("demo", "info", "Info", PaneSlot::CenterLeft, true),
+        crate::plugin::PluginPane::loading("demo", "board", "Board", PaneSlot::Right, true),
+    ]);
+    assert_eq!(h.app.visible_plugin_panes(), 1);
+    assert_eq!(h.app.screen_layout().plugin_panes.len(), 1);
+}
+
+/// The geometry claim, stated as an equality rather than as prose: with no pane
+/// claiming a seat, every rect is the one a build with no seats computed.
+#[cfg(feature = "plugins")]
+#[test]
+fn no_claim_leaves_every_rect_unchanged() {
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let mut h = Harness::new(160, 40, 1);
+    h.app.show_info_panel = true;
+    h.app.show_tasks_panel = true;
+    h.app.show_file_viewer = true;
+    let before = h.app.screen_layout();
+
+    // Hidden panes in every seat, plus a hidden right-column one: a seat is
+    // claimed by a *visible* pane, so none of these may move a rect.
+    h.app.set_plugin_panes(vec![
+        crate::plugin::PluginPane::loading("a", "l", "L", PaneSlot::Left, false),
+        crate::plugin::PluginPane::loading("a", "lb", "LB", PaneSlot::LeftBottom, false),
+        crate::plugin::PluginPane::loading("a", "cl", "CL", PaneSlot::CenterLeft, false),
+        crate::plugin::PluginPane::loading("a", "c", "C", PaneSlot::Center, false),
+        crate::plugin::PluginPane::loading("a", "r", "R", PaneSlot::Right, false),
+    ]);
+    assert_eq!(h.app.screen_layout(), before);
+}

@@ -77,17 +77,21 @@ const BLOCKERS: &[Blocker] = &[
     Blocker {
         id: "no-band-slot",
         needs: "a full-width band docked above the footer",
-        stands: "`PaneSlot` is a closed set whose only member is the right-hand column",
+        stands: "`PaneSlot` is a closed set of pane seats. ADR-46 widened it from one member to \
+                 five — the left column, the band beneath it, the column left of centre, the \
+                 centre, and the right-hand column — and every one of them is a *pane* seat. None \
+                 names `RegionId::GlobalSearch`, and that is a decision rather than an omission: \
+                 the strip is kernel chrome, like the header, the footer and the status band, so a \
+                 manifest cannot address it",
         gap: Gap::Structural,
         blocked: true,
         probe: |root| {
             // The strip's own region (`RegionId::GlobalSearch`) exists; what is
-            // missing is any way for a *plugin* to be seated in one.
-            variant_names(&block(
-                root,
-                "src/session/plugin_manifest.rs",
-                "pub enum PaneSlot",
-            )) == ["Right"]
+            // missing is any way for a *plugin* to be seated in one. Read from the
+            // slot→region table, so a slot added for a pane seat does not flip this
+            // row and a slot added for *this* region does.
+            !method_body(root, "src/session/plugin_manifest.rs", "pub fn seat(")
+                .contains("RegionId::GlobalSearch")
         },
     },
     Blocker {
@@ -311,6 +315,23 @@ fn block(root: &Path, rel: &str, header: &str) -> String {
     let end = rest
         .find("\n}\n")
         .unwrap_or_else(|| panic!("{rel}: `{header}` has no top-level close"));
+    rest[..end].to_string()
+}
+
+/// The body of the method whose declaration starts with `header`.
+///
+/// rustfmt closes a method inside an `impl` with a `}` at one level of
+/// indentation, which is the terminator used here — so this reads one method
+/// rather than the whole `impl` around it.
+fn method_body(root: &Path, rel: &str, header: &str) -> String {
+    let text = source(root, rel);
+    let start = text
+        .find(header)
+        .unwrap_or_else(|| panic!("{rel} no longer declares `{header}`"));
+    let rest = &text[start..];
+    let end = rest
+        .find("\n    }\n")
+        .unwrap_or_else(|| panic!("{rel}: `{header}` has no method-level close"));
     rest[..end].to_string()
 }
 

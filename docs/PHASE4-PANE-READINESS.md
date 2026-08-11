@@ -947,9 +947,13 @@ after the handover, or even in the same change as it. The fifth is not a host ga
 at all but a behavioural difference between the two panes, and it is stated after
 the table because nothing in the host would have surfaced it.
 
+**Two of the rows are now closed**, and not by the handover they were written for:
+the seat (ADR-46, §21) and the oracle (ADR-42). What is left of the table is the
+toggle-and-flag binding and the render latency.
+
 | Handover requirement | Where the host stands | Cheapest closure |
 |---|---|---|
-| **the same seat** | `PaneSlot`'s only member is `Right`; the info panel is `RegionId::Info`, its own region with a `Percent(15)` share and a ≥120-column rule. A plugin pane cannot sit there, so its frame is a different rect with a different title | a slot that names an existing region, decided with the layout rather than with a pane |
+| **the same seat** | **closed** (ADR-46). `PaneSlot` has five members and four of them name a region the workspace tree already places; `center-left` is `RegionId::Info`, so a pane that claims it gets that seat's rect, share and ≥120-column rule, and `App::render_info_panel` stands down for it | a slot that names an existing region, decided with the layout rather than with a pane |
 | **the same toggle and the same flag** | `Action::ToggleInfoPanel` toggles `App::show_info_panel` and `[features] info_panel` gates it; a plugin pane's visibility is `TogglePluginPane` plus a stored per-pane choice. No manifest field asks a pane to answer a kernel action or ride a kernel feature flag | a manifest declaration binding a pane to an existing action and flag — which is also how the `[features]` flags eventually retire |
 | **the same latency** | the render worker polls on a fixed 1 s cycle (`PLUGIN_RENDER_SLICE` × `PLUGIN_RENDER_SLICES`). This is §7 and §13's render-trigger gap, and the info panel is its worst case: live CPU and memory gauges plus per-automation countdowns | event-driven render, §13's named gap, with its own rate policy |
 | **a proof that survives the deletion** | **closed** (ADR-42). The port's oracle was *differential* — it named `ui::info_panel::info_tree`, one of the two things the handover deletes — so it could fail before the handover and not after it | record the native pane's tree while the native builder still exists, and assert the plugin against the recording |
@@ -1849,3 +1853,100 @@ with nothing to act on would be a pane that takes a keystroke and drops it (ADR-
    to be designed.
 
 Nothing else on the table is reachable before those three.
+
+## 21. The seat, closed for every pane at once (ADR-46)
+
+§14's table opens with "the same seat", and §18 found the same row twice more —
+five of the six remaining handovers were blocked by it, so it was never a per-pane
+problem. It is closed, before any pane moves: **`PaneSlot` has five members**, four
+of which name a region the workspace tree already places.
+
+| slot | seat | native occupant |
+|---|---|---|
+| `right` | a column of `RegionId::Plugin(i)` | tasks panel + file viewer share the column |
+| `left` | `RegionId::SessionList` | the session list |
+| `left-bottom` | `RegionId::Automations` | the automations pane |
+| `center-left` | `RegionId::Info` | the info panel |
+| `center` | `RegionId::Center` | agent terminal / shell / code review |
+
+### The three decisions the closure needed
+
+**Who wins a seat two panes want.** The plugin does: a visible pane takes the seat
+and the kernel's own pane for it is not drawn. The conservative reading — the native
+pane wins while it exists — would have made the whole thing unexercisable, because
+no seat could be occupied until the renderer it replaces had already been deleted.
+The kernel keeps its own pane's visibility state, so hiding the plugin pane hands
+the seat back in the state it was left in; that reversibility is what lets a bundled
+reproduction be *driven* today rather than only compared. Two plugin claimants are
+decided rather than undefined: first in publication order, and the second is not
+drawn anywhere.
+
+**What carves a seat.** A claim, on its own. `App::layout_for` ORs each claim into
+the flag that carves that seat, so a pane in `center-left` appears whether or not
+the user has the info panel open — otherwise a pane in a seat whose kernel pane was
+toggled off would silently never appear, which is the failure the manifest's closed
+vocabulary exists to prevent, one layer down. Because the claim only *enables* an
+existing flag, `compute_layout` gained no branch: with no claim every rect is what
+it was, asserted as an equality (`no_claim_leaves_every_rect_unchanged`) rather than
+described.
+
+**The one content-derived height.** The lower-left band is the only place in
+thurbox where a pane's geometry follows from its own content, and §17 flagged it as
+the load-bearing half of a `left` slot. The kernel keeps the policy
+(`(rows + 2).clamp(3, 10)`) and counts the rows itself, from
+`ViewNode::stacked_row_count` — the outermost stack's child count, a width-free
+number, because the width is downstream of the height it feeds. A plugin is still
+told nothing about its size.
+
+### What the seat did **not** close
+
+- **The centre's chrome.** A `center` pane is drawn with the frame every plugin pane
+  gets, and the tab strip (`Agent · Review · Shell`) plus the F9 collapse chevron
+  are not drawn over it — both select surfaces that are then not on screen. For the
+  code review's handover that is a real shortfall: its pane is *selected* from that
+  strip. Closing it is a decision about kernel chrome (can a plugin pane be a tab?),
+  not about seating.
+- **Focus.** A seated pane is still focused as `InputFocus::PluginPane`, so the
+  scoped keyboards (`KeyContext::SessionList`, `Automations`, `Tasks`) still do not
+  resolve for it, and `App::render_central_pane`'s automation-editor branch still
+  keys on the *native* focuses. §18's second blocker is untouched: the remaining
+  input wall is a seat **and** a focus, and only the seat half is done.
+- **The file-viewer column and the search band.** Neither is a slot. The review's
+  changed-files list wants `RegionId::FileViewer` specifically — the column an open
+  review forces present — and global search wants a full-width band that §10 already
+  ruled out as a pane. Both gates keep their rows, now probing the slot→region table
+  rather than the variant list, so a slot added for another seat cannot flip them by
+  accident.
+
+### The six rows this re-verdicted
+
+Adding slots made six gate probes disagree with their recorded verdicts, which is
+the gates working. Four closed, two were rewritten to say what they actually mean:
+
+| gate | row | after |
+|---|---|---|
+| `automations_pane_handover_gap` | `no-left-seat` | closed — seat **and** height policy, both probed |
+| `session_list_pane_handover_gap` | `no-left-seat` | closed |
+| `tasks_pane_input_gap` | `no-central-seat` | closed as a seat; the editor's other rows stand |
+| `code_review_pane_handover_gap` | `no-central-seat` | closed as a seat; the chrome is a new note |
+| `code_review_pane_handover_gap` | `no-second-seat…` | still blocked: no slot names `RegionId::FileViewer` |
+| `global_search_pane_gap` | `no-band-slot` | still blocked: no slot names `RegionId::GlobalSearch` |
+
+A seventh probe moved for a different reason and is worth recording, because it is
+the kind of drift these gates are meant to survive: the automations gate's
+`focused-pane-draws-an-unfocused-border` read `FocusLevel::Inactive` out of
+`render_plugin_panes`, and the painting moved into the shared `paint_plugin_pane`
+both placements now use. The row is still blocked — more clearly so, since the
+painter is not given the focus at all — and the probe follows the fact rather than
+the function it used to live in.
+
+### Where the bundled reproductions sit now
+
+`session-list` → `left`, `automations` → `left-bottom`, `info-panel` →
+`center-left`; `tasks`, `file-viewer` and `code-review` stay in `right`, which for
+the first two *is* their native column. All still seed hidden
+(`tests/bundled_manifests.rs` is unchanged), so no install's screen moves — but
+showing one now compares the two panes in **one rect** instead of two, which is what
+`tests/bundled_automations_panel.rs`'s placement divergence asked for. That
+divergence is retired and its test now pins the opposite: the shipped manifest names
+the seat its native counterpart occupies.
