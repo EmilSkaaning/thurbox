@@ -3073,3 +3073,127 @@ performs (review writes, `git` retargeting, clipboard/agent export, cursor write
 resolved width). Deleting `src/ui/code_review.rs` would replace a mouse-first,
 eleven-button, searchable, retargetable review with a scrollable read-only document.
 ADR-45's ordering stands.
+
+## ADR-51: A pane may answer one of thurbox's keyboards, and is focused as that pane
+
+**Context.** ADR-50 handed over the first native pane and named what blocks the
+other five: **focus**. A seated plugin pane is `InputFocus::PluginPane`, so
+`KeyContext::SessionList` / `Automations` / `Tasks` / `FileViewer` never resolve. A
+pane could sit exactly where thurbox's own pane sat (ADR-46), answer the key that
+showed it and ride the flag that gated it (ADR-47), and still be a surface the
+keyboard cannot reach. It is the one requirement shared by four of the five
+remaining handovers.
+
+There are two ways to close it, and choosing decides what a v2 pane *is*.
+
+1. **The plugin gets the keys** — `input`, a binding per chord (ADR-34), and then a
+   capability per effect: a view write for `j`, a filesystem read and a process
+   launch for the file viewer's `l`, a record creation and a modal for the tasks
+   pane's `n`/`r`, an agent reach for what that picker does.
+2. **The pane gets the keyboard** — the pane declares which of thurbox's scoped
+   keyboards it is the pane for; the kernel resolves those actions and performs them
+   against its own state, as it already does, and the plugin draws the result.
+
+Route 1 has been priced twice and refused twice. ADR-38 refused the view write (a
+plugin's cursor and the kernel's would disagree, so `o`/`r`/`e` would act on a
+different row than the one highlighted); ADR-39 refused the filesystem capability
+(the widest grant in the host, and *still* insufficient, because the expansion set
+and the search verdict are the kernel's). Neither refusal has weakened. Route 1 also
+cannot reach half of what these keys do: the central-pane editor, the trigger-time
+picker and the editor process are not panes, so no pane declaration touches them.
+
+**Decision.** One optional `[[panes]]` field, and the focus it implies.
+
+1. **`key_context` names a kernel key context**, spelled as the kernel spells it
+   (`key_context = "Tasks"`), validated against `KeyContext::pane_keyboards()` — the
+   four that scope a pane's keys. `Global` is refused (no pane's) and `Terminal` is
+   refused (its keys are written to a PTY, so "the kernel dispatches the action" is
+   false and a pane claiming it would receive nothing). Two panes of one manifest may
+   not claim one keyboard.
+2. **Such a pane is focused as thurbox's own pane of that name.** `InputFocus::TaskList`
+   already meant "the interface's task list holds the keyboard"; that it also meant
+   "and `ui::tasks_panel` is painting it" was a coincidence of there being one
+   implementation. So `App::focus_key_context` is **untouched**, every scoped action
+   resolves as before, and the central-pane workspaces, the editor return paths and
+   `Esc` are correct by construction. `App::focus_for_keyboard` is the one table from
+   a context to its focus. What moves is focus *entry*: a ring stop appears when
+   **either** occupant of that pane's place is on screen.
+3. **It is focusable without `input`, and never handed a key.**
+   `PluginPane::is_focusable_with` becomes "on screen and can receive keys", of which
+   there are now two kinds; `takes_plugin_input_with` is the narrower "focusable **as**
+   a plugin pane", which a declared keyboard is deliberately not — landing there as
+   `PluginPane` would silence the keyboard the pane declared.
+4. **A pane may not declare a keyboard and bind its own keys.** A `[[keybindings]]`
+   entry on such a pane is a manifest error. The alternative is a delivery order, and
+   a plugin that shadowed `d` in the tasks keyboard would do it silently, with the F1
+   editor showing both bindings and nothing saying which won. The plugin-wide `input`
+   capability is *not* refused: a plugin may have an ordinary input pane beside an
+   inheriting one.
+5. **A focused pane is drawn as focused, from one rule.** `paint_plugin_pane` painted
+   every pane `FocusLevel::Inactive` — invisible while every pane was a hidden copy,
+   wrong for a pane that is the interface's task list, whose border is how a user sees
+   where `j` is going. It now takes the level, and `App::pane_focus_level(context)` is
+   the single rule **both** occupants use, including the three-level cases (a tasks
+   pane is `Active` while the editor it opened holds focus). Nothing is published to
+   the plugin: a frame is the host's.
+6. **A click on such a pane is the kernel's row action.** `ClickAction::SelectTask(i)`
+   and its siblings rather than `PluginPaneRow`, plus `FocusPane(<inherited focus>)`
+   for the rest of the rect — so a click means in the plugin's pane what it meant in
+   the kernel's, and nothing reaches the plugin. The hitbox index is one-based
+   (`ui.list`'s numbering) and the kernel's actions are zero-based, converted once.
+7. **The published `focused` flag becomes true for it, and that is not a widening.**
+   `build_tasks_snapshot` already publishes `focused: matches!(self.focus,
+   InputFocus::TaskList)`, and that focus can now be the plugin's pane. So
+   `plugin-host/input`'s "a pane is told nothing about its own focus" is **narrowed**:
+   it is a statement about a *reproduction*, whose focus is a different thing from the
+   native pane's, and for a pane that is the surface itself the two coincide. Leaving
+   it false would be the wrong purity — the tasks pane's empty state reads `no tasks —
+   n to add` only when the key works, and in a handed-over pane it does.
+8. **No bundled plugin declares the field**, for ADR-47's reason: a reproduction that
+   inherited the keyboard while the native pane still draws would paint two panes as
+   focused and put a cursor in one that a user moves in the other.
+
+**Is this a fig leaf?** The objection is that the kernel keeps the pane's behaviour,
+so "every pane a plugin" is only about drawing. Two answers. First, where the code
+lives: a pane's state machine is `App` (`task_ui`, `automation_ui`) and its keyboard is
+`session::Action` + `KeyContext`; what `src/ui/<pane>.rs` holds is the drawing, which
+is what a plugin takes over. (The one exception, `FileViewerState`, is recorded as a
+defect by that pane's gate rather than as the model's home.) Second, the phase's own
+test still holds: what a bundled plugin can do is what a third party's can. A third
+party may declare `key_context = "Tasks"` and draw the task list grouped by status
+with its own glyphs, and `j`/`Space`/`d` keep working — because the keyboard is the
+*pane's* identity, not the plugin's implementation. What it may not do is invent a
+key; a plugin wanting keys of its own declares `input` and gets ADR-34's addressed
+bindings, unchanged.
+
+**Rejected alternatives.** *Keep `InputFocus::PluginPane` and teach
+`focus_key_context` the focused pane's context* — then `render_task_workspace`, the
+published flag, the editor's return path, `Esc` and the ring each become "the tasks
+focus, whichever of the two it is today": an indirection at a dozen sites whose
+failure mode is a site that forgets, which reads as a pane that half works.
+*`KeyContext::Pane(String)`* — ADR-34 rejected its neighbour for reasons that hold:
+the enum is `Copy` and matched by value, and the keybinding namespace must not depend
+on which plugins are installed. *Infer the keyboard from the seat* — a third-party
+pane may legitimately sit in a seat without being that pane, and inheriting `d`
+(delete session) by virtue of geometry is the worst possible default. *Grant the view
+write anyway* — ADR-38's refusal, and it is still insufficient. *Deliver the kernel's
+**action** to the plugin (`onAction`)* — route 1 in route 2's clothes: every action
+still needs a grant, and now there are two spellings for a key. *Let the plugin
+override individual keys of the keyboard it declared* — a key's meaning would depend
+on a plugin's return value, unpredictable per install and undiscoverable in F1. *Wire
+the focus inside the first handover that needs it* — the shape ADR-46 rejected for the
+seat, and worse here: four panes would land four incompatible bits of focus plumbing.
+
+**Consequences.** Four of the five remaining handovers are unblocked on focus, and
+each is now blocked only on its own remaining rows — which for three of them are
+*drawing* rows and for two of them a module that is also the kernel's model. Three
+gates re-scoped their recorded sentences, because "a handed-over pane is focused as
+`InputFocus::PluginPane`" is no longer a fact about panes: the automations gate's
+`focused-pane-draws-an-unfocused-border` row is **closed** by decision 5, its
+central-seat row is now recorded as a wall for the *plugin-keys* route only (a pane
+declaring `Automations` is focused as `InputFocus::Automations`, which that branch
+names, so the editor and the run history do appear for it), and the session list's
+`scoped-keys-silenced-by-the-handover` says the same about its six actions. The code
+review is the one pane the route cannot reach, and for a reason worth having: its keys
+are a `self.focus` capture rather than scoped actions, so there is nothing for a
+declaration to name — ADR-45's ordering (make them actions first) stands.

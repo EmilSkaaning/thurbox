@@ -17,13 +17,35 @@
 //! §17 stopped at the pane's seat and its keys, and the seat is the row a reader
 //! expects to decide this handover. It does not. Focusing the *native* pane is what
 //! turns the **central** pane into the automation editor plus its run history, and
-//! that branch tests `self.focus` against three native focuses. A handed-over pane
-//! is focused as `InputFocus::PluginPane`, so the branch never fires: the editor,
-//! the run history and `Enter`-opens-that-run's-session all disappear from a pane
-//! that still looks complete. It is the same coupling that blocked the tasks pane
-//! (§15), found here on the pane whose keys were supposed to be the hard part —
-//! and it means the two unported keys are not a five-sevenths shortfall but the
-//! pane's whole authoring surface.
+//! that branch tests `self.focus` against three native focuses. A pane handed over
+//! **the way this plugin is built** is focused as `InputFocus::PluginPane`, so the
+//! branch never fires: the editor, the run history and
+//! `Enter`-opens-that-run's-session all disappear from a pane that still looks
+//! complete. It is the same coupling that blocked the tasks pane (§15), found here
+//! on the pane whose keys were supposed to be the hard part — and it means the two
+//! unported keys are not a five-sevenths shortfall but the pane's whole authoring
+//! surface.
+//!
+//! ## Which route this gate measures, since ADR-51 there are two
+//!
+//! Every row below is about a pane whose **keys are the plugin's**: it declares
+//! `input`, receives each chord addressed by binding (ADR-34) and acts through the
+//! capabilities it was granted. That is what the bundled `automations` plugin is —
+//! five declared bindings, `automations-write` — and it is the port §17 measured.
+//!
+//! ADR-51 added a second route: a pane may declare that it **is** thurbox's pane
+//! for a key context, and then the kernel resolves that context's actions and
+//! performs them itself while the pane holds focus, as the kernel's own pane of
+//! that name. A pane taking that route would answer all seven of this pane's keys,
+//! including the two that author, and would open the central editor — because it is
+//! focused as `InputFocus::Automations`, which the branch above *does* name. The
+//! manifest refuses both routes in one pane, so this is a fork rather than a
+//! supplement, and this plugin has not taken it.
+//!
+//! So a blocked row here says "this plugin's port cannot do X", never "this pane
+//! cannot be handed over". Where the second route changes a row's answer the row
+//! says so; where it does not — the module that is also the kernel's model, the
+//! drawing vocabulary — nothing about it depends on which route the keys took.
 //!
 //! Three things this gate is deliberately not:
 //!
@@ -100,11 +122,15 @@ const BLOCKERS: &[Blocker] = &[
                 opens the session that run touched",
         stands: "`App::render_central_pane` picks that view by testing `self.focus` against three \
                  **native** focuses (`Automations`, `AutomationEditor`, `AutomationRunHistory`). A \
-                 handed-over pane is focused as `InputFocus::PluginPane`, which the branch does \
-                 not name, so the editor and the run history never appear. This is the row that \
-                 decides the handover: the two unported keys are not a shortfall of two, they are \
-                 the pane's whole authoring surface, and the same central-seat coupling blocked \
-                 the tasks pane (ADR-38)",
+                 pane handed over on this plugin's route — its own keys, via `input` — is focused \
+                 as `InputFocus::PluginPane`, which the branch does not name, so the editor and \
+                 the run history never appear. This is the row that decides *that* handover: the \
+                 two unported keys are not a shortfall of two, they are the pane's whole authoring \
+                 surface, and the same central-seat coupling blocked the tasks pane (ADR-38). It \
+                 is **not** a wall for the other route (ADR-51): a pane declaring this keyboard is \
+                 focused as `InputFocus::Automations`, which the branch names, so the editor and \
+                 the run history appear for it. Recorded outstanding because the shipped plugin \
+                 declares bindings of its own and the manifest refuses both at once",
         gap: Gap::Structural,
         blocked: true,
         probe: |root| {
@@ -266,16 +292,27 @@ const BLOCKERS: &[Blocker] = &[
         id: "focused-pane-draws-an-unfocused-border",
         needs: "the pane's focused border — the native pane switches to the accent frame while it \
                 holds focus, which is how a user sees where the keyboard is",
-        stands: "`App::paint_plugin_pane` — the one painter both placements share since ADR-46 — \
-                 builds every pane's block at `FocusLevel::Inactive`, unconditionally. Unlike the \
-                 row above this is not a fact the host lacks — it knows \
-                 `self.focus == InputFocus::PluginPane` — it simply does not pass it, so a \
-                 handed-over pane would take keys while looking unfocused",
+        stands: "**closed** (ADR-51). `App::paint_plugin_pane` built every pane's block at \
+                 `FocusLevel::Inactive` unconditionally; it now takes the level as an argument and \
+                 `App::plugin_pane_focus_level` resolves it from the focus the kernel owns — the \
+                 pane's own rule when it declared one of thurbox's keyboards, otherwise focused \
+                 while it is the pane holding `InputFocus::PluginPane`. Nothing is published to \
+                 the plugin: a frame is the host's, which is why closing this did not close \
+                 `pane-is-not-told-its-own-focus` above",
         gap: Gap::Wiring,
-        blocked: true,
+        blocked: false,
         probe: |root| {
+            // Two halves, because either alone would be the wrong claim: the painter
+            // must accept a level rather than hard-coding one, and the caller must
+            // resolve it from a focus. A probe reading only the first would report
+            // this closed for a painter handed `Inactive` at every call site.
             let paint = method_body(root, "src/app/view.rs", "fn paint_plugin_pane");
-            paint.contains("FocusLevel::Inactive") && !paint.contains("InputFocus::PluginPane")
+            let painter_takes_a_level = paint.contains("focus: crate::ui::FocusLevel")
+                && !paint.contains("focus_block(&title, FocusLevel::Inactive)");
+            let caller_resolves_it =
+                method_body(root, "src/app/view.rs", "fn plugin_pane_focus_level")
+                    .contains("InputFocus::PluginPane");
+            !(painter_takes_a_level && caller_resolves_it)
         },
     },
     Blocker {
@@ -536,15 +573,19 @@ fn the_verdict_is_derived_from_the_blockers() {
     assert!(handover_is_possible(&all_met));
 }
 
-/// **The finding.** The central pane's mode follows the *native* pane's focus, so
-/// handing this pane to a plugin removes the automation editor and its run history
-/// — surfaces the pane itself does not draw and a plugin cannot take.
+/// **The finding.** The central pane's mode follows a *focus*, not a pane's
+/// identity — so handing this pane to a plugin that keeps its own keys removes the
+/// automation editor and its run history, surfaces the pane itself does not draw.
 ///
 /// This is not a restatement of the probe. It names the three focuses the branch
 /// tests and the two things they open, so a failure says *which* surface the
-/// handover would have removed, and it pins that the branch is a `self.focus` test
-/// rather than a per-pane one — which is why a plugin pane cannot satisfy it by
-/// being the automations pane.
+/// handover would have removed, and it pins that the branch is a `self.focus` test.
+///
+/// The second half is the correction ADR-51 forced, and it is why the finding is
+/// about a *focus* rather than about plugins: a pane that declares this keyboard is
+/// focused as `InputFocus::Automations`, which the branch names, so the editor does
+/// appear for it. Asserted here so the two routes cannot be conflated — the wall is
+/// "focused as `PluginPane`", not "drawn by a plugin".
 #[test]
 fn the_central_pane_follows_the_native_panes_focus_not_the_panes_identity() {
     let root = repo_root();
@@ -568,6 +609,15 @@ fn the_central_pane_follows_the_native_panes_focus_not_the_panes_identity() {
         !central.contains("PluginPane"),
         "the central pane now names a plugin pane — if a plugin pane can drive the central seat, \
          re-verdict `central-seat-follows-the-native-focus` and check what the pane gains"
+    );
+    // The other route reaches the same branch, because it reaches the same focus.
+    // Read from the host's own table so this cannot drift from what focus a declared
+    // keyboard is delivered to (ADR-51).
+    let table = method_body(&root, "src/app/mod.rs", "pub(crate) fn focus_for_keyboard");
+    assert!(
+        table.contains("KeyContext::Automations => Some(InputFocus::Automations)"),
+        "a pane declaring this keyboard should be focused as the kernel's own automations pane, \
+         which is what makes the branch above fire for it: {table}"
     );
     // The ring the branch serves is the automations one, so the run history is a
     // stop a handed-over pane could not reach either.

@@ -137,6 +137,38 @@ fn a_handed_over_pane_seeds_at_the_native_panes_default() {
     }
 }
 
+/// No bundled reproduction declares one of thurbox's own keyboards (ADR-51), for the
+/// reason ADR-47 gave the toggle fields: while the native pane is still drawn, a
+/// reproduction that inherited its keyboard would be focused as *that pane* — two
+/// panes drawn as focused, and a cursor a user moves in one while looking at the
+/// other.
+///
+/// The field is not a reproduction's to declare; it is the handover's. Exempted per
+/// pane by the list above, exactly as the visibility seed is, so the day a pane is
+/// handed over this test asks for the declaration instead of forbidding it.
+#[test]
+fn only_a_handed_over_pane_declares_a_kernel_keyboard() {
+    for (plugin, dir) in bundled_plugins() {
+        for pane in manifest_at(&dir).panes {
+            let handed_over = PANES_DRAWN_IN_A_NATIVE_PANES_PLACE
+                .iter()
+                .any(|(p, id)| *p == plugin && *id == pane.id);
+            if handed_over {
+                continue;
+            }
+            assert!(
+                pane.key_context.is_none(),
+                "{plugin}/{} is a reproduction and declares the `{:?}` keyboard: while thurbox \
+                 still draws that pane, both would be focused as it. Declare it in the change \
+                 that stops drawing the native pane, and add the pane to \
+                 PANES_DRAWN_IN_A_NATIVE_PANES_PLACE",
+                pane.id,
+                pane.key_context,
+            );
+        }
+    }
+}
+
 /// The check is only worth having while there is something to check: an empty
 /// bundled set, or a set whose manifests declare no panes, would pass the rule
 /// above while proving nothing.

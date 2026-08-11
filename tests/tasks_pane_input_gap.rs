@@ -12,6 +12,22 @@
 //! true the moment someone adds a view write for an unrelated reason, and nothing
 //! would say so.
 //!
+//! ## Which route this gate measures, since ADR-51 there are two
+//!
+//! Every row below is about a pane whose **keys are the plugin's**: `input`, a
+//! binding per chord (ADR-34), and a capability per effect. That was the only route
+//! when this verdict was written, and each row is still a true statement about it —
+//! nothing here has been granted.
+//!
+//! ADR-51 added a second: a pane may declare that it **is** thurbox's tasks pane,
+//! and the kernel then resolves `KeyContext::Tasks` and performs those actions
+//! itself while the pane holds focus, as `InputFocus::TaskList`. On that route the
+//! host powers this table asks for are not needed at all — the kernel moves its own
+//! cursor, opens its own editor, and opens its own picker — so a blocked row here
+//! says "this pane's keys cannot be ported **to a plugin**", never "this pane cannot
+//! be handed over". The one row untouched by the distinction is
+//! `no-ellipsizing-clip`, which is about drawing.
+//!
 //! **The finding this gate exists to keep true** is the second row below, because
 //! it is the one nobody predicted. The port was expected to fail on the pane's two
 //! separate surfaces — the central-pane editor and the trigger-time action picker

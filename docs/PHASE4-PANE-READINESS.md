@@ -2402,3 +2402,113 @@ worked example of a *blocked* row, now names the tasks pane and is guarded by a 
 that fails if that pane is ever handed over without moving the example — because the
 repair that passes is to flip the assertions, which turns an argument into a
 transcript.
+
+## 26. The focus wall, closed for four panes at once (ADR-51)
+
+§25 ended with five native panes reproduced and five blocked, "by **focus** and by
+their own recorded rows". This section is the focus half.
+
+### The wall, and the two ways past it
+
+`InputFocus::PluginPane` is its own focus, and `App::focus_key_context` names no arm
+for it — so a seated plugin pane falls to `KeyContext::Global` and none of the four
+scoped keyboards resolves. Every gate written since §15 records this from its own
+side, in the same sentence: *a handed-over pane is focused as
+`InputFocus::PluginPane`*.
+
+Every one of those gates also assumed the only repair: give the **plugin** the keys
+(`input` + a binding per chord, ADR-34) and then a capability per effect. Counting
+what that would take, across the four panes:
+
+| The key | What it does today | What route 1 would have to grant |
+|---------|--------------------|----------------------------------|
+| tasks `j`/`k` | moves `App::task_ui.task_panel_index` | a view write (refused, ADR-38) |
+| tasks `n`, `e` | opens the central-pane editor | a record creation, a text write, a central seat |
+| tasks `r` | opens the trigger-time picker | a modal surface, and then an agent reach |
+| files `l` | reads a directory | a filesystem capability (refused, ADR-39) |
+| files `Enter` | launches the configured editor | a process launch |
+| session list `j`/`Enter` | moves the **active session** | a view write, and the four panes that follow it |
+
+Six grants, two of them already refused on their own merits and one (`Enter`) the
+widest thing a plugin could ask for. And the second column is the argument: every one
+of those effects is already *kernel* code operating on *kernel* state, reached through
+an `Action` that is already rebindable in F1 and already persisted to
+`keybindings.json`.
+
+So ADR-51 takes the other route. A pane declares `key_context = "Tasks"` — *I am
+thurbox's tasks pane* — and the kernel resolves `KeyContext::Tasks` and performs those
+actions itself while the pane holds focus. Nothing is granted, because nothing new
+happens: the same code runs on the same state, and the pane it draws into is the
+plugin's.
+
+### The decision that made it small
+
+Focus **reuses** the kernel's `InputFocus`. `InputFocus::TaskList` meant "the
+interface's task list holds the keyboard"; that it also meant "and `ui::tasks_panel`
+is painting it" was a coincidence of there being one implementation. Reusing it left
+untouched: `focus_key_context`, `render_task_workspace` and the automations
+workspace, the editor return paths, `Esc`, the published `focused` flag, and every
+`matches!(self.focus, …)` in the tree. What changed is four lines of focus *entry* —
+a ring stop appears when either occupant is on screen — plus one table
+(`App::focus_for_keyboard`).
+
+The alternative, teaching `focus_key_context` to answer for the focused pane's
+declared context, would have turned every one of those sites into "the tasks focus,
+whichever of the two it is today". A dozen indirections whose failure mode is a site
+that forgets, which reads to a user as a pane that half works.
+
+### Two gaps this closed on the way, both found by the gates
+
+**A focused plugin pane had no focused border.** `paint_plugin_pane` built every
+pane's block at `FocusLevel::Inactive`, unconditionally — so a pane taking keys looked
+exactly like one that could not. Invisible while every bundled pane was a hidden copy;
+wrong the moment a pane is the interface's task list, whose accent border is how a
+user sees where `j` is going. It is now an argument, resolved by
+`App::pane_focus_level(context)` — the single rule **both** occupants use, three
+levels included (a tasks pane is `Active` while the editor it opened holds focus).
+The automations gate had this as a row; it is the first row in that table to close.
+
+**A pane's clicks now mean what they meant.** Rows record `ClickAction::SelectTask(i)`
+rather than `PluginPaneRow`, and the rest of the rect records
+`FocusPane(InputFocus::TaskList)`. Nothing reaches the plugin, which is why such a
+pane's rows are clickable with no `input` capability.
+
+### What the gates now say, and what had to be rewritten
+
+Three sentences became false, and a gate exists precisely so that a false sentence
+cannot sit there. Each was **re-scoped rather than deleted**, because each is still
+true of the route it was written about:
+
+- automations `focused-pane-draws-an-unfocused-border` → **closed**, with a probe that
+  reads the painter's signature *and* the caller that resolves the level (either alone
+  would report it closed for a painter handed `Inactive` everywhere);
+- automations `central-seat-follows-the-native-focus` → still blocked **for that
+  plugin**, which declares five bindings of its own; a pane declaring the keyboard is
+  focused as `InputFocus::Automations`, which the branch names, so the editor and the
+  run history do appear for it. The gate now asserts both halves, so the finding reads
+  as "the wall is `PluginPane`, not `a plugin`";
+- session list `scoped-keys-silenced-by-the-handover` → still blocked for a pane
+  handed over with its own keys, closed for one that declares the keyboard.
+
+The tasks and file-viewer gates keep every row: each is a true statement about a
+plugin holding the keys, and nothing was granted. Both gained a note saying which
+route they measure, so a blocked row is not read as "this pane cannot be handed over".
+
+The **code review** is the one pane the route does not reach, and that is worth more
+than the four it does. Its keyboard is a `self.focus` capture — no `KeyContext`, no
+`Action` — so there is nothing for a declaration to name. ADR-45's ordering (make the
+keys scoped actions first) is confirmed rather than bypassed.
+
+### What this leaves, per pane
+
+| Pane | Focus | What is left |
+|------|-------|--------------|
+| tasks | closed | one drawing row: a title too wide for the column loses its ellipsis |
+| file viewer | closed | the search **bar** (drawn outside any pane's tree), and the module that is also the pane's model |
+| automations | closed | the module that is also the `Ctrl+P` modal's summary, and two drawing rows |
+| session list | closed | the module that is also the kernel's model, and three drawing rows |
+| code review | **not reachable** | its keys are not actions; then two seats and five operations |
+
+Nothing is handed over in this change: no renderer is deleted, no bundled manifest
+declares the field, and every snapshot is byte-identical. What is different is that
+the next handover argues about *drawing*.

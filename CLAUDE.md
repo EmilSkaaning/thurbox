@@ -1210,6 +1210,22 @@ source is **watched**: editing a loaded plugin's `init.luau` reloads it in
 place with a fresh VM, keeping its pane and visibility;
 `thurbox-cli plugin reload [<name>]` does the same on demand.
 
+A pane may instead declare that it **is** one of thurbox's own panes:
+`[[panes]] key_context = "Tasks"` (ADR-51, validated against the four contexts that
+scope a pane's keyboard — `Global` and `Terminal` are refused). Then it is focusable
+with **no** `input` capability and is focused as the kernel's own pane of that name
+(`InputFocus::TaskList`), so every scoped action of that context resolves and the
+*kernel* performs it against its own state — the cursor it moves, the record it
+writes, the editor it opens, the directory it reads are all unchanged and still
+rebindable in F1. A click on such a pane's row is likewise the kernel's own row
+selection, and its frame is drawn with that pane's focus rule
+(`App::pane_focus_level`, shared with the native renderer). The two routes are
+exclusive: a `[[keybindings]]` entry naming a pane that declared a keyboard is a
+manifest error, because one keypress cannot have two meanings in one pane. This is
+what lets a native pane with a keyboard be handed over without granting a plugin a
+view write, a filesystem read or a process launch — no bundled plugin declares it
+until the change that deletes its native renderer.
+
 **When a pane renders is event-driven** (ADR-49). Each state-reading capability
 names one `PaneSource` (`sessions`/`metrics`/`automations`/`tasks`/`files`/`review`,
 plus `plugin-state`); the publisher tells the render worker which sources moved

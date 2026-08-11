@@ -8096,10 +8096,12 @@ impl App {
         let focusable = self
             .plugin_panes
             .iter()
-            .any(|p| p.plugin == plugin && p.id == pane && p.is_focusable_with(&features));
+            .any(|p| p.plugin == plugin && p.id == pane && p.takes_plugin_input_with(&features));
         if !focusable {
             // A pane whose plugin never declared `input` is not a focus target,
-            // exactly as focus navigation already skips it.
+            // exactly as focus navigation already skips it — and neither is one
+            // that declared a kernel keyboard, which is focused as the kernel's
+            // own pane instead (ADR-51).
             return;
         }
         self.focused_plugin_pane = Some((plugin.to_string(), pane.to_string()));
@@ -8351,26 +8353,29 @@ impl App {
     #[cfg(not(feature = "plugins"))]
     pub(crate) fn toggle_plugin_pane(&mut self) {}
 
-    /// The plugin pane that holds focus, or the first that could take it.
+    /// The plugin pane that holds `InputFocus::PluginPane`, or the first that
+    /// could take it.
     ///
     /// The remembered pane is **validated** on every read: a pane can vanish under
     /// the pointer (hidden, reloaded away, its plugin stopped), and a stale memory
     /// would otherwise send a key to a pane that is not on screen.
+    ///
+    /// A pane that declared one of thurbox's own keyboards is deliberately not a
+    /// candidate — [`Self::keyboard_pane`] is how that pane is found, and it is
+    /// focused as the kernel's own pane (ADR-51).
     #[cfg(feature = "plugins")]
     pub(crate) fn focusable_plugin_pane(&self) -> Option<&crate::plugin::PluginPane> {
         let features = self.features;
         if let Some((plugin, pane)) = &self.focused_plugin_pane {
-            if let Some(p) = self
-                .plugin_panes
-                .iter()
-                .find(|p| &p.plugin == plugin && &p.id == pane && p.is_focusable_with(&features))
-            {
+            if let Some(p) = self.plugin_panes.iter().find(|p| {
+                &p.plugin == plugin && &p.id == pane && p.takes_plugin_input_with(&features)
+            }) {
                 return Some(p);
             }
         }
         self.plugin_panes
             .iter()
-            .find(|p| p.is_focusable_with(&features))
+            .find(|p| p.takes_plugin_input_with(&features))
     }
 
     /// How many plugin panes the right column should seat.
@@ -8416,6 +8421,126 @@ impl App {
         self.plugin_panes
             .iter()
             .find(|p| p.is_shown(&features) && p.slot == slot)
+    }
+
+    /// The visible plugin pane that declared itself the pane for `context`
+    /// (ADR-51), if one has.
+    ///
+    /// With two claimants the **first in publication order** wins, exactly as a
+    /// seat resolves: the manifest already refuses two panes of *one* plugin
+    /// claiming a keyboard, and across plugins the host cannot arbitrate between
+    /// manifests written independently.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn keyboard_pane(
+        &self,
+        context: crate::session::KeyContext,
+    ) -> Option<&crate::plugin::PluginPane> {
+        let features = self.features;
+        self.plugin_panes
+            .iter()
+            .find(|p| p.is_shown(&features) && p.key_context == Some(context))
+    }
+
+    /// Whether a plugin pane is the pane for `context`, so the interface's pane of
+    /// that name is on screen even when the kernel's own occupant is not.
+    ///
+    /// This is what the focus paths ask, and it is deliberately **not**
+    /// [`Self::seat_taken`]: a pane may sit in a seat without being that pane (a
+    /// third-party pane in the left column is not the session list, and must not
+    /// inherit `d`), and a pane may declare a keyboard from the right-hand column,
+    /// where it has a region of its own rather than a seat.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn pane_keyboard_taken(&self, context: crate::session::KeyContext) -> bool {
+        self.keyboard_pane(context).is_some()
+    }
+
+    /// Without the plugin feature no pane can declare a keyboard, so every focus
+    /// path is gated exactly as it was before pane keyboards existed.
+    #[cfg(not(feature = "plugins"))]
+    pub(crate) fn pane_keyboard_taken(&self, _context: crate::session::KeyContext) -> bool {
+        false
+    }
+
+    /// The focus that carries `context`'s keyboard — the single table from a
+    /// kernel key context to the [`InputFocus`] its actions resolve under.
+    ///
+    /// `InputFocus::TaskList` means "the interface's task list holds the
+    /// keyboard"; it never meant "and `ui::tasks_panel` is painting it". So a
+    /// plugin pane that declared a keyboard is focused **as** the kernel's pane of
+    /// that name, which is what leaves `focus_key_context`, the central-pane
+    /// workspaces, the editor return paths and `Esc` correct by construction
+    /// (ADR-51).
+    /// Gated on the plugin host: nothing but a plugin pane ever asks which focus a
+    /// keyboard is delivered to, because the kernel's own panes *are* that focus.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn focus_for_keyboard(context: crate::session::KeyContext) -> Option<InputFocus> {
+        use crate::session::KeyContext;
+        match context {
+            KeyContext::SessionList => Some(InputFocus::SessionList),
+            KeyContext::Automations => Some(InputFocus::Automations),
+            KeyContext::Tasks => Some(InputFocus::TaskList),
+            KeyContext::FileViewer => Some(InputFocus::FileViewer),
+            // Neither scopes a pane, which is why a manifest cannot declare them
+            // (`KeyContext::pane_keyboards`). Answered rather than panicked so the
+            // table stays a total function.
+            KeyContext::Global | KeyContext::Terminal => None,
+        }
+    }
+
+    /// How the pane for `context` is drawn: focused, active, or neither.
+    ///
+    /// One rule per pane, in one place, because both occupants of that pane's
+    /// place ask it — the native renderer while it exists, and
+    /// `paint_plugin_pane` for a pane that declared the keyboard. Two copies of a
+    /// three-level rule is how a handed-over pane comes to look almost like the
+    /// pane it replaced.
+    pub(crate) fn pane_focus_level(
+        &self,
+        context: crate::session::KeyContext,
+    ) -> crate::ui::FocusLevel {
+        use crate::session::KeyContext;
+        use crate::ui::FocusLevel;
+        // The central pane shows an automation rather than a session here, so the
+        // session list reads as fully unfocused — no accent border and no
+        // selected-row highlight.
+        let in_automation_context = matches!(
+            self.focus,
+            InputFocus::Automations
+                | InputFocus::AutomationEditor
+                | InputFocus::AutomationRunHistory
+        );
+        match context {
+            KeyContext::SessionList => match self.focus {
+                InputFocus::SessionList => FocusLevel::Focused,
+                _ if in_automation_context => FocusLevel::Inactive,
+                _ => FocusLevel::Active,
+            },
+            // `Active` while the editor or the run history has the keyboard. The
+            // pane draws it exactly as `Inactive` today (its border matches only
+            // on `Focused`); kept because the distinction is real state the pane
+            // could use.
+            KeyContext::Automations => match self.focus {
+                InputFocus::Automations => FocusLevel::Focused,
+                InputFocus::AutomationEditor | InputFocus::AutomationRunHistory => {
+                    FocusLevel::Active
+                }
+                _ => FocusLevel::Inactive,
+            },
+            // While the central-pane task editor is focused the panel stays
+            // "active", so the row being edited is still marked.
+            KeyContext::Tasks => match self.focus {
+                InputFocus::TaskList => FocusLevel::Focused,
+                InputFocus::TaskEditor => FocusLevel::Active,
+                _ => FocusLevel::Inactive,
+            },
+            KeyContext::FileViewer => match self.focus {
+                InputFocus::FileViewer => FocusLevel::Focused,
+                _ => FocusLevel::Inactive,
+            },
+            // No pane, so no level. `Inactive` rather than a panic, for
+            // `focus_for_keyboard`'s reason.
+            KeyContext::Global | KeyContext::Terminal => FocusLevel::Inactive,
+        }
     }
 
     /// Whether a plugin pane has taken `slot`, so the kernel's own pane for that

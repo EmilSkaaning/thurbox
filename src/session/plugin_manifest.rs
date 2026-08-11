@@ -17,7 +17,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::keybindings::Action;
+use super::keybindings::{Action, KeyContext};
 use super::settings::FeatureFlag;
 use super::workspace_tree::RegionId;
 
@@ -521,6 +521,20 @@ pub struct PaneDecl {
     /// the pane — which is right for a pane that is nobody's reproduction.
     #[serde(default)]
     pub feature: Option<FeatureFlag>,
+    /// The kernel keyboard this pane **is the pane for** (ADR-51), if it declared
+    /// one.
+    ///
+    /// A statement of identity rather than a power: it does not give the plugin
+    /// keys, it says that while this pane holds focus thurbox resolves that
+    /// context's scoped actions and performs them against its own state, exactly
+    /// as it did for its own pane. So the keys stay rebindable in the F1 editor
+    /// and persisted to `keybindings.json`, and the plugin is never handed one.
+    ///
+    /// Validated against [`KeyContext::pane_keyboards`]. Absent — the case for
+    /// every pane that is nobody's reproduction — the pane is focusable only with
+    /// the `input` capability and answers only its own bindings (ADR-34).
+    #[serde(default)]
+    pub key_context: Option<KeyContext>,
 }
 
 /// serde default for [`PaneDecl::default_visible`] — a pane that says nothing
@@ -1012,6 +1026,31 @@ pub enum ManifestErrorKind {
         /// The second pane to declare it.
         pane: String,
     },
+    /// A pane declares a key context that scopes no pane's keyboard.
+    PaneKeyContext {
+        /// The pane declaring it.
+        pane: String,
+        /// The context it named.
+        context: KeyContext,
+    },
+    /// Two panes of one manifest declare the same kernel keyboard, so one
+    /// keypress would mean both.
+    DuplicateKeyContext {
+        /// The context declared twice.
+        context: KeyContext,
+        /// The second pane to declare it.
+        pane: String,
+    },
+    /// A keybinding is scoped to a pane that answers one of the kernel's own
+    /// keyboards, so one keypress would have two meanings in it.
+    KeybindingOnKernelKeyboard {
+        /// The offending binding.
+        binding: String,
+        /// The pane it named.
+        pane: String,
+        /// The keyboard that pane declared.
+        context: KeyContext,
+    },
     /// A keybinding names a pane the manifest does not declare, so it would be
     /// scoped to nothing.
     KeybindingUnknownPane {
@@ -1139,6 +1178,30 @@ impl fmt::Display for ManifestError {
                 f,
                 "pane `{pane}` binds `{action:?}`, which another pane of this manifest already \
                  binds — one key cannot mean two of a plugin's own panes"
+            ),
+            ManifestErrorKind::PaneKeyContext { pane, context } => write!(
+                f,
+                "pane `{pane}` declares the `{context:?}` keyboard, which scopes no pane's keys \
+                 ({})",
+                KeyContext::pane_keyboards()
+                    .iter()
+                    .map(|c| format!("{c:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            ManifestErrorKind::DuplicateKeyContext { context, pane } => write!(
+                f,
+                "pane `{pane}` declares the `{context:?}` keyboard, which another pane of this \
+                 manifest already declares — one keyboard belongs to one pane"
+            ),
+            ManifestErrorKind::KeybindingOnKernelKeyboard {
+                binding,
+                pane,
+                context,
+            } => write!(
+                f,
+                "keybinding `{binding}` is scoped to pane `{pane}`, which answers thurbox's \
+                 `{context:?}` keyboard — a pane cannot give two answers about one keypress"
             ),
             ManifestErrorKind::KeybindingUnknownPane { binding, pane } => write!(
                 f,
@@ -1293,6 +1356,31 @@ impl PluginManifest {
             }
             bound.push(action);
         }
+
+        // A declared keyboard is one of the kernel's *pane* keyboards and no
+        // other, and no two of this manifest's panes may claim the same one. Same
+        // shape as the toggle above, and for the same reason: a keypress whose
+        // meaning is undefined is worse than a manifest that will not load.
+        let mut keyboards: Vec<KeyContext> = Vec::new();
+        for pane in &self.panes {
+            let Some(context) = pane.key_context else {
+                continue;
+            };
+            if !KeyContext::pane_keyboards().contains(&context) {
+                return Err(ManifestErrorKind::PaneKeyContext {
+                    pane: pane.id.clone(),
+                    context,
+                });
+            }
+            if keyboards.contains(&context) {
+                return Err(ManifestErrorKind::DuplicateKeyContext {
+                    context,
+                    pane: pane.id.clone(),
+                });
+            }
+            keyboards.push(context);
+        }
+
         check_ids("command", self.commands.iter().map(|c| c.id.as_str()))?;
         check_ids("keybinding", self.keybindings.iter().map(|k| k.id.as_str()))?;
 
@@ -1307,10 +1395,22 @@ impl PluginManifest {
                     binding: binding.id.clone(),
                 });
             }
-            if !self.panes.iter().any(|p| p.id == binding.pane) {
+            let Some(pane) = self.panes.iter().find(|p| p.id == binding.pane) else {
                 return Err(ManifestErrorKind::KeybindingUnknownPane {
                     binding: binding.id.clone(),
                     pane: binding.pane.clone(),
+                });
+            };
+            // A pane answering one of thurbox's own keyboards may not also bind
+            // keys: the alternative is a delivery order, and a plugin that
+            // shadowed `d` in the tasks keyboard would do it silently, with the
+            // keybinding editor showing both and nothing saying which wins
+            // (ADR-51).
+            if let Some(context) = pane.key_context {
+                return Err(ManifestErrorKind::KeybindingOnKernelKeyboard {
+                    binding: binding.id.clone(),
+                    pane: binding.pane.clone(),
+                    context,
                 });
             }
             if let Some(chord) = &binding.chord {
@@ -2053,6 +2153,124 @@ mod tests {
         let m = parse(text).expect("both fields are optional");
         assert_eq!(m.panes[0].toggle_action, None);
         assert_eq!(m.panes[0].feature, None);
+        assert_eq!(
+            m.panes[0].key_context, None,
+            "a pane that says nothing is nobody's reproduction and answers no kernel keyboard"
+        );
+    }
+
+    /// A pane may declare itself the pane for one of the kernel's own keyboards,
+    /// and only for one that scopes a pane's keys (ADR-51).
+    #[test]
+    fn a_pane_may_declare_a_kernel_keyboard() {
+        let manifest = |context: &str| {
+            format!(
+                "name = \"demo\"\napi_version = 1\ncapabilities = [\"render\"]\n\
+                 [[panes]]\nid = \"board\"\nkey_context = \"{context}\"\n"
+            )
+        };
+        for context in KeyContext::pane_keyboards() {
+            let text = manifest(&format!("{context:?}"));
+            let m = parse(&text).unwrap_or_else(|e| panic!("`{context:?}` must parse: {e}"));
+            assert_eq!(m.panes[0].key_context, Some(*context));
+        }
+
+        // Not a context at all: serde closes the set and names the value.
+        let e = parse(&manifest("Telepathy")).expect_err("closed set");
+        assert!(
+            matches!(e.kind, ManifestErrorKind::Syntax(ref m) if m.contains("Telepathy")),
+            "error should name the unknown context, got {:?}",
+            e.kind
+        );
+
+        // Both refused contexts, each for its own reason: `Global` belongs to no
+        // pane, and `Terminal`'s keys are written to a PTY rather than dispatched.
+        for context in [KeyContext::Global, KeyContext::Terminal] {
+            let e = parse(&manifest(&format!("{context:?}"))).expect_err("scopes no pane");
+            assert_eq!(
+                e.kind,
+                ManifestErrorKind::PaneKeyContext {
+                    pane: "board".to_string(),
+                    context,
+                }
+            );
+            assert!(
+                e.to_string().contains("Tasks"),
+                "the error should list what is accepted: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_panes_may_not_declare_one_keyboard() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            capabilities = ["render"]
+            [[panes]]
+            id = "one"
+            key_context = "Tasks"
+            [[panes]]
+            id = "two"
+            key_context = "Tasks"
+        "#;
+        let e = parse(text).expect_err("one keyboard belongs to one pane");
+        assert_eq!(
+            e.kind,
+            ManifestErrorKind::DuplicateKeyContext {
+                context: KeyContext::Tasks,
+                pane: "two".to_string(),
+            }
+        );
+    }
+
+    /// A pane answering thurbox's keyboard may not also bind keys of its own: one
+    /// keypress, two meanings, and nothing on screen to say which won.
+    ///
+    /// The plugin-wide `input` capability is **not** what is refused — a plugin may
+    /// have an ordinary input pane beside an inheriting one, which the second half
+    /// of this test pins.
+    #[test]
+    fn a_pane_with_a_kernel_keyboard_may_not_bind_its_own_keys() {
+        let text = r#"
+            name = "demo"
+            api_version = 1
+            capabilities = ["render", "input"]
+            [[panes]]
+            id = "board"
+            key_context = "Tasks"
+            [[keybindings]]
+            id = "delete-row"
+            pane = "board"
+            chord = "d"
+        "#;
+        let e = parse(text).expect_err("two answers for one keypress");
+        assert_eq!(
+            e.kind,
+            ManifestErrorKind::KeybindingOnKernelKeyboard {
+                binding: "delete-row".to_string(),
+                pane: "board".to_string(),
+                context: KeyContext::Tasks,
+            }
+        );
+
+        let both = r#"
+            name = "demo"
+            api_version = 1
+            capabilities = ["render", "input"]
+            [[panes]]
+            id = "board"
+            key_context = "Tasks"
+            [[panes]]
+            id = "own"
+            [[keybindings]]
+            id = "delete-row"
+            pane = "own"
+            chord = "d"
+        "#;
+        let m = parse(both).expect("a binding on the plugin's *own* pane is fine");
+        assert_eq!(m.panes[0].key_context, Some(KeyContext::Tasks));
+        assert_eq!(m.keybindings[0].pane, "own");
     }
 
     #[test]

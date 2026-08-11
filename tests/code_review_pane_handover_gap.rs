@@ -11,6 +11,20 @@
 //! words: a verdict written in markdown is a fact about a build that expires without
 //! telling anyone.
 //!
+//! ## ADR-51's route does not reach this pane, and that is a finding
+//!
+//! Since ADR-51 a pane may declare that it **is** thurbox's pane for a key context,
+//! and the kernel then resolves that context's actions and performs them itself
+//! while the pane holds focus — which is how a pane keeps a keyboard whose effects a
+//! plugin could never be granted. Four panes can take that route.
+//!
+//! This one cannot, and [`the_reviews_keyboard_resolves_no_action`] is why: the
+//! review's keyboard is not in the keybinding system at all. There is no
+//! `KeyContext` for it and no `Action` to resolve, so there is nothing for a
+//! declaration to name. The route is a reason the ordering in ADR-45 stands rather
+//! than a shortcut past it: this pane's keys must become scoped actions **first**,
+//! and then it would have what the other four already have.
+//!
 //! **Three findings this gate exists to keep true**, and they are why this pane is
 //! the furthest from a handover rather than the closest:
 //!

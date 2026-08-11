@@ -565,6 +565,7 @@ impl App {
     /// Extracted so the plugin pane, which is one of those right-hand panels,
     /// can share it rather than the ring being restated per stop.
     fn session_ring(&self) -> Vec<InputFocus> {
+        use crate::session::KeyContext;
         use InputFocus::*;
 
         // Order mirrors the on-screen columns: central → tasks → files.
@@ -577,12 +578,17 @@ impl App {
         let central = if review { CodeReview } else { Terminal };
         // The session list is the ring's left-most stop only while
         // shown; hidden, the cycle is central ↔ right-side panels.
+        //
+        // Each stop is present when **either** occupant of that pane's place is on
+        // screen: the kernel's own flag, or a plugin pane that declared the pane's
+        // keyboard (ADR-51). Gating on the kernel's flag alone would make focus
+        // entry depend on which code draws the pane.
         let mut ring = vec![];
-        if self.show_session_list {
+        if self.show_session_list || self.pane_keyboard_taken(KeyContext::SessionList) {
             ring.push(SessionList);
         }
         ring.push(central);
-        if self.show_tasks_panel {
+        if self.show_tasks_panel || self.pane_keyboard_taken(KeyContext::Tasks) {
             ring.push(TaskList);
         }
         // While a review is open the file-viewer column shows the
@@ -591,7 +597,7 @@ impl App {
         // that panel is toggled on.
         if review {
             ring.push(ReviewFiles);
-        } else if self.show_file_viewer {
+        } else if self.show_file_viewer || self.pane_keyboard_taken(KeyContext::FileViewer) {
             ring.push(FileViewer);
         }
         // A plugin pane is a ring stop only when it can do something

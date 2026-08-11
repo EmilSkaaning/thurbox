@@ -438,6 +438,11 @@ impl PluginHost {
                     // `[features]` switch that gates it (ADR-47).
                     pane.toggle_action = p.toggle_action;
                     pane.feature = p.feature;
+                    // Manifest data too, and the same kind: the keyboard the
+                    // kernel dispatches while this pane holds focus (ADR-51).
+                    // Deliberately *not* gated on a capability — the plugin
+                    // receives no key from it, so there is nothing to grant.
+                    pane.key_context = p.key_context;
                     pane
                 })
             })
@@ -1406,6 +1411,40 @@ mod tests {
         assert!(!pv::panes_present(), "and stops being true when it stops");
 
         pv::clear_for_test();
+    }
+
+    /// A declared keyboard survives publication and needs no capability (ADR-51):
+    /// the plugin receives no key from it, so there is nothing to grant, and the
+    /// pane is focusable on the strength of the declaration alone.
+    #[test]
+    fn a_declared_keyboard_is_published_with_the_pane() {
+        use crate::session::settings::FeatureFlags;
+        use crate::session::KeyContext;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("kb");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("plugin.toml"),
+            "name = \"kb\"\napi_version = 1\ncapabilities = [\"render\"]\n             [[panes]]\nid = \"board\"\nkey_context = \"Tasks\"\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join(ENTRY_FILE_NAME),
+            "return { render = function() return { kind = \"divider\" } end }",
+        )
+        .unwrap();
+
+        let mut host = host_over(tmp.path());
+        host.start_all();
+        let panes = host.panes();
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].key_context, Some(KeyContext::Tasks));
+        assert!(
+            !panes[0].accepts_input,
+            "no `input` capability is declared, and none is needed"
+        );
+        assert!(panes[0].is_focusable_with(&FeatureFlags::default()));
     }
 
     #[test]

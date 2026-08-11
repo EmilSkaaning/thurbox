@@ -9,7 +9,7 @@
 //! Only a pane that has *never* rendered shows a loading state, and only one
 //! whose very first render failed shows a bare error.
 
-use crate::session::keybindings::Action;
+use crate::session::keybindings::{Action, KeyContext};
 use crate::session::plugin_manifest::PaneSlot;
 use crate::session::settings::{FeatureFlag, FeatureFlags};
 use crate::session::view_tree::ViewNode;
@@ -46,6 +46,14 @@ pub struct PluginPane {
     /// pane is *available* and the stored choice answers whether the user wants
     /// it, so a switch going off and back on cannot erase a choice.
     pub feature: Option<FeatureFlag>,
+    /// The kernel keyboard this pane is the pane for, if the manifest declared one
+    /// (ADR-51).
+    ///
+    /// Manifest data the kernel acts on, like [`Self::toggle_action`]: while the
+    /// pane holds focus thurbox resolves that context's scoped actions and
+    /// performs them itself. The plugin gains no key — which is why a pane may
+    /// declare this and be driven without the `input` capability.
+    pub key_context: Option<KeyContext>,
     /// What it is currently showing.
     pub presentation: PanePresentation,
 }
@@ -62,6 +70,7 @@ impl PluginPane {
             accepts_input: false,
             toggle_action: None,
             feature: None,
+            key_context: None,
             presentation: PanePresentation::Loading,
         }
     }
@@ -81,14 +90,33 @@ impl PluginPane {
         self.visible && self.is_enabled(features)
     }
 
-    /// Whether this pane can take focus: it must be on screen, and its plugin
-    /// must have asked for input.
+    /// Whether this pane can take focus: it must be on screen, and it must be
+    /// able to receive keys.
+    ///
+    /// There are exactly two ways it can (ADR-51): its plugin asked for `input`,
+    /// so the host delivers keys to it; or the pane declared one of thurbox's own
+    /// pane keyboards, so the *kernel* dispatches that context's actions while it
+    /// holds focus. A pane with neither is visible and unfocusable, so cycling
+    /// never lands somewhere that ignores every key.
     ///
     /// Takes the flags rather than sitting beside a flag-free variant: two
     /// predicates for one question is how a gate gets forgotten at one of its
     /// call sites.
     pub fn is_focusable_with(&self, features: &FeatureFlags) -> bool {
-        self.is_shown(features) && self.accepts_input
+        self.is_shown(features) && (self.accepts_input || self.key_context.is_some())
+    }
+
+    /// Whether this pane holds focus **as a plugin pane** — the focus the host
+    /// delivers raw keys and clicks to.
+    ///
+    /// A pane that declared one of thurbox's own keyboards is focusable and is
+    /// *not* one of these: it is focused as the kernel's pane of that name
+    /// (ADR-51), and landing on it as a plugin pane would silence the very
+    /// keyboard it declared. The manifest guarantees the two are exclusive — a
+    /// binding on such a pane is a manifest error — so this is the reading, not a
+    /// tie-break.
+    pub fn takes_plugin_input_with(&self, features: &FeatureFlags) -> bool {
+        self.is_focusable_with(features) && self.key_context.is_none()
     }
 
     /// Apply a render result.
@@ -203,6 +231,28 @@ mod tests {
         let mut p = PluginPane::loading("demo", "board", "Board", PaneSlot::Right, false);
         p.accepts_input = true;
         assert!(!p.is_shown(&FeatureFlags::default()));
+        assert!(!p.is_focusable_with(&FeatureFlags::default()));
+    }
+
+    /// A pane that declared one of thurbox's own keyboards is focusable **without**
+    /// the input capability: the kernel dispatches that context's actions, so the
+    /// pane can be driven without the plugin ever holding a key (ADR-51).
+    #[test]
+    fn a_declared_keyboard_makes_a_pane_focusable_without_input() {
+        let mut p = pane();
+        assert!(
+            !p.is_focusable_with(&FeatureFlags::default()),
+            "a pane that can receive nothing is visible and unfocusable"
+        );
+        p.key_context = Some(KeyContext::Tasks);
+        assert!(p.is_focusable_with(&FeatureFlags::default()));
+        assert!(
+            !p.accepts_input,
+            "and it holds no input capability — the keys are the kernel's"
+        );
+        // Visibility still decides, as it does for an input pane: a hidden pane is
+        // not somewhere focus may land.
+        p.visible = false;
         assert!(!p.is_focusable_with(&FeatureFlags::default()));
     }
 

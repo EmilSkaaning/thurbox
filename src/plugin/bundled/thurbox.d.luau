@@ -300,9 +300,16 @@ export type AutomationEntry = {
 -- pane's focus, so a per-row flag would be one fact in n + 1 places — and a
 -- publication could then highlight one row while scrolling to another.
 --
--- `focused` is whether **thurbox's** automations pane holds focus. It is not a fact
--- about your pane: the host tells a pane nothing about its own focus, so a pane
--- with keys knows only that a key arrived, which only a focused pane receives.
+-- `focused` is whether **the interface's** automations pane holds focus. Read it
+-- twice, because it has two readings and which one applies is your manifest's
+-- choice:
+--
+--  * a pane that declares no `key_context` is a *reproduction*, and this is a fact
+--    about thurbox's own pane rather than about yours — the host tells such a pane
+--    nothing about its own focus, so it knows only that a key arrived, which only a
+--    focused pane receives;
+--  * a pane that declares `key_context = "Automations"` **is** that pane, so this is
+--    true exactly while your pane holds focus.
 export type AutomationList = {
     entries: { AutomationEntry },
     cursor: number?,
@@ -335,9 +342,11 @@ export type TaskEntry = {
     matchPositions: { number },
 }
 
--- `focused` is whether the task pane holds focus, which changes what an empty
--- list should say: naming the key that adds a task is only honest when the pane
--- can receive it.
+-- `focused` is whether the interface's task pane holds focus, which changes what an
+-- empty list should say: naming the key that adds a task is only honest when the
+-- pane can receive it. As with `AutomationList`, it describes *thurbox's* pane for a
+-- reproduction and **your** pane once you declare `key_context = "Tasks"` — the two
+-- coincide, because then there is one task pane and it is yours.
 --
 -- `cursor` is the 1-based row the cursor is on — hand it straight to `ui.list`'s
 -- second argument and your pane scrolls. It is **not** the same fact as a row's

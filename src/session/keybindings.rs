@@ -123,7 +123,12 @@ pub enum Action {
 /// any context; scoped actions fire only while their pane is focused, so the
 /// same chord can mean different things in different panes (and stays free for
 /// the terminal to forward to the PTY).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Serialized with the same PascalCase spelling as [`Action`], because a plugin
+/// manifest names one of these to say which of thurbox's panes it *is*
+/// (ADR-51) — and a concept a user meets in two files should not have two
+/// spellings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum KeyContext {
     Global,
     SessionList,
@@ -131,6 +136,28 @@ pub enum KeyContext {
     Tasks,
     FileViewer,
     Terminal,
+}
+
+impl KeyContext {
+    /// The contexts that scope a **pane's** keyboard, and which a plugin pane may
+    /// therefore declare itself the pane for (ADR-51).
+    ///
+    /// Two exclusions, both because "the kernel dispatches this context's actions
+    /// against its own state while the pane holds focus" is false for them:
+    ///
+    /// - [`KeyContext::Global`] belongs to no pane — its actions fire wherever
+    ///   focus is, so claiming it would say nothing;
+    /// - [`KeyContext::Terminal`]'s keys are translated to bytes and written to a
+    ///   PTY (`agent::input::key_to_bytes`), so a pane claiming it would sit there
+    ///   receiving nothing, with no error to explain it.
+    pub fn pane_keyboards() -> &'static [KeyContext] {
+        &[
+            KeyContext::SessionList,
+            KeyContext::Automations,
+            KeyContext::Tasks,
+            KeyContext::FileViewer,
+        ]
+    }
 }
 
 impl Action {
@@ -1644,6 +1671,43 @@ mod tests {
         let mut unique = Action::pane_toggles().to_vec();
         unique.dedup();
         assert_eq!(unique.len(), Action::pane_toggles().len());
+    }
+
+    /// Every pane keyboard scopes at least one action, and the two excluded
+    /// contexts are excluded for their stated reasons.
+    ///
+    /// The first half is what makes the declaration worth having: a context no
+    /// action is scoped to would be a pane that declared a keyboard and received
+    /// nothing, which is precisely the failure `Terminal` is kept out for.
+    #[test]
+    fn every_pane_keyboard_scopes_an_action() {
+        for ctx in KeyContext::pane_keyboards() {
+            assert!(
+                Action::all().iter().any(|a| a.context() == *ctx),
+                "{ctx:?} scopes no action, so a pane declaring it would receive nothing"
+            );
+        }
+        assert!(
+            !KeyContext::pane_keyboards().contains(&KeyContext::Global),
+            "the global context belongs to no pane"
+        );
+        assert!(
+            !KeyContext::pane_keyboards().contains(&KeyContext::Terminal),
+            "the terminal's keys are forwarded to a process, not dispatched"
+        );
+    }
+
+    /// The wire spelling a manifest uses is the enum's own name, like `Action`'s.
+    #[test]
+    fn a_key_context_serializes_as_its_name() {
+        assert_eq!(
+            serde_json::to_string(&KeyContext::Tasks).expect("serialize"),
+            "\"Tasks\""
+        );
+        assert_eq!(
+            serde_json::from_str::<KeyContext>("\"FileViewer\"").expect("parse"),
+            KeyContext::FileViewer
+        );
     }
 
     #[test]

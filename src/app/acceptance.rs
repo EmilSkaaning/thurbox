@@ -307,6 +307,16 @@ impl Harness {
     /// Draw the current state to the headless backend and return the visible
     /// glyphs as newline-separated rows (one string per terminal line), the
     /// shape both `insta` snapshots and substring assertions read.
+    /// The rendered buffer with its styles, for a claim about *appearance* rather
+    /// than about text — [`Harness::render`] keeps only symbols, so a border that
+    /// changed colour and nothing else is invisible to it.
+    #[cfg(feature = "plugins")]
+    fn render_buffer(&mut self) -> ratatui::buffer::Buffer {
+        let app = &mut self.app;
+        self.terminal.draw(|f| app.view(f)).unwrap();
+        self.terminal.backend().buffer().clone()
+    }
+
     fn render(&mut self) -> String {
         let app = &mut self.app;
         self.terminal.draw(|f| app.view(f)).unwrap();
@@ -4512,6 +4522,162 @@ fn focus_ring_includes_a_plugin_pane_only_when_it_takes_input() {
     interactive.accepts_input = true;
     h.app.set_plugin_panes(vec![interactive]);
     assert!(h.app.focusable_plugin_pane().is_some());
+}
+
+/// A pane that declared one of thurbox's own keyboards is driven by the **kernel**
+/// (ADR-51): it is focusable with no `input` capability, it is focused as the
+/// interface's own pane of that name, and every scoped action of that context fires
+/// against the kernel's state exactly as it did for the native pane.
+///
+/// Driven through the real key path rather than by calling the helpers, because the
+/// claim is about what a keypress does — the point of the route is that a plugin
+/// needs no view write to be driven, and a test that called `move_task_selection`
+/// would prove nothing about it.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_pane_declaring_the_tasks_keyboard_is_driven_by_the_kernel() {
+    use crate::session::plugin_manifest::PaneSlot;
+    use crate::session::{KeyContext, TaskStatus};
+
+    let mut h = Harness::standard(1);
+    for title in ["write it", "ship it"] {
+        h.app
+            .db
+            .create_task(&crate::storage::tasks::NewTask::local(title))
+            .unwrap();
+    }
+    h.app.refresh_tasks();
+
+    let mut pane =
+        crate::plugin::PluginPane::loading("board", "tasks", "Tasks", PaneSlot::Right, true);
+    pane.key_context = Some(KeyContext::Tasks);
+    h.app.set_plugin_panes(vec![pane]);
+
+    // Focusable without `input`, and *not* as a plugin pane: landing there as
+    // `PluginPane` would silence the keyboard it declared.
+    assert!(
+        h.app.focusable_plugin_pane().is_none(),
+        "a pane that declared a keyboard is not a `PluginPane` focus target"
+    );
+    assert!(h.app.pane_keyboard_taken(KeyContext::Tasks));
+
+    // The kernel's own tasks panel is not shown, so the only tasks pane on screen
+    // is the plugin's — and the focus cycle still reaches it.
+    assert!(!h.app.show_tasks_panel);
+    h.ctrl('l');
+    while !matches!(h.app.focus, InputFocus::TaskList) {
+        h.ctrl('l');
+        assert_ne!(
+            h.app.focus,
+            InputFocus::SessionList,
+            "the ring came all the way round without a tasks stop"
+        );
+    }
+
+    // `j` is `KeyContext::Tasks`'s scoped action, and it moves the *kernel's*
+    // cursor — the row the plugin then draws from the published section.
+    assert_eq!(h.app.task_ui.task_panel_index, 0);
+    h.key(KeyCode::Char('j'), KeyModifiers::NONE);
+    assert_eq!(h.app.task_ui.task_panel_index, 1, "`j` moved the cursor");
+
+    // And the published section reports the pane focused, which is what makes the
+    // plugin's copy draw the cursor and its empty state name the key that adds a
+    // task.
+    let published = h.app.build_pane_context().tasks;
+    assert!(published.focused);
+    assert_eq!(published.cursor, Some(1));
+    assert!(published.entries[1].selected);
+
+    // `Space` cycles the selected task's status: a record write the *kernel*
+    // performs, so the pane needed no capability for it.
+    let before = h.app.task_ui.cached_tasks[1].status;
+    assert_eq!(before, TaskStatus::Todo);
+    h.key(KeyCode::Char(' '), KeyModifiers::NONE);
+    assert_ne!(
+        h.app.task_ui.cached_tasks[1].status, before,
+        "`Space` cycled the status of the row the pane drew a cursor on"
+    );
+
+    // A click on one of the pane's rows is the kernel's own row selection, so it
+    // means in the plugin's pane what it meant in the native one. The rows have to
+    // be *painted* for a hitbox to exist, so the pane is given the tree it would
+    // have rendered.
+    let rendered = crate::session::view_tree::ViewNode::selectable_list(
+        vec![
+            crate::session::view_tree::ViewNode::text("☐ write it"),
+            crate::session::view_tree::ViewNode::text("◐ ship it"),
+        ],
+        Some(1),
+    );
+    let mut painted = h.app.plugin_panes[0].clone();
+    painted.apply(Ok(rendered));
+    h.app.set_plugin_panes(vec![painted]);
+    h.render();
+    let row = h
+        .app
+        .click_targets
+        .iter()
+        .find(|t| matches!(t.action, ClickAction::SelectTask(0)))
+        .map(|t| t.rect)
+        .expect("the pane's first row records the kernel's row action");
+    assert!(
+        !h.app
+            .click_targets
+            .iter()
+            .any(|t| matches!(t.action, ClickAction::PluginPaneRow { .. })),
+        "nothing about this pane is delivered to its plugin"
+    );
+    h.app.handle_mouse_click(row.x, row.y, KeyModifiers::NONE);
+    assert_eq!(
+        h.app.task_ui.task_panel_index, 0,
+        "the click selected row 1"
+    );
+}
+
+/// A focusable plugin pane's frame shows whether it holds focus (ADR-51).
+///
+/// Every pane was painted `FocusLevel::Inactive` before, so a pane taking keys
+/// looked exactly like one that could not. Asserted on the painted **cells** rather
+/// than on the level, because the level is an argument now and a test that read it
+/// back would pass for a painter that ignored it: what a user sees is the border's
+/// colour, so that is what is compared.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_focused_plugin_pane_draws_a_focused_border() {
+    use crate::session::plugin_manifest::PaneSlot;
+
+    let mut h = Harness::standard(1);
+    let mut pane =
+        crate::plugin::PluginPane::loading("demo", "board", "Demo", PaneSlot::Right, true);
+    pane.accepts_input = true;
+    pane.apply(Ok(crate::session::view_tree::ViewNode::list(vec![
+        crate::session::view_tree::ViewNode::text("a row"),
+    ])));
+    h.app.set_plugin_panes(vec![pane]);
+
+    let unfocused = h.render_buffer();
+    // The pane's own rect, read off the registry the paint just filled, so the cell
+    // compared below is this pane's border and not some neighbour's.
+    let rect = h
+        .app
+        .click_targets
+        .iter()
+        .find_map(|t| match &t.action {
+            ClickAction::PluginPaneRow { row: None, .. } => Some(t.rect),
+            _ => None,
+        })
+        .expect("the pane records its whole rect");
+
+    h.app.focus_plugin_pane("demo", "board");
+    assert_eq!(h.app.focus, InputFocus::PluginPane);
+    let focused = h.render_buffer();
+
+    let corner = (rect.x, rect.y);
+    assert_ne!(
+        unfocused[corner].fg, focused[corner].fg,
+        "a focused pane's border must not be drawn like an unfocused one, or a user cannot see \
+         where their keys are going"
+    );
 }
 
 /// A hidden pane is never focusable, however its plugin is declared.

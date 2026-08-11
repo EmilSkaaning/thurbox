@@ -10,6 +10,24 @@
 //! words: a verdict written in markdown is a fact about a build that expires
 //! without telling anyone.
 //!
+//! ## Which route this gate measures, since ADR-51 there are two
+//!
+//! Every row below is about a pane whose **keys are the plugin's**: `input`, a
+//! binding per chord (ADR-34), and a capability per effect — which for this pane
+//! would mean a filesystem read and a process launch, the two grants ADR-39 refused.
+//! Each row is still a true statement about that route; nothing here has been
+//! granted.
+//!
+//! ADR-51 added a second: a pane may declare that it **is** thurbox's file viewer,
+//! and the kernel then resolves `KeyContext::FileViewer` and performs those actions
+//! itself while the pane holds focus. On that route the two dangerous grants are
+//! not needed — the kernel reads the directory and launches the editor, as it always
+//! did — so a blocked row here says "this pane's keys cannot be ported **to a
+//! plugin**", never "this pane cannot be handed over". What the second route leaves
+//! untouched is the last two rows and the structural fact below: the search bar is
+//! still drawn outside any pane's tree, and the module a handover deletes is still
+//! this pane's model.
+//!
 //! **What is different about this pane**, and why it needed its own gate rather
 //! than a line in the tasks pane's (`tests/tasks_pane_input_gap.rs`): the tasks
 //! pane had two keys that needed no new host power and failed for a second reason.

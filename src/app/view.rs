@@ -42,6 +42,57 @@ struct CentralTabCell {
     active: bool,
 }
 
+/// Where a plugin pane's clicks are recorded to.
+///
+/// Three answers rather than a `bool`, because a pane that declared one of
+/// thurbox's own keyboards is clickable **and** delivers nothing to its plugin: a
+/// click on its row is the kernel's own row selection, exactly as it was in the
+/// pane it replaced (ADR-51).
+#[cfg(feature = "plugins")]
+enum PaneClicks {
+    /// Nothing is recorded: the pane can receive neither a key nor a click, so a
+    /// target would only swallow one.
+    None,
+    /// Delivered to the plugin, addressed by pane and row (ADR-36).
+    ToPlugin,
+    /// Handled by the kernel, as the pane this *is*.
+    ToKernel {
+        /// The row action, over a zero-based index into the kernel's own list.
+        row: fn(usize) -> ClickAction,
+        /// The focus a click away from the rows lands on.
+        focus: InputFocus,
+    },
+}
+
+/// Resolve a pane's click routing from what it declared.
+///
+/// A free function because it needs nothing of `App`: what a click on a pane means
+/// is a property of the pane's declarations. A declared keyboard whose context has
+/// no row action or no focus records nothing rather than guessing — both tables are
+/// total, so that case is unreachable today and stays honest if a context is added.
+#[cfg(feature = "plugins")]
+fn pane_clicks(pane: &crate::plugin::PluginPane) -> PaneClicks {
+    use crate::session::KeyContext;
+    if let Some(context) = pane.key_context {
+        let row: Option<fn(usize) -> ClickAction> = match context {
+            KeyContext::SessionList => Some(ClickAction::SelectSession),
+            KeyContext::Automations => Some(ClickAction::SelectAutomation),
+            KeyContext::Tasks => Some(ClickAction::SelectTask),
+            KeyContext::FileViewer => Some(ClickAction::SelectFileRow),
+            KeyContext::Global | KeyContext::Terminal => None,
+        };
+        return match (row, App::focus_for_keyboard(context)) {
+            (Some(row), Some(focus)) => PaneClicks::ToKernel { row, focus },
+            _ => PaneClicks::None,
+        };
+    }
+    if pane.accepts_input {
+        PaneClicks::ToPlugin
+    } else {
+        PaneClicks::None
+    }
+}
+
 /// Cells occupied by the padded chevron segment (` ◀ `) of the session-list
 /// collapse toggle's label. The chevron is styled accent and anything past it
 /// (the ` F9 ` hint) muted, so both the label builder and the painter must agree
@@ -375,23 +426,18 @@ impl App {
             self.active_index,
         );
 
-        use crate::ui::FocusLevel;
         let in_automation_context = matches!(
             self.focus,
             InputFocus::Automations
                 | InputFocus::AutomationEditor
                 | InputFocus::AutomationRunHistory
         );
-        let list_focus = match self.focus {
-            InputFocus::SessionList => FocusLevel::Focused,
-            // In the automations context the central pane shows the
-            // automation, not a session — so the session list reads as fully
-            // unfocused (no accent border, no selected-row highlight; see
-            // `show_selection`).
-            _ if in_automation_context => FocusLevel::Inactive,
-            InputFocus::Terminal | InputFocus::FileViewer => FocusLevel::Active,
-            _ => FocusLevel::Active,
-        };
+        // One rule per pane, in `App::pane_focus_level`, because a plugin pane that
+        // declared this keyboard is drawn by the same rule (ADR-51). It is also
+        // where the automations-context case is explained: the central pane shows
+        // an automation rather than a session, so the list reads as fully unfocused
+        // (no accent border, no selected-row highlight — see `show_selection`).
+        let list_focus = self.pane_focus_level(crate::session::KeyContext::SessionList);
         // Suppress the active-session row highlight while the automations
         // context is active — the active session is irrelevant there.
         let show_selection = !in_automation_context;
@@ -461,21 +507,12 @@ impl App {
                 }
             })
             .collect();
-        let focus = match self.focus {
-            InputFocus::Automations => crate::ui::FocusLevel::Focused,
-            // Editing / browsing history in the central pane reports `Active`,
-            // which this pane currently draws exactly as `Inactive`: its border
-            // matches only on `Focused`, and `resolve_rows` marks the cursor's row
-            // only on `Focused` or a search preview. Kept because the distinction
-            // is real state the pane could use (the row being worked on is a
-            // candidate for a marker), and stated because the previous comment
-            // claimed the row "stays marked" — it does not, and the published
-            // snapshot mirrors what is drawn rather than what was claimed.
-            InputFocus::AutomationEditor | InputFocus::AutomationRunHistory => {
-                crate::ui::FocusLevel::Active
-            }
-            _ => crate::ui::FocusLevel::Inactive,
-        };
+        // Editing / browsing history in the central pane reports `Active`, which
+        // this pane currently draws exactly as `Inactive`: its border matches only
+        // on `Focused`, and `resolve_rows` marks the cursor's row only on
+        // `Focused` or a search preview. Kept because the distinction is real state
+        // the pane could use (the row being worked on is a candidate for a marker).
+        let focus = self.pane_focus_level(crate::session::KeyContext::Automations);
         let selected = self
             .automation_ui
             .automation_panel_index
@@ -520,9 +557,10 @@ impl App {
     fn render_plugin_panes(&mut self, frame: &mut Frame, areas: &layout::PanelAreas) {
         // What each pane painted, collected while `self` is borrowed immutably and
         // recorded afterwards — the click registry needs `&mut self`, and a pane's
-        // hitboxes have to come from the paint that produced them. The `bool` is
-        // whether the pane can be clicked at all; see the recording loop below.
-        let mut painted: Vec<(String, String, Rect, bool, Vec<crate::ui::RowHitbox>)> = Vec::new();
+        // hitboxes have to come from the paint that produced them. The routing is
+        // resolved with the paint for the same reason; see the recording loop.
+        let mut painted: Vec<(String, String, Rect, PaneClicks, Vec<crate::ui::RowHitbox>)> =
+            Vec::new();
 
         // Seats first, in the order the native panes are drawn in. Each holds one
         // pane, so a second claimant is simply not placed.
@@ -535,66 +573,97 @@ impl App {
             let (Some(pane), Some(rect)) = (self.plugin_seat(slot), rect) else {
                 continue;
             };
-            let rows = Self::paint_plugin_pane(frame, pane, rect, &self.motion);
-            painted.push((
-                pane.plugin.clone(),
-                pane.id.clone(),
-                rect,
-                pane.accepts_input,
-                rows,
-            ));
+            let focus = self.plugin_pane_focus_level(pane);
+            let clicks = pane_clicks(pane);
+            let rows = Self::paint_plugin_pane(frame, pane, rect, &self.motion, focus);
+            painted.push((pane.plugin.clone(), pane.id.clone(), rect, clicks, rows));
         }
 
         let features = self.features;
-        let column = self
+        let column: Vec<&crate::plugin::PluginPane> = self
             .plugin_panes
             .iter()
-            .filter(|p| p.is_shown(&features) && p.slot == PaneSlot::Right);
-        for (pane, &rect) in column.zip(&areas.plugin_panes) {
-            let rows = Self::paint_plugin_pane(frame, pane, rect, &self.motion);
-            painted.push((
-                pane.plugin.clone(),
-                pane.id.clone(),
-                rect,
-                pane.accepts_input,
-                rows,
-            ));
+            .filter(|p| p.is_shown(&features) && p.slot == PaneSlot::Right)
+            .collect();
+        for (pane, &rect) in column.into_iter().zip(&areas.plugin_panes) {
+            let focus = self.plugin_pane_focus_level(pane);
+            let clicks = pane_clicks(pane);
+            let rows = Self::paint_plugin_pane(frame, pane, rect, &self.motion, focus);
+            painted.push((pane.plugin.clone(), pane.id.clone(), rect, clicks, rows));
         }
 
         // Rows first, then the pane's whole rect — the registry's first match
         // wins, so an on-row click reports its row and a click anywhere else in
         // the pane only focuses it.
         //
-        // A pane whose plugin never declared `input` records **nothing**. Both
-        // halves of the target are already no-ops for such a pane —
-        // `focus_plugin_pane` refuses it and `offer_click_to_plugin` reads the
-        // *focused* pane — so its only effect was to consume the click, and the
-        // registry is hit-tested before `handle_mouse_click`'s pane fallback. That
-        // fallback is what arms drag-select over the info panel's column, so
-        // recording a target there would have silently ended text selection in the
-        // one pane whose values a user copies out (ADR-50).
-        for (plugin, pane, area, clickable, rows) in painted {
-            if !clickable {
-                continue;
+        // A pane that can receive neither a plugin's keys nor a kernel keyboard
+        // records **nothing**. Both halves of the plugin target are already no-ops
+        // for such a pane — `focus_plugin_pane` refuses it and
+        // `offer_click_to_plugin` reads the *focused* pane — so its only effect was
+        // to consume the click, and the registry is hit-tested before
+        // `handle_mouse_click`'s pane fallback. That fallback is what arms
+        // drag-select over the info panel's column, so recording a target there
+        // would have silently ended text selection in the one pane whose values a
+        // user copies out (ADR-50).
+        for (plugin, pane, area, clicks, rows) in painted {
+            match clicks {
+                PaneClicks::None => continue,
+                // The pane *is* one of thurbox's own, so a click means there what
+                // it meant in the kernel's pane: the row action, then the focus
+                // (ADR-51). Nothing reaches the plugin, which is why such a pane's
+                // rows are clickable without the `input` capability. The hitbox
+                // index is one-based (`ui.list`'s numbering, which a plugin's
+                // cursor also speaks) and the kernel's row actions are zero-based.
+                PaneClicks::ToKernel { row, focus } => {
+                    for hit in rows {
+                        self.record_click(hit.rect, row(hit.index.saturating_sub(1)));
+                    }
+                    self.record_click(area, ClickAction::FocusPane(focus));
+                }
+                PaneClicks::ToPlugin => {
+                    for hit in rows {
+                        self.record_click(
+                            hit.rect,
+                            ClickAction::PluginPaneRow {
+                                plugin: plugin.clone(),
+                                pane: pane.clone(),
+                                row: Some(hit.index),
+                            },
+                        );
+                    }
+                    self.record_click(
+                        area,
+                        ClickAction::PluginPaneRow {
+                            plugin,
+                            pane,
+                            row: None,
+                        },
+                    );
+                }
             }
-            for hit in rows {
-                self.record_click(
-                    hit.rect,
-                    ClickAction::PluginPaneRow {
-                        plugin: plugin.clone(),
-                        pane: pane.clone(),
-                        row: Some(hit.index),
-                    },
-                );
-            }
-            self.record_click(
-                area,
-                ClickAction::PluginPaneRow {
-                    plugin,
-                    pane,
-                    row: None,
-                },
-            );
+        }
+    }
+
+    /// How a plugin pane's frame is drawn: focused, active, or neither.
+    ///
+    /// A pane that declared one of thurbox's own keyboards is drawn by that pane's
+    /// own rule, so a handed-over pane's border behaves exactly as the native one's
+    /// did. Any other focusable pane is focused when it is the pane holding
+    /// `InputFocus::PluginPane`; a pane that can receive nothing is never focused.
+    #[cfg(feature = "plugins")]
+    fn plugin_pane_focus_level(&self, pane: &crate::plugin::PluginPane) -> crate::ui::FocusLevel {
+        use crate::ui::FocusLevel;
+        if let Some(context) = pane.key_context {
+            return self.pane_focus_level(context);
+        }
+        let holds_focus = self.focus == InputFocus::PluginPane
+            && self
+                .focusable_plugin_pane()
+                .is_some_and(|p| p.plugin == pane.plugin && p.id == pane.id);
+        if holds_focus {
+            FocusLevel::Focused
+        } else {
+            FocusLevel::Inactive
         }
     }
 
@@ -610,8 +679,9 @@ impl App {
         pane: &crate::plugin::PluginPane,
         rect: Rect,
         motion: &motion_state::MotionState,
+        focus: crate::ui::FocusLevel,
     ) -> Vec<crate::ui::RowHitbox> {
-        use crate::ui::{focus_block, FocusLevel};
+        use crate::ui::focus_block;
 
         // An error is shown in the title rather than over the content, so a
         // failing render keeps the last good tree readable underneath it.
@@ -619,7 +689,12 @@ impl App {
             Some(_) => format!(" {} (error) ", pane.title),
             None => format!(" {} ", pane.title),
         };
-        let block = focus_block(&title, FocusLevel::Inactive);
+        // Resolved by the caller from the focus the *kernel* owns: a plugin is told
+        // nothing about its own focus, and a frame is the host's. Every pane was
+        // painted `Inactive` before ADR-51 — invisible while every pane was a hidden
+        // copy, and wrong for a pane that is the interface's task list, whose border
+        // is how a user sees where `j` is going.
+        let block = focus_block(&title, focus);
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
 
@@ -677,13 +752,7 @@ impl App {
             return;
         };
         let entries = self.task_pane_entries();
-        let focus = match self.focus {
-            InputFocus::TaskList => crate::ui::FocusLevel::Focused,
-            // While the central-pane editor is focused, keep the panel "active"
-            // so the row being edited stays marked (like the automations pane).
-            InputFocus::TaskEditor => crate::ui::FocusLevel::Active,
-            _ => crate::ui::FocusLevel::Inactive,
-        };
+        let focus = self.pane_focus_level(crate::session::KeyContext::Tasks);
         let preview_selected =
             self.global_search_preview_kind() == Some(crate::app::search::SearchKind::Task);
         let rows = tasks_panel::render_tasks_panel(
@@ -760,10 +829,7 @@ impl App {
         } else {
             self.file_viewer.clear();
         }
-        let fv_focus = match self.focus {
-            InputFocus::FileViewer => crate::ui::FocusLevel::Focused,
-            _ => crate::ui::FocusLevel::Inactive,
-        };
+        let fv_focus = self.pane_focus_level(crate::session::KeyContext::FileViewer);
         let (geom, rows) =
             file_viewer::render_file_viewer(frame, fv_area, &self.file_viewer, fv_focus);
         self.record_scrollbar(geom, ScrollTarget::FileViewer);

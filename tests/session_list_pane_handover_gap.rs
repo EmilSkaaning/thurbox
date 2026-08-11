@@ -13,6 +13,21 @@
 //! true the moment someone adds a view write for an unrelated reason, and nothing
 //! would say so.
 //!
+//! ## Which route this gate measures, since ADR-51 there are two
+//!
+//! Every key row below is about a pane whose **keys are the plugin's** — `input`
+//! plus pane-addressed bindings (ADR-34), acting through granted capabilities. That
+//! is the only route that existed when they were written, and the bundled
+//! `session-list` plugin declares neither.
+//!
+//! ADR-51 added a second: a pane may declare that it **is** thurbox's pane for a key
+//! context, and the kernel then resolves that context's actions and performs them
+//! itself while the pane holds focus. On that route the three key rows do not apply
+//! — the kernel moves the active session, as it always did — which the first row now
+//! says. What the second route does **not** touch is the rest of this table: the
+//! module that is also the kernel's model, and the three drawing gaps. Those are
+//! what a handover of this pane still costs.
+//!
 //! **The finding this gate exists to keep true** is [`the_panes_scoped_keys_stop_
 //! resolving_when_a_plugin_pane_holds_focus`], because it is the one the spike
 //! could not have seen. `docs/SPIKE-SESSION-LIST.md` measured whether the pane
@@ -95,12 +110,16 @@ const BLOCKERS: &[Blocker] = &[
         id: "scoped-keys-silenced-by-the-handover",
         needs: "the pane's own keyboard — all six `KeyContext::SessionList` actions (next, \
                 previous, open, move down, move up, sort A→Z), rebindable in the F1 editor",
-        stands: "a handed-over pane is focused as `InputFocus::PluginPane`, and \
-                 `App::focus_key_context` names no arm for it, so it falls to `KeyContext::Global` \
-                 — the pane's scope never activates and none of its six actions resolves. A \
-                 plugin may declare pane-addressed bindings of its own (ADR-34), so this is only \
-                 survivable for keys whose whole effect a plugin can also perform; the rows below \
-                 are why none of these six is",
+        stands: "a pane handed over with **its own** keys is focused as `InputFocus::PluginPane`, \
+                 and `App::focus_key_context` names no arm for it, so it falls to \
+                 `KeyContext::Global` — the pane's scope never activates and none of its six \
+                 actions resolves. A plugin may declare pane-addressed bindings of its own \
+                 (ADR-34), so that route is only survivable for keys whose whole effect a plugin \
+                 can also perform; the rows below are why none of these six is. The **other** \
+                 route closes it (ADR-51): a pane declaring `key_context = \"SessionList\"` is \
+                 focused as `InputFocus::SessionList`, so all six resolve and the *kernel* \
+                 performs them — which is why this row is recorded against the shipped plugin, \
+                 which declares no keyboard, rather than against the pane",
         gap: Gap::Structural,
         blocked: true,
         probe: |root| {
