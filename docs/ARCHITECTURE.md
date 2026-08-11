@@ -2499,3 +2499,82 @@ on a header. The pane's capability list is unchanged at two: the closure is enti
 read, which is what keeps it evidence about what a third party can build. What is
 left of the ten is exactly the behaviour half, and ADR-45 is the attempt to hand the
 pane over against it.
+
+## ADR-45: The code review is not handed over — two seats, no bindable keys, a click that means a column
+
+**Context.** ADR-44 closed the code review's document half: the bundled plugin
+reproduces every row kind the native pane lists, pinned to the untouched renderer row
+by row. The next step was the handover — drawing the plugin's pane instead of
+`src/ui/code_review.rs`. It does not happen.
+
+Three of the reasons are already recorded (a central seat, ADR-38 and ADR-43; a cursor
+the kernel owns, ADR-43; the resolved width, ADR-31). Three are this pane's own, and
+together they make it the **furthest** pane from a handover rather than the closest,
+which is not what "the document is done" suggests:
+
+1. **It is two panes.** The diff owns the central pane; the changed-files list owns the
+   file-viewer column, with its own focus, its own keys and a selection that scrolls the
+   diff — and `App::layout_for` forces that column present for as long as a review is
+   open. The workspace tree seats the list as `RegionId::FileViewer` and a plugin pane
+   as `RegionId::Plugin(n)`, a separate region, while `PaneSlot` offers a plugin only
+   the right column. Every earlier refusal needed one seat; this needs two at once, as
+   one surface.
+2. **Its keyboard is not in the keybinding system.** `KeyContext` declares six scopes
+   and no review; `handle_code_review_key` and `handle_review_files_key` are captures
+   keyed on `self.focus`, run ahead of the lookup. So — unlike the tasks, automations
+   and session-list refusals, each of which could name the scoped actions a plugin
+   binding would replace — there is nothing to name. The keys are not rebindable today,
+   so no configuration file restores them after a handover either.
+3. **Its mouse surface exceeds the row channel in two different ways.** Eleven footer
+   buttons, a scrollbar, the wheel and picker entries are missing target *kinds*, which
+   a wider event carries. `App::cr_click_row`'s `rel_x`/`width` is a missing
+   *coordinate*: on a paired row the half clicked decides which side a comment attaches
+   to, and "the old side" is not a row, so no extra target kind expresses it.
+
+**Decision.** The pane stays native, and the verdict is a gate —
+`tests/code_review_pane_handover_gap.rs`, eleven rows re-derived from the tree, tagged
+structural / vocabulary / wiring like its siblings — with the three findings pinned as
+their own tests so a failure carries the argument rather than only the rule.
+
+One row is recorded as **narrower** than the row it shares an id with. `no-cursor-write`
+appears in the session list's gate, where the cursor *is* the application's active
+session and writing it is the widest grant in the host. Here it is a row inside a view
+the user already opened, read by the diff and the changed-files highlight and nothing
+else. Two rows spelled alike with very different prices should not read alike, so the
+gate states which is narrower and names it as where the work starts.
+
+The ordering the table implies: the pane's keys become scoped actions (a keybinding
+change, no plugin involved), then the narrow cursor write, then the two seats.
+
+**Rejected alternatives.**
+
+- *Hand over the diff and leave the changed-files list native.* The list is forced
+  present by an open review, so the result is a plugin diff beside a native navigation
+  aid that scrolls it — a half-handover whose seam is visible to the user.
+- *Add `review-write` with the verdict.* The fourth capability in the host with zero
+  consumers, which is the defect the earlier gates identified in `input`,
+  `tasks-write` and `automations-write`. It is also premature: a review write without
+  the seats and without the cursor lets a pane mark a file reviewed while unable to say
+  which file the user is looking at.
+- *Declare `input` on the bundled plugin so its pane can be focused.* The pane is not
+  focusable precisely because it declares none, and hand-driving confirms `Ctrl+L` never
+  lands on it while every review key still reaches the native pane. Keys with nothing
+  to act on are a pane that takes a keystroke and drops it (ADR-38).
+- *One "seats" row instead of two.* They close differently — a central slot is an
+  addition to `PaneSlot` plus a branch that names a plugin pane, while the second seat
+  is a second *pane* focused and navigated as part of the first. Collapsing them makes
+  the harder one look like a detail of the easier.
+- *One row per missing mouse target.* Four rows that all close with one wider event
+  plus a fifth that does not reads as five problems where there are two.
+- *Record the verdict only in the readiness document.* A verdict in markdown is a fact
+  about a build that expires without telling anyone — the reason every refusal on this
+  branch is executable.
+- *Fold the rows into `tests/teardown_gate.rs`.* That table answers whether the native
+  renderer may be deleted, which is already no and stays no. One table answering two
+  questions produces failures that do not say which question moved.
+
+**Consequences.** No source file changes, so nothing in the interface moves. A later
+change adding a central slot, a review write, a cursor write, a review key context or a
+wider click event fails the gate and is told which row moved and what to revisit. The
+teardown inventory is unchanged: `src/ui/code_review.rs` was already protected, for the
+same reason as before.

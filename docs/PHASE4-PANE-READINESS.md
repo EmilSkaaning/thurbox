@@ -1740,3 +1740,112 @@ here), and the behaviour chrome still absent.
 
 Everything in the behaviour half. §20 is the attempt to hand the pane over and what
 it found, gated by `tests/code_review_pane_handover_gap.rs`.
+
+## 20. The code review's handover, refused (ADR-45)
+
+§19 closed the document half of §11's table. This is the attempt at the other half —
+drawing the plugin's pane instead of `src/ui/code_review.rs` — and its answer.
+`tests/code_review_pane_handover_gap.rs` is the verdict in executable form: eleven
+rows, each re-derived from the tree.
+
+Three of the reasons are already recorded against other panes. Three are this pane's
+own, and they are why it is the **furthest** from a handover rather than the closest —
+which is not what "the document is done" suggests.
+
+### Finding 1: it is two panes, in two columns
+
+Every earlier refusal needed one seat. This surface needs two, at once:
+
+- the **diff** owns the **central** pane — the one the agent terminal and the shell
+  share, selected from the tab strip;
+- the **changed-files list** owns the **file-viewer column**, with its own focus
+  (`InputFocus::ReviewFiles`), its own keys (`j`/`k`, `g`/`G`, `Enter`, `r`/`R`, `/`),
+  and a selection that scrolls the diff. `App::layout_for` forces that column present
+  for as long as a review is open, so it is not an optional extra.
+
+The workspace tree seats the list as `RegionId::FileViewer` and a plugin pane as
+`RegionId::Plugin(n)` — a separate region — and `PaneSlot` offers a plugin only the
+right column. So handing over the diff alone leaves a native changed-files list beside
+a plugin diff, and handing over both needs one plugin granted, focused and navigated
+in two columns as one surface. No existing row asks that question.
+
+### Finding 2: its keyboard is not in the keybinding system
+
+The tasks, automations and session-list refusals could each name the scoped `Action`s a
+plugin binding would have to replace. This pane has **none to name**:
+
+- `KeyContext` declares six scopes and no review;
+- `handle_code_review_key` and `handle_review_files_key` are captures keyed on
+  `self.focus`, run *before* the keybinding lookup;
+- `focus_key_context` names no plugin pane, so a handed-over pane resolves in
+  `KeyContext::Global`.
+
+The consequence is not only that a plugin cannot claim the keys. They are **not
+rebindable today**: the F1 editor has never listed them and no `keybindings.json` can
+restore them after a handover. So the first step is a *keybinding-vocabulary* change —
+turning a capture into scoped actions — which is upstream of anything plugin-facing.
+The only bindable review action is `ToggleReview`, which *opens* the view.
+
+### Finding 3: the mouse channel carries a row; one click means a column
+
+The pane is documented mouse-first. A plugin pane's click reaches
+`onClick(paneId, row)`. The difference splits in two, and the split is the finding:
+
+- **missing target kinds** — eleven footer buttons, a draggable scrollbar, the wheel,
+  target-picker entries. A wider event carries all of them, so this half is `Wiring`;
+- **a missing coordinate** — on a paired side-by-side row, the half clicked decides
+  which side of the diff a comment attaches to. `App::cr_click_row` takes the click's
+  `rel_x` and the pane's width and resolves it from them. "The user clicked the old
+  side" is not a row, so **no additional target kind expresses it**.
+
+### The row where this pane is closer than the session list
+
+`no-cursor-write` appears in the session list's gate too, and repeating it verbatim
+would hide a real difference. That pane's cursor **is** the application's active
+session — what the central pane, the info panel, the file viewer and this very review
+are all showing — so making it writable is the widest grant in the host. This pane's
+cursor is a row inside a view the user already opened, read by the diff and by the
+changed-files highlight and by nothing else.
+
+So a narrow "name the row you are on" capability is the cheapest place a view-state
+write could start, and the gate says so rather than leaving two rows that read alike.
+
+### The rows
+
+| Row | Kind | Needs |
+|---|---|---|
+| `no-central-seat` | structural | the central pane; `PaneSlot` offers only the right column |
+| `no-second-seat-for-the-changed-files-list` | structural | a second pane, in a second column, granted as one surface |
+| `keys-are-a-capture-not-actions` | structural | the pane's keys to *become* actions first |
+| `no-review-write` | structural | `review_comments` / `review_marks` writes the seam does not have |
+| `no-retarget-operation` | structural | `t` runs `git diff`/`git show` on a worker; no capability runs git |
+| `no-export-operation` | structural | `y` the clipboard, `e` the session's pty — neither reachable |
+| `no-cursor-write` | structural | every navigation key; narrower than the session list's |
+| `no-resolved-width` | structural | `v`, `w`, `←`/`→`, and the ellipsis §19 enumerated |
+| `mouse-carries-no-column` | wiring | targets a wider event carries, plus one coordinate it cannot |
+| `no-anchored-overlay` | vocabulary | the compose box floats at a row; the target picker over the diff |
+| `no-in-pane-text-field` | vocabulary | a caret, and a match emphasis that replaces syntax colour |
+
+### What was deliberately not done
+
+No capability was added. `review-write` beside a verdict would be the **fourth**
+capability in the host with zero consumers — the defect the earlier gates found in
+`input`, `tasks-write` and `automations-write` — and it would be premature: a review
+write without the seats and without the cursor lets a pane mark a file reviewed while
+unable to say which file the user is looking at.
+
+`input` was not declared on the bundled plugin either. Its pane is not focusable today
+precisely because it declares none (`PluginPane::is_focusable` = visible &&
+accepts_input), and that is the honest state: hand-driving confirms `Ctrl+L` never
+lands on the reproduction while every review key still reaches the native pane. Keys
+with nothing to act on would be a pane that takes a keystroke and drops it (ADR-38).
+
+### The ordering
+
+1. the pane's keys become scoped actions — a keybinding change, no plugin involved;
+2. the narrow cursor write, which is this pane's contribution to a question the
+   session list asks in its widest form;
+3. the two seats, which is where a plugin declaring a multi-pane *surface* would have
+   to be designed.
+
+Nothing else on the table is reachable before those three.
