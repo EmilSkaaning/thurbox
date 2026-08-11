@@ -1384,3 +1384,109 @@ reading of the pane.
   thurbox reads directories.
 - Still no formatter. After three ports `PHASE4` §7's `thurbox.format.*` case is
   made by exactly one pane, which is now evidence rather than an absence of it.
+
+## ADR-31: A diff row's tint and fill are roles; the plugin owns its highlighter
+
+**Context.** Code review is the fourth Phase 4 port and the largest pane in
+thurbox: unified *and* paired side-by-side diffs, syntax-highlighted bodies,
+classified comments, reviewed marks, a find sub-mode, a target picker, horizontal
+scroll, a wrap toggle, a footer and a floating compose box. Porting all of it
+would have answered nothing well. What it can answer, and what no pane before it
+had asked, is whether a plugin can style the **inside** of a line thousands of
+times: every earlier pane draws one row per record with two or three runs on it,
+while a diff row is a gutter, one run per syntax token, and a background that has
+to reach the pane's right edge.
+
+**Decision.**
+
+1. **Port the core, itemise the rest.** The reproduced surface is the unified
+   stream's *lines*. Everything else is named in the change's proposal with the
+   reason it is unported, and `PHASE4` §11 carries the same list. Rejected:
+   approximating what is omitted — a plausible-looking file header would agree
+   with nothing, and the record would describe a pane that does not exist.
+2. **A run may declare its row an insertion or a deletion.**
+   `TextStyle::tint: Option<DiffTint>` resolves to `diff_added_bg` /
+   `diff_removed_bg`, with `selected` winning — the precedence
+   `ui::code_review::row_bg_fn` already encodes, since the cursor's row is one
+   appearance whatever it contains. It is a role like ADR-30's `selected`, but it
+   leaves the *foreground* to the token, because a diff body's colours are the
+   pane's while the tint is the only thing carrying add versus remove (the
+   gutter's sign is one character). Rejected: a `StyleToken` per diff background —
+   tokens are foregrounds everywhere else, and one that meant "use me behind the
+   text" would let any run paint any palette entry behind itself. Rejected:
+   inferring the tint from the list's selected row, ADR-30's rejection again — the
+   kernel does not know which rows are insertions, and should not.
+3. **A run may be a fill.** `ViewNode::Fill { glyph, style }` consumes whatever
+   width the line has left after every other run has taken its own, resolved by
+   the host at paint time. It exists because a background that stops where the
+   text stops is not this pane's row. Same trade as `gauge` for a bar and `list`
+   for a scroll window, applied to a line's residue — and it is half of the
+   flush-right run `PHASE4` §8 has had open since the tasks port (put a fill
+   *before* a run and the run is flush right). Rejected: extending the last run's
+   background to the line's end automatically, which would need no node and would
+   silently change every existing pane's last run.
+4. **The plugin lexes; the kernel publishes no token stream.** The `review`
+   section carries a line's raw text and its file's path, and the bundled plugin
+   carries the lexer — `ui::syntax` ported to Luau. Rejected: publishing
+   `{text, token}` runs, which is smaller, shorter and faster. ADR-29's rule
+   decides it: publish a rendering only when two panes must agree about it, and
+   `src/ui/code_review.rs` is the only reader of `ui::syntax` in thurbox. A
+   published token stream would be one pane's presentation crossing the boundary
+   and the "port" would be an arrangement of the kernel's decisions — ADR-27's
+   `"8.0/16.0 GB"` objection, applied to the most obviously presentational thing
+   in the pane. The cost is that the two lexers must agree token for token, and
+   only the equality test makes them; `ui::syntax` was refactored so its
+   `Vec<(String, Color)>` form resolves a single `highlight_tokens` against the
+   theme, which keeps *one* lexer on the Rust side at least.
+5. **The native renderer is not refactored to draw the tree.** The three earlier
+   ports made the native pane paint its view tree, so tree equality was frame
+   equality by construction. `unified_diff_line` cannot be a geometry-free tree:
+   it windows the body to `[h_scroll, h_scroll + avail)`, slices that window by
+   *character count* against a resolved width, and the wrap mode reflows one
+   logical row onto several by the same arithmetic. So `diff_row_tree` is a new
+   geometry-free builder pinned to the untouched renderer by a **frame**
+   comparison, and the plugin is compared to the builder. Rejected: comparing the
+   plugin to the new builder only, which is two functions written in the same
+   change agreeing about a format neither is obliged to match. Rejected:
+   refactoring the native path anyway — it would change what the pane draws for
+   double-width text and leave the wrap and paired paths as a second
+   implementation of the same row.
+6. **`Capability::Review` reads the diff the pane has open — not a repository.**
+   No diff of the plugin's choosing, no revision range, no file read, no command.
+   Same shape and same argument as ADR-30's `Files`, and for the same reason: the
+   rows are the review the *user* opened, so a git binding would be strictly more
+   power for strictly less result.
+7. **The sandbox loads `utf8`.** Pure computation, so admissible under the
+   restricted-environment rule for the reason `math` is — and necessary, not
+   convenient: a pane that styles inside a line must agree with the host about
+   where a character ends, and `string.byte` counts bytes. Without it a plugin
+   lexing any line containing a multi-byte character drifts for the rest of it,
+   which is a silently wrong pane rather than a refused one. Found by the port.
+
+**Consequences.**
+
+- `tests/bundled_code_review.rs` asserts tree equality across eleven content
+  variants (all three line kinds, every colour the highlighter assigns, four
+  comment-marker languages, the cursor on a tinted row, a four-digit gutter, empty
+  bodies, multi-byte bodies, a tab, no cursor) and **frame** equality at a height
+  that forces a scroll; `ui::code_review`'s own tests paint `diff_row_tree` against
+  `unified_diff_line` for twelve rows at two gutter widths.
+- **The host's bounds are reached by an ordinary diff, and the tighter one is not
+  the one the model documents.** A row of real code costs ~26 nodes, so `MAX_NODES`
+  (4096) permits roughly 150 rows — but at that size the plugin is refused for its
+  **execution** budget, reached while it is still building rows, before its tree is
+  ever converted. `MAX_REVIEW_ROWS` (60) is therefore a cap on the *section*, and
+  the pane is the first whose content the model cannot bound locally: the node
+  budget is a whole-tree bound while a diff's cost is per row *and* per token.
+  Both facts are asserted rather than described.
+- The budget is spent on rows the kernel then windows away, since the plugin builds
+  every row it publishes and the kernel chooses the visible slice afterwards. The
+  honest closure — window before conversion, i.e. a lazy row source or a declared
+  row budget — is `PHASE4` §11's open row, deliberately not designed from one
+  consumer.
+- Two divergences are pinned rather than smoothed: node content is sanitized on the
+  way into the tree (a tab becomes four spaces) while the native span renderer
+  passes the raw byte through, and the Luau lexer classifies letter case for ASCII
+  only where Rust's `char::is_uppercase` is Unicode-aware.
+- Still no formatter. After four ports `PHASE4` §7's `thurbox.format.*` case is made
+  by exactly one pane.

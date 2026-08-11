@@ -343,6 +343,70 @@ pub struct FilesSnapshot {
 /// pane stops scrolling rather than scrolling to a row it does not have.
 pub const MAX_FILE_ROWS: usize = 1_000;
 
+/// One line of the open review's diff, as a pane draws it.
+///
+/// The line's text crosses **raw**: not split into syntax-highlighted runs, not
+/// windowed to a horizontal scroll offset, and not padded to any width. How a
+/// diff body is coloured is the pane's decision — `crate::ui::code_review` is
+/// the only reader of `crate::ui::syntax` in thurbox, so by the rule that a
+/// rendering crosses only when two panes must agree about it, this one does not
+/// cross at all. A pane arranging runs the kernel had already coloured would be
+/// evidence about nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewLineSnapshot {
+    /// The path of the file this line belongs to, as the diff names it.
+    ///
+    /// Published because a diff line is not addressable without it, and because
+    /// the pane picks its comment style from the extension. This is the diff's
+    /// own subject, not a filesystem path a plugin could follow: nothing here
+    /// reads it.
+    pub path: String,
+    /// Its number on the old side, absent on an insertion.
+    pub old_no: Option<u32>,
+    /// Its number on the new side, absent on a deletion.
+    pub new_no: Option<u32>,
+    /// Stable wire name of its kind: `add`, `del` or `context`.
+    pub kind: &'static str,
+    /// The line's text, without its leading diff sign.
+    pub text: String,
+}
+
+/// The open review's diff stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReviewSnapshot {
+    /// One entry per published line, in the order the pane lists them.
+    pub lines: Vec<ReviewLineSnapshot>,
+    /// The row a list scrolls to, zero-based into `lines`. `None` when there are
+    /// none, or when the cursor falls past [`MAX_REVIEW_ROWS`] — for
+    /// [`FilesSnapshot::selected`]'s reason.
+    pub cursor: Option<usize>,
+    /// Width each of the gutter's two number columns is drawn at.
+    ///
+    /// Published rather than derived by the pane because it is computed over
+    /// **every** hunk of **every** file in the review, which a bounded window of
+    /// lines does not contain: a pane deriving it from what it received would
+    /// draw a narrower gutter than the review's own, and the two copies of the
+    /// pane would not line up.
+    pub number_width: usize,
+}
+
+/// Most diff lines a publication carries.
+///
+/// A bound on the section like [`MAX_FILE_ROWS`], but for a **different reason**,
+/// and the difference is the finding rather than an implementation note. The
+/// other sections bound a row count because a pane draws a bounded number of
+/// rows, and each row costs a fixed handful of nodes. A diff line's cost is
+/// *unbounded*: its body is one node per syntax token, so a single dense line can
+/// cost thirty. [`super::view_tree::MAX_NODES`] is a whole-tree budget, so no row
+/// cap can guarantee a diff pane stays inside it — which makes this the first
+/// pane whose content the model cannot bound locally.
+///
+/// The number is chosen so that a representative row (a gutter, a fill, and a
+/// dozen token runs) leaves the budget comfortable, not so that a pathological
+/// one is impossible. Past the bound the section carries the first lines and no
+/// cursor.
+pub const MAX_REVIEW_ROWS: usize = 60;
+
 /// Everything a plugin may read about the kernel's current state.
 ///
 /// One value rather than three published separately: every section describes the
@@ -361,6 +425,9 @@ pub struct PaneContext {
     /// The file tree the file viewer has open, empty when it has none or the
     /// feature is off.
     pub files: FilesSnapshot,
+    /// The diff the code-review view has open, empty when it has none or the
+    /// feature is off.
+    pub review: ReviewSnapshot,
 }
 
 /// The process-wide snapshot slot.
@@ -451,6 +518,7 @@ mod tests {
             automations: Vec::new(),
             tasks: TasksSnapshot::default(),
             files: FilesSnapshot::default(),
+            review: ReviewSnapshot::default(),
         }
     }
 

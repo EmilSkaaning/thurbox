@@ -23,7 +23,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::session::motion::FrameTable;
 use crate::session::theme_config::ThemePalette;
-use crate::session::view_tree::{StyleToken, TextStyle, ViewNode};
+use crate::session::view_tree::{DiffTint, StyleToken, TextStyle, ViewNode};
 
 /// Resolve a style token against the active palette.
 ///
@@ -40,6 +40,7 @@ pub fn token_color(token: StyleToken, palette: &ThemePalette) -> Color {
         StyleToken::Secondary => palette.text_secondary,
         StyleToken::Role => palette.role_name,
         StyleToken::Branch => palette.branch_name,
+        StyleToken::AccentBright => palette.accent_bright,
         // `tool_allowed` rather than `diff_added`: this is the green thurbox's
         // own panes draw an insertion count in, and the two are separate
         // palette fields a custom theme may set independently.
@@ -69,7 +70,17 @@ fn text_style(style: TextStyle, palette: &ThemePalette) -> Style {
             .token
             .map(|t| token_color(t, palette))
             .unwrap_or(palette.text_primary);
-        Style::default().fg(color)
+        let s = Style::default().fg(color);
+        // A tint is the other background role, and selection above already won:
+        // the cursor's row is one appearance whatever it contains, which is the
+        // precedence `ui::code_review::row_bg_fn` encodes for the native pane.
+        // It leaves the foreground to the token, because a diff body's colours
+        // are the pane's while the tint is what carries add versus remove.
+        match style.tint {
+            Some(DiffTint::Added) => s.bg(palette.diff_added_bg),
+            Some(DiffTint::Removed) => s.bg(palette.diff_removed_bg),
+            None => s,
+        }
     };
     if style.bold {
         s = s.add_modifier(Modifier::BOLD);
@@ -102,7 +113,7 @@ fn height_of(node: &ViewNode, width: u16, palette: &ThemePalette, frames: &Frame
     match node {
         // A line is one row whatever it holds: it clips rather than wraps, so
         // its height does not depend on the width it is given.
-        ViewNode::Text { .. } | ViewNode::Divider | ViewNode::Line(_) => 1,
+        ViewNode::Text { .. } | ViewNode::Divider | ViewNode::Fill { .. } | ViewNode::Line(_) => 1,
         // Header rows plus the bar's one row. The header is normally one row,
         // but a label and suffix that together overflow the width wrap — and the
         // bar has to move down with them rather than being drawn over the
@@ -118,7 +129,7 @@ fn height_of(node: &ViewNode, width: u16, palette: &ThemePalette, frames: &Frame
                 return 0;
             }
             let mut spans = Vec::new();
-            inline_spans(runs, palette, frames, &mut spans);
+            inline_spans(runs, width as usize, palette, frames, &mut spans);
             // Measured by the same widget that will draw it, so the height and
             // the paint can never disagree about where the wrap falls.
             wrapped_paragraph(spans)
@@ -189,6 +200,10 @@ fn inline_width(node: &ViewNode) -> usize {
         ViewNode::Motion { motion, .. } => {
             motion.frames().iter().map(inline_width).max().unwrap_or(0)
         }
+        // A fill has no intrinsic width — it *is* whatever the line has left,
+        // so it reserves nothing and every other run measures first. That is
+        // what makes the residue well defined.
+        ViewNode::Fill { .. } => 0,
         // Refused at conversion, so unreachable from a plugin; zero is the only
         // honest answer for a node whose width comes from its area.
         ViewNode::Row(_)
@@ -209,16 +224,61 @@ fn inline_width(node: &ViewNode) -> usize {
 /// — that is the column the eye tracks.
 fn inline_spans<'a>(
     runs: &'a [ViewNode],
+    width: usize,
     palette: &ThemePalette,
     frames: &FrameTable,
     out: &mut Vec<Span<'a>>,
+) {
+    // Fills are emitted empty and filled in afterwards, because how wide one is
+    // depends on every *other* run on the line — measuring forwards would need
+    // the answer before it exists. The placeholder keeps each fill's position,
+    // so a fill in the middle of a line still pushes what follows it right.
+    let mut placeholders: Vec<(usize, char)> = Vec::new();
+    collect_inline_spans(runs, palette, frames, out, &mut placeholders);
+    if placeholders.is_empty() {
+        return;
+    }
+    let drawn: usize = out.iter().map(|s| s.content.width()).sum();
+    let residue = width.saturating_sub(drawn);
+    // Split evenly, remainder to the first: an even split is the only rule that
+    // does not privilege a position, and a leftover column has to go somewhere.
+    let share = residue / placeholders.len();
+    let mut extra = residue % placeholders.len();
+    for (index, glyph) in placeholders {
+        let mut take = share;
+        if extra > 0 {
+            take += 1;
+            extra -= 1;
+        }
+        if take == 0 {
+            continue;
+        }
+        let style = out[index].style;
+        out[index] = Span::styled(glyph.to_string().repeat(take), style);
+    }
+}
+
+/// The walk [`inline_spans`] wraps: push one span per run, recording where each
+/// fill's placeholder landed.
+fn collect_inline_spans<'a>(
+    runs: &'a [ViewNode],
+    palette: &ThemePalette,
+    frames: &FrameTable,
+    out: &mut Vec<Span<'a>>,
+    placeholders: &mut Vec<(usize, char)>,
 ) {
     for run in runs {
         match run {
             ViewNode::Text { content, style } => {
                 out.push(Span::styled(content.clone(), text_style(*style, palette)));
             }
-            ViewNode::Line(nested) => inline_spans(nested, palette, frames, out),
+            ViewNode::Line(nested) => {
+                collect_inline_spans(nested, palette, frames, out, placeholders)
+            }
+            ViewNode::Fill { glyph, style } => {
+                placeholders.push((out.len(), *glyph));
+                out.push(Span::styled(String::new(), text_style(*style, palette)));
+            }
             ViewNode::Motion { key, motion, .. } => {
                 let reserved = inline_width(run);
                 let index = frames
@@ -226,7 +286,13 @@ fn inline_spans<'a>(
                     .min(motion.frames().len().saturating_sub(1));
                 let before = out.len();
                 if let Some(frame) = motion.frames().get(index) {
-                    inline_spans(std::slice::from_ref(frame), palette, frames, out);
+                    collect_inline_spans(
+                        std::slice::from_ref(frame),
+                        palette,
+                        frames,
+                        out,
+                        placeholders,
+                    );
                 }
                 let drawn: usize = out[before..].iter().map(|s| s.content.width()).sum();
                 if let Some(pad) = reserved.checked_sub(drawn).filter(|p| *p > 0) {
@@ -406,6 +472,15 @@ pub fn render_tree(
             let line = Line::from(Span::styled(content.clone(), text_style(*style, palette)));
             Paragraph::new(line).render(area, buf);
         }
+        // A fill outside a line has the whole row to itself, which is the one
+        // sensible reading of "the width that is left" when nothing else is on
+        // it — and it keeps the node from being a special case only a line can
+        // hold.
+        ViewNode::Fill { glyph, style } => {
+            let run = glyph.to_string().repeat(area.width as usize);
+            Paragraph::new(Line::from(Span::styled(run, text_style(*style, palette))))
+                .render(area, buf);
+        }
         ViewNode::Divider => {
             let rule = "─".repeat(area.width as usize);
             Paragraph::new(Line::from(Span::styled(
@@ -421,12 +496,12 @@ pub fn render_tree(
             // the terminal at the pane edge exactly as an over-long text node
             // is — there is no wrap, so nothing below it moves.
             let mut spans = Vec::new();
-            inline_spans(runs, palette, frames, &mut spans);
+            inline_spans(runs, area.width as usize, palette, frames, &mut spans);
             Paragraph::new(Line::from(spans)).render(area, buf);
         }
         ViewNode::Paragraph(runs) => {
             let mut spans = Vec::new();
-            inline_spans(runs, palette, frames, &mut spans);
+            inline_spans(runs, area.width as usize, palette, frames, &mut spans);
             // Overflow wraps onto further rows and is clipped by `area`'s
             // bottom, so a paragraph given fewer rows than it wants loses its
             // tail rather than painting over a sibling.

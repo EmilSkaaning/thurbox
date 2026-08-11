@@ -277,6 +277,7 @@ const MATCHED_STYLE: TextStyle = TextStyle {
     dim: false,
     underline: true,
     selected: false,
+    tint: None,
 };
 
 /// A row's resting style, in the precedence the session list and automations

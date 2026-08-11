@@ -190,9 +190,19 @@ const BLOCKERS: &[Blocker] = &[
         blocked: true,
         probe: |root| {
             let kinds = view_node_kinds(root);
-            !kinds
-                .iter()
-                .any(|k| k == "Anchor" || k == "Flex" || k == "Fill" || k == "Dock")
+            // `Fill` is on the list because a fill *could* be the shape that
+            // anchors a row to the far edge — but the one this catalogue has is
+            // an **inline** run whose width is the residue of a *line*, added by
+            // the code-review port to carry a diff row's background to the pane's
+            // right edge (ADR-31). A horizontal residue anchors nothing
+            // vertically, so it does not close this row. Asked of the tree rather
+            // than asserted here: a fill that stopped being inlineable would be a
+            // different node, and would flip this verdict as it should.
+            let inline_fill = source(root, "src/session/view_tree.rs")
+                .contains("ViewNode::Text { .. } | ViewNode::Fill { .. } => None");
+            !kinds.iter().any(|k| {
+                k == "Anchor" || k == "Flex" || k == "Dock" || (k == "Fill" && !inline_fill)
+            })
         },
     },
     Blocker {

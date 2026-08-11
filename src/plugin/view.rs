@@ -15,7 +15,7 @@ use mlua::{Table, Value};
 
 use crate::session::motion::{Motion, DEFAULT_FPS, MAX_FPS, MAX_FRAMES, MIN_FPS, MIN_FRAMES};
 use crate::session::view_tree::{
-    sanitize_text, StyleToken, TextStyle, ViewNode, MAX_DEPTH, MAX_NODES,
+    sanitize_text, DiffTint, StyleToken, TextStyle, ViewNode, MAX_DEPTH, MAX_NODES,
 };
 
 /// The motion kinds this host evaluates, for the error a plugin gets when it
@@ -52,6 +52,8 @@ pub enum ViewError {
     },
     /// The style token is not one the host defines.
     UnknownStyle(String),
+    /// A run declared a diff tint the host does not define.
+    UnknownTint(String),
     /// The tree nests deeper than the host allows. Also how a self-referential
     /// table terminates.
     TooDeep,
@@ -108,6 +110,15 @@ impl fmt::Display for ViewError {
                 expected,
             } => write!(f, "view node `{kind}` field `{field}` must be {expected}"),
             ViewError::UnknownStyle(s) => write!(f, "unknown style token `{s}`"),
+            ViewError::UnknownTint(t) => write!(
+                f,
+                "unknown diff tint `{t}`; this host defines {}",
+                DiffTint::all()
+                    .iter()
+                    .map(|t| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             ViewError::TooDeep => {
                 write!(f, "view tree nests deeper than {MAX_DEPTH} levels")
             }
@@ -242,6 +253,7 @@ fn convert(
             Ok(ViewNode::Paragraph(runs))
         }
         "divider" => Ok(ViewNode::Divider),
+        "fill" => convert_fill(table, &kind),
         "gauge" => convert_gauge(table, &kind),
         "spacer" => {
             let lines = match table.get::<Value>("lines") {
@@ -390,6 +402,57 @@ fn convert_text(table: &Table, kind: &str) -> Result<ViewNode, ViewError> {
         }
     };
 
+    Ok(ViewNode::Text {
+        content: sanitize_text(&content),
+        style: convert_style(table, kind)?,
+    })
+}
+
+/// Convert a `fill` node: one glyph, and the style every run may carry.
+///
+/// The glyph is required and must be exactly one character. A multi-character
+/// string is refused rather than truncated, because a two-cell "glyph" repeated
+/// to a width would land on a half glyph at the edge and the plugin would have
+/// asked for something the host cannot draw.
+fn convert_fill(table: &Table, kind: &str) -> Result<ViewNode, ViewError> {
+    let glyph = match table.get::<Value>("glyph") {
+        Ok(Value::String(s)) => {
+            let text = s.to_string_lossy().to_string();
+            let mut chars = text.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => c,
+                _ => {
+                    return Err(ViewError::BadField {
+                        kind: kind.to_string(),
+                        field: "glyph",
+                        expected: "exactly one character",
+                    })
+                }
+            }
+        }
+        Ok(Value::Nil) | Err(_) => {
+            return Err(ViewError::MissingField {
+                kind: kind.to_string(),
+                field: "glyph",
+            })
+        }
+        Ok(_) => {
+            return Err(ViewError::BadField {
+                kind: kind.to_string(),
+                field: "glyph",
+                expected: "a string",
+            })
+        }
+    };
+    Ok(ViewNode::fill(glyph, convert_style(table, kind)?))
+}
+
+/// Convert the style fields any run may carry.
+///
+/// Shared by `text` and `fill` so the two cannot come to disagree about what a
+/// style is — a fill exists to carry a *background*, and a second parser would
+/// be the obvious place for that to drift.
+fn convert_style(table: &Table, kind: &str) -> Result<TextStyle, ViewError> {
     let token = match table.get::<Value>("style") {
         Ok(Value::String(s)) => {
             let name = s.to_string_lossy().to_string();
@@ -405,20 +468,35 @@ fn convert_text(table: &Table, kind: &str) -> Result<ViewNode, ViewError> {
         }
     };
 
+    // Refused rather than dropped: a misspelled tint on a deletion would draw
+    // it as context, which is the one thing a diff row must not do.
+    let tint = match table.get::<Value>("tint") {
+        Ok(Value::String(s)) => {
+            let name = s.to_string_lossy().to_string();
+            Some(DiffTint::parse(&name).ok_or(ViewError::UnknownTint(name))?)
+        }
+        Ok(Value::Nil) | Err(_) => None,
+        Ok(_) => {
+            return Err(ViewError::BadField {
+                kind: kind.to_string(),
+                field: "tint",
+                expected: "a string",
+            })
+        }
+    };
+
     // Emphasis is opt-in per attribute: anything that is not the boolean `true`
     // — absent, `false`, or a value of another type — leaves the attribute off,
     // so a misspelled field cannot silently style a run.
     let flag = |name: &str| matches!(table.get::<Value>(name), Ok(Value::Boolean(true)));
 
-    Ok(ViewNode::Text {
-        content: sanitize_text(&content),
-        style: TextStyle {
-            token,
-            bold: flag("bold"),
-            dim: flag("dim"),
-            underline: flag("underline"),
-            selected: flag("selected"),
-        },
+    Ok(TextStyle {
+        token,
+        bold: flag("bold"),
+        dim: flag("dim"),
+        underline: flag("underline"),
+        selected: flag("selected"),
+        tint,
     })
 }
 
@@ -751,6 +829,7 @@ mod tests {
                     dim: true,
                     underline: true,
                     selected: true,
+                    tint: None,
                 }
             )
         );

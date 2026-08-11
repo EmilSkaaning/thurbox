@@ -937,17 +937,18 @@ and granted capabilities, and everything discovery rejected with its cause.
 `list`/`status` **start** the plugins they report, since a compile or `init`
 failure is invisible until something runs them; `doctor` discovers only.
 Plugins live in `~/.config/thurbox/plugins/<name>/` as a `plugin.toml` plus an
-`init.luau`; the bundled `hello`, `info-panel`, `tasks` and `file-viewer` plugins are materialized to
+`init.luau`; the bundled `hello`, `info-panel`, `tasks`, `file-viewer` and
+`code-review` plugins are materialized to
 `~/.local/share/thurbox/builtin-plugins/`, and a user plugin of the same name
 overrides it) and **`command`** (list/describe/run: the typed, agent-callable
 plugin command registry — below; unlike `plugin list`, discovery here starts no
 plugin, since a command's id and schema are manifest facts).
 A plugin builds its pane from `require("@thurbox").ui`
-constructors (`text`/`row`/`line`/`paragraph`/`column`/`list`/`divider`/`gauge`/
-`spacer`), styled by **theme token** rather than by colour, so every plugin
+constructors (`text`/`row`/`line`/`paragraph`/`column`/`list`/`divider`/`fill`/
+`gauge`/`spacer`), styled by **theme token** rather than by colour, so every plugin
 follows a theme switch. The token set is the palette's *role* set —
 `accent`/`muted`/`danger`/`success`/`warning`/`secondary`/`role`/`branch`/
-`added`/`border` plus one per session status (`status_working`/`status_blocked`/
+`accent_bright`/`added`/`border` plus one per session status (`status_working`/`status_blocked`/
 `status_done`/`status_idle`/`status_error`/`status_unreachable`) — because a
 status indicator is the one case where the token *is* the meaning, and because a
 pane could not otherwise be drawn through the tree without reaching past it for a
@@ -1086,6 +1087,28 @@ ellipsizing clip with a flush-right run, and a list node carrying a selected ind
 cannot scroll to its selection is not one. The port needed no new node, no new
 token and no formatter; see `docs/PHASE4-PANE-READINESS.md` §8.
 
+The bundled **`code-review`** plugin (`src/plugin/bundled/code-review/`) is the
+fourth, and the first ported **in part**: it reproduces the unified diff stream's
+*lines* — the `{old} {new} {sign}` gutter, one styled run per syntax token, the
+insertion/deletion row tint reaching the pane's right edge, and the cursor's row —
+while the paired side-by-side layout, the wrap mode, horizontal scroll, file and
+hunk headers, comments and their badges, reviewed marks, folding, the find bar, the
+target picker, the footer and the compose box are **out of scope and itemised**
+(proposal + `docs/PHASE4-PANE-READINESS.md` §11), with a test asserting the pane
+imitates none of them. Three widenings (ADR-31): `TextStyle::tint` (a role
+resolving to `diff_added_bg`/`diff_removed_bg`, with `selected` winning),
+`ViewNode::Fill` (one glyph across a line's residue, resolved by the host — half of
+§8's flush-right row), and the `accent_bright` token; plus `StdLib::UTF8`, absent
+until now, without which a plugin lexing a multi-byte line drifts. Unlike the three
+earlier ports the **native renderer is not refactored** to draw the tree — it
+windows a body by character count against a resolved width — so the oracle is a
+two-link chain: the plugin's tree equals `ui::code_review::diff_stream_tree`, and
+that builder is painted against the untouched `unified_diff_line`. The port's
+transferable finding is a measurement: a row of real code costs ~26 nodes so
+`MAX_NODES` permits ~150 rows, but at that size the plugin is refused for its
+**execution** budget first — so the ceiling on a plugin diff pane is instructions,
+not nodes, and `MAX_REVIEW_ROWS` (60) caps the published section accordingly.
+
 Pane **visibility is kernel
 state**: the manifest seeds it (`default_visible`), `F10`
 (rebindable `TogglePluginPane`) decides it, and the choice is persisted per
@@ -1181,9 +1204,10 @@ to the closed `Action` enum.
 A pane plugin reads kernel state through **capability-gated readers** over one
 published snapshot (`session::pane_context`, ADR-27): `sessions` →
 `thurbox.activeSession()`, `metrics` → `thurbox.systemMetrics()`, `automations` →
-`thurbox.upcomingAutomations()`, `tasks` → `thurbox.tasks()`, and `files` →
-`thurbox.files()`. Gated per *kind* rather than by one blanket grant because the
-capability list is what an install prompt is written from. **`files` is not a
+`thurbox.upcomingAutomations()`, `tasks` → `thurbox.tasks()`, `files` →
+`thurbox.files()`, and `review` → `thurbox.review()`. Gated per *kind* rather than
+by one blanket grant because the capability list is what an install prompt is
+written from. **`files` is not a
 filesystem capability** (ADR-30): it reports the tree thurbox's *file viewer* has
 open — one **basename** per visible row with its depth, its expansion state and
 the running search's verdict, plus the cursor's row and whether nerd-font glyphs
@@ -1192,7 +1216,14 @@ I/O at all. The pane needs none: of the five facts a row draws only its name com
 from disk, the rest being the user's navigation, a search the kernel runs, and the
 keyboard. It is named `Files` and not `Fs` deliberately —
 `tests/teardown_gate.rs` reserves `Capability::Fs` for v1's agent-config-file
-power.
+power. **`review` is likewise not a git capability** (ADR-31): it reports the diff
+the *user* has open in the code-review view — per line a path, its number on each
+side, whether it is an addition, a deletion or context, and its **raw** text —
+plus the cursor's row and the gutter's number width. It produces no diff of the
+plugin's choosing, names no revision, reads no file and runs no command; and it
+carries no *colouring*, because `src/ui/code_review.rs` is `ui::syntax`'s only
+reader and by the publish-a-rendering-only-when-two-panes-must-agree rule the
+highlighting stays the pane's (the bundled plugin ports the lexer to Luau).
 
 A plugin may add **environment to every agent session thurbox spawns** — v2's
 bounded replacement for v1's `[[agent_patches]]`. It is **manifest data**

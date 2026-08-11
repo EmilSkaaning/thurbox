@@ -190,6 +190,19 @@ pub fn build_module_table(
         module.set("files", read)?;
     }
 
+    // Reads the diff the code-review view has open — and nothing else. There is
+    // deliberately no companion binding that produces a diff, names a revision
+    // range, or reads a file: the rows are the review the *user* opened, so a
+    // git binding would be strictly more power for strictly less result. Same
+    // shape, and the same reasoning, as `files` above.
+    if granted.has(Capability::Review) {
+        let read = lua.create_function(|lua, ()| {
+            let context = crate::session::pane_context::published().unwrap_or_default();
+            super::kernel_state::review_table(lua, &context)
+        })?;
+        module.set("review", read)?;
+    }
+
     // View-node constructors. Ungated on purpose: they build plain tables and
     // grant no host power, so hiding them behind a capability would be theatre.
     // Implemented here rather than as a shipped `.luau` file so they live in
@@ -207,6 +220,39 @@ pub fn build_module_table(
     Ok(module)
 }
 
+/// Write a constructor's `style` argument onto the node it belongs to.
+///
+/// Two accepted spellings, one node: a **string** is the style token (the form
+/// every plugin already written uses), and a **table** names the token under
+/// `token` plus any of the emphases, the selection role and the tint. Both land
+/// as the same flat node fields, so conversion learns nothing about which form
+/// was used and a pane's appearance cannot depend on how it was spelled.
+///
+/// Anything else is left alone rather than rejected here: conversion owns every
+/// field's type check, and validating in two places is how the two come to
+/// disagree about what a style is.
+fn apply_style_arg(node: &Table, style: Option<mlua::Value>) -> mlua::Result<()> {
+    match style {
+        Some(mlua::Value::Table(t)) => {
+            if let Ok(token) = t.get::<mlua::Value>("token") {
+                if !token.is_nil() {
+                    node.set("style", token)?;
+                }
+            }
+            for key in ["bold", "dim", "underline", "selected", "tint"] {
+                if let Ok(value) = t.get::<mlua::Value>(key) {
+                    if !value.is_nil() {
+                        node.set(key, value)?;
+                    }
+                }
+            }
+        }
+        Some(value) if !value.is_nil() => node.set("style", value)?,
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Build the `ui` constructor table.
 ///
 /// One constructor per node kind, so a plugin never writes a `kind` string it
@@ -219,12 +265,15 @@ fn build_ui_table(lua: &Lua) -> mlua::Result<Table> {
     // The flags are positional rather than an options table because the node's
     // own fields are the canonical form and `bold` cannot stop being the third
     // argument without breaking every plugin already written against it — two
-    // spellings of one node would be worse than one long signature. Six is the
-    // practical limit of that form: a seventh should convert the flags to a
-    // table rather than continue, which is a decision for whoever needs one.
+    // spellings of one node would be worse than one long signature. Six was the
+    // practical limit of that form, and the note left here said a seventh field
+    // should convert the flags to a table rather than continue. `tint` is that
+    // seventh, so `style` now also accepts a **table** naming every field:
+    // `ui.text(t, { token = "muted", tint = "added" })`. The positional form is
+    // untouched, argument for argument, so nothing written against it moved.
     type TextArgs = (
         mlua::Value,
-        Option<String>,
+        Option<mlua::Value>,
         Option<bool>,
         Option<bool>,
         Option<bool>,
@@ -237,9 +286,7 @@ fn build_ui_table(lua: &Lua) -> mlua::Result<Table> {
                 let node = lua.create_table()?;
                 node.set("kind", "text")?;
                 node.set("content", content)?;
-                if let Some(style) = style {
-                    node.set("style", style)?;
-                }
+                apply_style_arg(&node, style)?;
                 // Only a `true` is carried, so a node table stays as small as
                 // what it actually declares.
                 for (key, flag) in [
@@ -255,6 +302,21 @@ fn build_ui_table(lua: &Lua) -> mlua::Result<Table> {
                 Ok(node)
             },
         )?,
+    )?;
+
+    // `ui.fill(glyph, style?)` — one glyph repeated across whatever width is
+    // left on the line. Only two arguments, so the style table is the only form
+    // that reaches every field; there is deliberately no positional flag list
+    // here to keep in step with `text`'s.
+    ui.set(
+        "fill",
+        lua.create_function(|lua, (glyph, style): (mlua::Value, Option<mlua::Value>)| {
+            let node = lua.create_table()?;
+            node.set("kind", "fill")?;
+            node.set("glyph", glyph)?;
+            apply_style_arg(&node, style)?;
+            Ok(node)
+        })?,
     )?;
 
     // `line` shares the container shape but not the layout: its children are
@@ -489,6 +551,7 @@ mod tests {
             "column",
             "list",
             "divider",
+            "fill",
             "gauge",
             "spacer",
             "cycle",
@@ -546,6 +609,16 @@ mod tests {
                     "tasks",
                 ],
             ),
+            (
+                Capability::Review,
+                "review",
+                [
+                    "activeSession",
+                    "systemMetrics",
+                    "upcomingAutomations",
+                    "tasks",
+                ],
+            ),
         ] {
             let module = build_module_table(
                 &lua,
@@ -577,6 +650,7 @@ mod tests {
             "upcomingAutomations",
             "tasks",
             "files",
+            "review",
         ] {
             assert!(!module.contains_key(name).unwrap(), "{name} leaked");
         }
@@ -598,6 +672,7 @@ mod tests {
                 Capability::Automations,
                 Capability::Tasks,
                 Capability::Files,
+                Capability::Review,
             ])),
             None,
         )
@@ -630,6 +705,39 @@ mod tests {
             files.get::<mlua::Value>("selected").unwrap(),
             mlua::Value::Nil
         ));
+        let review: Table = module
+            .get::<mlua::Function>("review")
+            .unwrap()
+            .call(())
+            .unwrap();
+        assert_eq!(review.get::<Table>("lines").unwrap().raw_len(), 0);
+    }
+
+    /// The `review` capability sounds like access to a repository, so what it does
+    /// not insert is asserted directly: nothing a plugin holding it can call runs
+    /// git, produces a diff, or reads a file.
+    #[test]
+    fn the_review_capability_inserts_no_repository_binding() {
+        let lua = Lua::new();
+        let module = build_module_table(
+            &lua,
+            "demo",
+            &GrantedCapabilities::from_manifest(&set(&[Capability::Review])),
+            None,
+        )
+        .unwrap();
+        for name in [
+            "git", "diff", "commits", "log", "checkout", "readFile", "exec",
+        ] {
+            assert!(
+                !module.contains_key(name).unwrap(),
+                "granting `review` must not insert `{name}`"
+            );
+        }
+        assert!(
+            Capability::from_str("git").is_err(),
+            "the vocabulary must define no version-control capability"
+        );
     }
 
     /// The `files` capability is the widest-*sounding* grant in the host, so what

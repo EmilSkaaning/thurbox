@@ -13,6 +13,7 @@ use crate::session::overlay::{Align, CrossExtent, Overlay};
 use crate::session::review::{
     pair_hunk, Classification, CommentAnchor, DiffFile, DiffHunk, DiffLine, DiffLineKind, SidePair,
 };
+use crate::session::view_tree::{DiffTint, TextStyle, ViewNode};
 use crate::ui::overlay::OverlayLayer;
 use crate::ui::scrollbar::{self, ScrollbarGeom};
 use crate::ui::theme::Theme;
@@ -342,8 +343,17 @@ fn render_rows(
 
 /// Width for the diff line-number gutter (two numbers, old+new).
 fn line_number_width(state: &CodeReviewState) -> usize {
-    let max = state
-        .files
+    gutter_number_width(&state.files)
+}
+
+/// Width of one of the gutter's two number columns, over a whole review.
+///
+/// Split out from `line_number_width` because it is also what the published
+/// review section carries: it is computed over **every** hunk of **every** file,
+/// so a bounded window of lines cannot derive it, and a pane that tried would
+/// draw a narrower gutter than this one.
+pub fn gutter_number_width(files: &[DiffFile]) -> usize {
+    let max = files
         .iter()
         .flat_map(|f| f.hunks.iter())
         .map(|h| h.new_start as usize + h.lines.len())
@@ -595,13 +605,95 @@ fn unified_diff_line_wrapped<'a>(
     lines
 }
 
-/// The `('sign', row-tint)` for a diff line kind.
-fn diff_row_bg(kind: DiffLineKind) -> (char, Option<Color>) {
+/// The `('sign', row-tint role)` for a diff line kind.
+///
+/// The single encoding of "which side of the change is this row on", shared by
+/// the native span renderer and [`diff_row_tree`] so the two cannot disagree
+/// about a sign or a tint.
+fn diff_row_sign_tint(kind: DiffLineKind) -> (char, Option<DiffTint>) {
     match kind {
-        DiffLineKind::Add => ('+', Some(Theme::diff_added_bg())),
-        DiffLineKind::Del => ('-', Some(Theme::diff_removed_bg())),
+        DiffLineKind::Add => ('+', Some(DiffTint::Added)),
+        DiffLineKind::Del => ('-', Some(DiffTint::Removed)),
         DiffLineKind::Context => (' ', None),
     }
+}
+
+/// The `('sign', row-tint)` for a diff line kind, resolved against the theme.
+fn diff_row_bg(kind: DiffLineKind) -> (char, Option<Color>) {
+    let (sign, tint) = diff_row_sign_tint(kind);
+    let color = tint.map(|t| match t {
+        DiffTint::Added => Theme::diff_added_bg(),
+        DiffTint::Removed => Theme::diff_removed_bg(),
+    });
+    (sign, color)
+}
+
+/// One unified diff line as a **geometry-free** view tree row: the line-number
+/// gutter, one run per syntax token, and a fill that carries the row tint to the
+/// pane's right edge.
+///
+/// This is the form a plugin pane can produce, and the reason it exists is that
+/// the pane's own renderer cannot be it. `unified_diff_line` windows the body
+/// to `[h_scroll, h_scroll + avail)` and slices that window by **character
+/// count** against a resolved width; a view tree carries no width, so a tree can
+/// hold only the whole body and let the renderer clip it. The two are pinned
+/// together by painting both and comparing the frames (see this module's tests),
+/// which is what makes the bundled `code-review` plugin's equality mean something
+/// rather than two functions agreeing about a format neither is obliged to match.
+///
+/// The row declares its tint **and** its selection when the cursor is on it: the
+/// renderer resolves selection first, which is the precedence this module's own
+/// `row_bg_fn` applies.
+pub fn diff_row_tree(path: &str, line: &DiffLine, num_w: usize, selected: bool) -> ViewNode {
+    let (sign, tint) = diff_row_sign_tint(line.kind);
+    let style = |token: Option<crate::session::view_tree::StyleToken>| TextStyle {
+        token,
+        bold: false,
+        dim: false,
+        underline: false,
+        selected,
+        tint,
+    };
+    let mut runs = vec![ViewNode::styled(
+        diff_gutter(line, num_w, sign),
+        style(Some(crate::session::view_tree::StyleToken::Muted)),
+    )];
+    let lang = crate::ui::syntax::lang_for(path);
+    for (run, token) in crate::ui::syntax::highlight_tokens(&line.text, &lang) {
+        runs.push(ViewNode::styled(run, style(token)));
+    }
+    // The tint's whole point is that it reaches the edge: a background that
+    // stopped where the code stopped would not be the row this pane draws.
+    runs.push(ViewNode::fill(' ', style(None)));
+    ViewNode::Line(runs)
+}
+
+/// The unified diff stream as a view tree: one row per line, with the row the
+/// cursor is on named so the **kernel** windows the list.
+///
+/// The scope this port reproduces (`docs/PHASE4-PANE-READINESS.md` §11): the
+/// stream's *lines*, not its file headers, hunk headers, comments or summary
+/// rows. `cursor` is an index into `lines`, not into the pane's own row list,
+/// because those extra rows are not here.
+pub fn diff_stream_tree(
+    lines: &[(String, DiffLine)],
+    cursor: Option<usize>,
+    num_w: usize,
+) -> ViewNode {
+    if lines.is_empty() {
+        // The same line the native pane's `Info` row draws for a target with no
+        // changes, in the same muted role and with no selection.
+        return ViewNode::list(vec![ViewNode::token(
+            "No changes to show for this target.",
+            crate::session::view_tree::StyleToken::Muted,
+        )]);
+    }
+    let rows = lines
+        .iter()
+        .enumerate()
+        .map(|(i, (path, line))| diff_row_tree(path, line, num_w, Some(i) == cursor))
+        .collect();
+    ViewNode::selectable_list(rows, cursor)
 }
 
 /// A closure that applies the row tint under a style — unless the row is
@@ -1943,5 +2035,317 @@ mod tests {
         assert!(legacy.y < area.y, "the legacy box escaped upward");
         let placed = compose_anchor(area).place(Some(Rect::new(0, 4, 40, 1)), area);
         assert_eq!((placed.y, placed.height), (4, 2));
+    }
+
+    /// Paint a view tree the way any pane is painted.
+    fn paint_tree(node: &ViewNode, width: u16) -> ratatui::buffer::Buffer {
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        crate::ui::plugin_pane::render_tree(
+            node,
+            area,
+            &crate::ui::theme::current(),
+            &crate::session::motion::FrameTable::default(),
+            &mut buf,
+        );
+        buf
+    }
+
+    /// Paint the **untouched** native row the same way.
+    fn paint_native(
+        f: &DiffFile,
+        l: &DiffLine,
+        width: u16,
+        num_w: usize,
+        selected: bool,
+    ) -> ratatui::buffer::Buffer {
+        let sel_style = |base: Style| {
+            if selected {
+                base.bg(Theme::selection_bg()).fg(Theme::selection_fg())
+            } else {
+                base
+            }
+        };
+        let line = unified_diff_line(f, l, width as usize, num_w, selected, 0, None, &sel_style);
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        ratatui::widgets::Widget::render(Paragraph::new(line), area, &mut buf);
+        buf
+    }
+
+    /// Compare two painted rows cell by cell.
+    ///
+    /// Symbol, background and modifiers must be identical everywhere. The
+    /// foreground is compared only where the symbol is not a space, and that
+    /// latitude is the one difference between the two paths rather than a
+    /// convenience: the native renderer pads its row with `Style::default()`,
+    /// which leaves a blank cell's foreground unset, while a fill run resolves
+    /// the theme's primary foreground. A space carries no ink, so the two paint
+    /// the same row — and every cell that *does* carry ink is required to match
+    /// exactly, which is where a real divergence would show.
+    fn assert_same_row(
+        plugin: &ratatui::buffer::Buffer,
+        native: &ratatui::buffer::Buffer,
+        case: &str,
+    ) {
+        assert_eq!(plugin.area, native.area, "{case}: different areas");
+        for x in 0..plugin.area.width {
+            let a = &plugin[(x, 0)];
+            let b = &native[(x, 0)];
+            assert_eq!(a.symbol(), b.symbol(), "{case}: symbol at column {x}");
+            assert_eq!(a.bg, b.bg, "{case}: background at column {x}");
+            assert_eq!(a.modifier, b.modifier, "{case}: modifiers at column {x}");
+            if a.symbol() != " " {
+                assert_eq!(a.fg, b.fg, "{case}: foreground at column {x}");
+            }
+        }
+    }
+
+    fn diff_line(
+        kind: DiffLineKind,
+        old_no: Option<u32>,
+        new_no: Option<u32>,
+        text: &str,
+    ) -> DiffLine {
+        DiffLine {
+            kind,
+            old_no,
+            new_no,
+            text: text.to_string(),
+        }
+    }
+
+    fn file_at(path: &str) -> DiffFile {
+        DiffFile {
+            path: path.to_string(),
+            old_path: None,
+            status: FileStatus::Modified,
+            hunks: Vec::new(),
+        }
+    }
+
+    /// The bridge that makes the bundled `code-review` plugin's tree equality
+    /// mean something: the geometry-free row builder and the pane's own renderer
+    /// paint the **same row**.
+    ///
+    /// Without this the plugin would only be agreeing with a function written in
+    /// the same change. This one compares against `unified_diff_line`, which is
+    /// untouched by the port — so the chain closes on what the pane paints today.
+    #[test]
+    fn the_row_tree_paints_the_native_row() {
+        const WIDTH: u16 = 60;
+        let cases: Vec<(&str, DiffLine, bool)> = vec![
+            // Each of the three kinds: the tint is what separates them, and the
+            // gutter's sign is one character.
+            (
+                "context",
+                diff_line(
+                    DiffLineKind::Context,
+                    Some(11),
+                    Some(12),
+                    "let total = sum;",
+                ),
+                false,
+            ),
+            (
+                "an insertion",
+                diff_line(DiffLineKind::Add, None, Some(13), "let total = sum + 1;"),
+                false,
+            ),
+            (
+                "a deletion",
+                diff_line(DiffLineKind::Del, Some(12), None, "let total = sum;"),
+                false,
+            ),
+            // The cursor's row: selection has to beat the tint, on an insertion
+            // where the two backgrounds would otherwise both apply.
+            (
+                "the cursor on an insertion",
+                diff_line(DiffLineKind::Add, None, Some(14), "fn main() {}"),
+                true,
+            ),
+            (
+                "the cursor on context",
+                diff_line(DiffLineKind::Context, Some(1), Some(1), "}"),
+                true,
+            ),
+            // Every colour the highlighter assigns, so a wrong token shows up as
+            // a wrong cell rather than as a shorter row.
+            (
+                "a keyword and a type",
+                diff_line(
+                    DiffLineKind::Context,
+                    Some(2),
+                    Some(2),
+                    "pub fn build(x: Vec<Row>) {",
+                ),
+                false,
+            ),
+            (
+                "a string",
+                diff_line(DiffLineKind::Add, None, Some(3), "let s = \"hi there\";"),
+                false,
+            ),
+            (
+                "a number",
+                diff_line(DiffLineKind::Context, Some(4), Some(4), "let n = 0x1F_u32;"),
+                false,
+            ),
+            (
+                "a comment",
+                diff_line(DiffLineKind::Context, Some(5), Some(5), "// why, not what"),
+                false,
+            ),
+            (
+                "an unterminated string",
+                diff_line(DiffLineKind::Add, None, Some(6), "let s = \"open"),
+                false,
+            ),
+            // An empty body still draws its gutter and its tint.
+            (
+                "an empty body",
+                diff_line(DiffLineKind::Add, None, Some(7), ""),
+                false,
+            ),
+            // Longer than the pane: the native path slices the body by character
+            // count and the tree lets the renderer clip it, which agree for the
+            // ASCII a diff of code is.
+            (
+                "longer than the pane",
+                diff_line(DiffLineKind::Context, Some(8), Some(8), &"x".repeat(120)),
+                false,
+            ),
+        ];
+
+        let f = file_at("src/build.rs");
+        for (name, line, selected) in cases {
+            for num_w in [2usize, 4] {
+                assert_same_row(
+                    &paint_tree(&diff_row_tree(&f.path, &line, num_w, selected), WIDTH),
+                    &paint_native(&f, &line, WIDTH, num_w, selected),
+                    &format!("{name} (gutter width {num_w})"),
+                );
+            }
+        }
+    }
+
+    /// The comment marker follows the file's extension in both paths, which is the
+    /// one thing `diff_row_tree` reads the path for.
+    #[test]
+    fn the_row_tree_takes_its_comment_marker_from_the_path() {
+        const WIDTH: u16 = 40;
+        for (path, text) in [
+            ("conf/app.toml", "# a hash comment"),
+            ("db/schema.sql", "-- a dash comment"),
+            ("src/main.rs", "// a slash comment"),
+            // The same text where the marker does *not* apply: a `#` in a Rust
+            // file is an attribute, not a comment, so the two paths must agree
+            // that it is plain.
+            ("src/main.rs", "#[derive(Debug)]"),
+        ] {
+            let f = file_at(path);
+            let line = diff_line(DiffLineKind::Context, Some(1), Some(1), text);
+            assert_same_row(
+                &paint_tree(&diff_row_tree(path, &line, 2, false), WIDTH),
+                &paint_native(&f, &line, WIDTH, 2, false),
+                &format!("{path}: {text}"),
+            );
+        }
+    }
+
+    /// A row's structure, asserted directly so the equality above cannot pass on
+    /// two nearly-empty lines.
+    #[test]
+    fn a_row_is_a_gutter_then_tokens_then_a_fill() {
+        let line = diff_line(DiffLineKind::Add, None, Some(9), "let x = 1;");
+        let tree = diff_row_tree("src/a.rs", &line, 3, false);
+        let runs = match &tree {
+            ViewNode::Line(runs) => runs,
+            other => panic!("expected a line, got {}", other.kind_name()),
+        };
+        assert!(runs.len() > 3, "one run per token: {runs:#?}");
+        match &runs[0] {
+            ViewNode::Text { content, style } => {
+                // Three-wide columns: an empty old side, the new number right
+                // aligned, then the sign — `{old:>3} {new:>3} {sign} `.
+                assert_eq!(
+                    content, "      9 + ",
+                    "the gutter is two columns and a sign"
+                );
+                assert_eq!(style.tint, Some(DiffTint::Added));
+            }
+            other => panic!("expected the gutter, got {}", other.kind_name()),
+        }
+        // The last run is the fill, and it carries the tint — which is the whole
+        // reason the row's background reaches the pane's edge.
+        match runs.last() {
+            Some(ViewNode::Fill { glyph, style }) => {
+                assert_eq!(*glyph, ' ');
+                assert_eq!(style.tint, Some(DiffTint::Added));
+            }
+            other => panic!("expected a fill, got {other:?}"),
+        }
+        // A context row carries no tint at all, rather than a third value.
+        let plain = diff_row_tree(
+            "src/a.rs",
+            &diff_line(DiffLineKind::Context, Some(9), Some(9), "let x = 1;"),
+            3,
+            false,
+        );
+        assert!(plain
+            .children()
+            .iter()
+            .all(|run| matches!(run, ViewNode::Text { style, .. } | ViewNode::Fill { style, .. } if style.tint.is_none())));
+    }
+
+    /// **Enumerated divergence: a tab.** Node content is sanitized on the way
+    /// into the tree (a tab becomes four spaces, control characters are dropped),
+    /// while the native span renderer passes the raw byte to the terminal. Both
+    /// panes are self-consistent and the tree's reading is the safer one, but the
+    /// two are not cell-identical for a body containing a tab — so the frame
+    /// comparison above uses tab-free bodies and this pins the reason.
+    #[test]
+    fn the_tree_expands_a_tab_and_the_native_row_does_not() {
+        let line = diff_line(DiffLineKind::Context, Some(1), Some(1), "\tindented");
+        let tree = diff_row_tree("src/a.rs", &line, 2, false);
+        let text: String = tree
+            .children()
+            .iter()
+            .filter_map(|n| match n {
+                ViewNode::Text { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(!text.contains('\t'), "the tree expands the tab: {text:?}");
+        assert!(line.text.contains('\t'), "the native row keeps it");
+    }
+
+    /// The stream is a list that names its cursor, which is what makes a plugin's
+    /// copy scroll — and an empty stream is the native pane's own `Info` line.
+    #[test]
+    fn the_stream_is_a_selectable_list() {
+        let lines: Vec<(String, DiffLine)> = (0..5)
+            .map(|i| {
+                (
+                    "src/a.rs".to_string(),
+                    diff_line(DiffLineKind::Context, Some(i + 1), Some(i + 1), "x"),
+                )
+            })
+            .collect();
+        match diff_stream_tree(&lines, Some(3), 2) {
+            ViewNode::List { children, selected } => {
+                assert_eq!(children.len(), 5);
+                assert_eq!(selected, Some(3));
+            }
+            other => panic!("expected a list, got {}", other.kind_name()),
+        }
+        // The empty state carries no cursor and one muted line.
+        match diff_stream_tree(&[], None, 2) {
+            ViewNode::List { children, selected } => {
+                assert_eq!(selected, None);
+                assert_eq!(children.len(), 1);
+            }
+            other => panic!("expected a list, got {}", other.kind_name()),
+        }
     }
 }

@@ -187,6 +187,15 @@ const BUNDLED: &[BundledPlugin] = &[
         manifest: include_str!("bundled/file-viewer/plugin.toml"),
         entry: include_str!("bundled/file-viewer/init.luau"),
     },
+    // The code review's unified diff stream, hidden by default too — the first
+    // pane ported only in *part* (its headers, comments, sub-modes and paired
+    // layout are out of scope), and the first whose rows have unbounded internal
+    // structure: one node per syntax token.
+    BundledPlugin {
+        name: "code-review",
+        manifest: include_str!("bundled/code-review/plugin.toml"),
+        entry: include_str!("bundled/code-review/init.luau"),
+    },
 ];
 
 /// Materialize the bundled plugins and return their directories.

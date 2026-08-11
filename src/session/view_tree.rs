@@ -60,6 +60,9 @@ pub enum StyleToken {
     Role,
     /// A git branch or repository name.
     Branch,
+    /// The accent's brighter partner — a heading inside an accented region, or
+    /// a type name in highlighted code.
+    AccentBright,
     /// An addition — inserted lines, a positive delta.
     Added,
     /// The colour a pane's own borders and rules are drawn in.
@@ -90,6 +93,7 @@ impl StyleToken {
             StyleToken::Secondary => "secondary",
             StyleToken::Role => "role",
             StyleToken::Branch => "branch",
+            StyleToken::AccentBright => "accent_bright",
             StyleToken::Added => "added",
             StyleToken::Border => "border",
             StyleToken::StatusWorking => "status_working",
@@ -112,6 +116,7 @@ impl StyleToken {
             StyleToken::Secondary,
             StyleToken::Role,
             StyleToken::Branch,
+            StyleToken::AccentBright,
             StyleToken::Added,
             StyleToken::Border,
             StyleToken::StatusWorking,
@@ -140,6 +145,40 @@ impl StyleToken {
     /// Parse a wire name, or `None` if the host does not define it.
     pub fn parse(s: &str) -> Option<StyleToken> {
         StyleToken::all().iter().copied().find(|t| t.as_str() == s)
+    }
+}
+
+/// Which side of a change a diff row is on.
+///
+/// Two members and no third: the vocabulary is the pair of palette fields the
+/// theme defines for it (`diff_added_bg`, `diff_removed_bg`), and a context row
+/// carries no tint at all rather than a "none" member — an absent role and a
+/// role meaning "nothing" would be two spellings of one state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiffTint {
+    /// An inserted line.
+    Added,
+    /// A deleted line.
+    Removed,
+}
+
+impl DiffTint {
+    /// The wire name a plugin uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiffTint::Added => "added",
+            DiffTint::Removed => "removed",
+        }
+    }
+
+    /// Every tint the host defines, for an error that has to list them.
+    pub fn all() -> &'static [DiffTint] {
+        &[DiffTint::Added, DiffTint::Removed]
+    }
+
+    /// Parse a wire name, or `None` if the host does not define it.
+    pub fn parse(s: &str) -> Option<DiffTint> {
+        DiffTint::all().iter().copied().find(|t| t.as_str() == s)
     }
 }
 
@@ -185,6 +224,21 @@ pub struct TextStyle {
     /// bold, the file viewer in the selection pair), so an appearance inferred
     /// from the list's cursor would make one of them unreproducible.
     pub selected: bool,
+    /// The run's row is a diff insertion or deletion.
+    ///
+    /// A **role** like [`TextStyle::selected`], and for the same reason: the
+    /// host resolves it to the theme's added-row or removed-row background, so
+    /// the plugin names which side of a change the row is on and never a
+    /// colour. Unlike a selection it leaves the foreground to
+    /// [`TextStyle::token`], because a diff body's colours are the pane's
+    /// (syntax highlighting) while the tint is the only thing carrying add
+    /// versus remove — the gutter's sign is one character wide.
+    ///
+    /// [`TextStyle::selected`] wins over it. The cursor's row is one appearance
+    /// whatever it contains, and two backgrounds on one row is not a state the
+    /// theme defines — the rule `ui::code_review`'s own renderer already
+    /// applies.
+    pub tint: Option<DiffTint>,
 }
 
 /// A gauge's fill, as a percentage.
@@ -317,6 +371,24 @@ pub enum ViewNode {
         /// Flush-right header text; `None` draws the rounded percentage.
         suffix: Option<String>,
     },
+    /// One repeated glyph across whatever width is left on its line.
+    ///
+    /// An inline run whose width is the *residue* of the line it sits on, which
+    /// is why the kernel resolves it: a plugin is never told the width it got,
+    /// and a background that stops where its text stops is not a diff row's
+    /// tint — the tint reaches the pane's right edge. Same trade as
+    /// [`ViewNode::Gauge`] for a bar and [`ViewNode::List`] for a scroll window,
+    /// applied to a line's leftover columns.
+    ///
+    /// It carries a full [`TextStyle`], so a fill can be tinted (which is what
+    /// makes a diff row's background reach the edge) or drawn in a colour role
+    /// (which is what a rule trailing a heading is).
+    Fill {
+        /// The glyph to repeat. One character, sanitized at construction.
+        glyph: char,
+        /// How to draw it.
+        style: TextStyle,
+    },
     /// Blank vertical space.
     Spacer {
         /// How many lines to leave empty.
@@ -356,6 +428,7 @@ impl ViewNode {
             ViewNode::Motion { motion, .. } => motion.frames(),
             ViewNode::Text { .. }
             | ViewNode::Divider
+            | ViewNode::Fill { .. }
             | ViewNode::Gauge { .. }
             | ViewNode::Spacer { .. } => &[],
         }
@@ -406,7 +479,9 @@ impl ViewNode {
     /// rather than the animation that carried it.
     pub fn first_non_inlineable(&self) -> Option<&'static str> {
         match self {
-            ViewNode::Text { .. } => None,
+            // A fill is inlineable by design: it is the one run whose width the
+            // *line* decides, which only means anything on a line.
+            ViewNode::Text { .. } | ViewNode::Fill { .. } => None,
             ViewNode::Line(children) => children.iter().find_map(ViewNode::first_non_inlineable),
             ViewNode::Motion { motion, .. } => motion
                 .frames()
@@ -436,6 +511,7 @@ impl ViewNode {
             ViewNode::Column(_) => "column",
             ViewNode::List { .. } => "list",
             ViewNode::Divider => "divider",
+            ViewNode::Fill { .. } => "fill",
             ViewNode::Gauge { .. } => "gauge",
             ViewNode::Spacer { .. } => "spacer",
             ViewNode::Motion { .. } => "motion",
@@ -484,6 +560,19 @@ impl ViewNode {
     /// view.
     pub fn selectable_list(children: Vec<ViewNode>, selected: Option<usize>) -> ViewNode {
         ViewNode::List { children, selected }
+    }
+
+    /// Build a fill run, sanitizing its glyph the way text is sanitized.
+    ///
+    /// A control character becomes a space rather than being refused: the glyph
+    /// is repeated across a whole row, so an escape sequence here would be the
+    /// worst place in the catalog to let one through, and a blank fill is the
+    /// same shape the caller asked for.
+    pub fn fill(glyph: char, style: TextStyle) -> ViewNode {
+        ViewNode::Fill {
+            glyph: if glyph.is_control() { ' ' } else { glyph },
+            style,
+        }
     }
 
     /// Build a gauge, sanitizing its label and suffix like any other text.

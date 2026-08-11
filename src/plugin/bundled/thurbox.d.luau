@@ -11,9 +11,29 @@
 -- merely different.
 export type StyleToken =
     "accent" | "muted" | "danger" | "success" | "warning"
-    | "secondary" | "role" | "branch" | "added" | "border"
+    | "secondary" | "role" | "branch" | "accent_bright" | "added" | "border"
     | "status_working" | "status_blocked" | "status_done"
     | "status_idle" | "status_error" | "status_unreachable"
+
+-- Which side of a change a diff row is on. Like `selected` it is a *role*: the
+-- host resolves it to the theme's added-row or removed-row background, so the
+-- pane names no colour. Unlike `selected` it leaves the foreground to `style`,
+-- because a diff body's colours are the pane's while the tint is the only thing
+-- carrying add versus remove. A context row carries no tint at all.
+export type DiffTint = "added" | "removed"
+
+-- A style given as one table instead of positionally. Every field is optional,
+-- and the fields are the node's own — so this is a spelling, not a second model.
+-- It exists because a style now carries more than a call can reasonably order:
+-- `tint` has no positional slot and never will.
+export type TextStyle = {
+    token: StyleToken?,
+    bold: boolean?,
+    dim: boolean?,
+    underline: boolean?,
+    selected: boolean?,
+    tint: DiffTint?,
+}
 
 export type ViewNode = {
     kind: string,
@@ -32,6 +52,10 @@ export type ViewNode = {
     -- rather than layering over it. Use it for the runs of the row a cursor is
     -- on; combine it with `bold` freely.
     selected: boolean?,
+    -- Declares the run's row an insertion or a deletion; `selected` beats it.
+    tint: DiffTint?,
+    -- `fill` only: the single character repeated across the line's residue.
+    glyph: string?,
     children: { ViewNode }?,
     -- `list` only: which child (1-based) the cursor is on. Named apart from the
     -- boolean `selected` above because they are different questions — one asks
@@ -62,14 +86,24 @@ export type Ui = {
     -- The emphasis flags are positional because the node's own fields are the
     -- canonical form and `bold` cannot stop being the third argument; they read
     -- in declaration order (bold, underline, dim).
+    -- `style` is either a token name (the positional form, whose flags follow it)
+    -- or a whole `TextStyle` table. Both build the same node; the table is the
+    -- only form that reaches `tint`.
     text: (
         content: string | number,
-        style: StyleToken?,
+        style: (StyleToken | TextStyle)?,
         bold: boolean?,
         underline: boolean?,
         dim: boolean?,
         selected: boolean?
     ) -> ViewNode,
+    -- One glyph repeated across whatever width is left on the line after every
+    -- other run has taken its own. The host resolves that width, which is the
+    -- point: it is how a run reaches the pane's right edge without a plugin ever
+    -- being told how wide the pane is. Put it last for a trailing rule or a row
+    -- background; put it *before* a run to push that run flush right. Admissible
+    -- wherever `text` is.
+    fill: (glyph: string, style: (StyleToken | TextStyle)?) -> ViewNode,
     row: (children: { ViewNode }?) -> ViewNode,
     -- One row of runs, each at its own width — a `label: value` line. Unlike
     -- `row`, which splits its area into equal shares, and unlike a single
@@ -265,6 +299,37 @@ export type FileTree = {
     nerdFont: boolean,
 }
 
+-- One line of the diff the code-review view has open.
+--
+-- `oldNo`/`newNo` are absent on the side the line is not on: an insertion has no
+-- old-side number, and `0` would be a number a pane could print. `kind` is
+-- `"add"`, `"del"` or `"context"`.
+--
+-- `text` is **raw**: not split into coloured runs, not windowed to any scroll
+-- offset, not padded to any width. How a diff body reads is the pane's decision,
+-- so the highlighting is yours to do — `path` is there because a comment marker
+-- depends on the file's extension.
+export type ReviewLine = {
+    path: string,
+    oldNo: number?,
+    newNo: number?,
+    kind: string,
+    text: string,
+}
+
+-- The open review's diff stream.
+--
+-- `cursor` is the 1-based row the review's cursor is on — hand it to `ui.list`'s
+-- second argument and the pane scrolls. `numberWidth` is the width of each of the
+-- gutter's two number columns; it crosses because it is computed over the *whole*
+-- review, which the published window is not, so a pane deriving it would draw a
+-- narrower gutter than thurbox's own.
+export type ReviewDiff = {
+    lines: { ReviewLine },
+    cursor: number?,
+    numberWidth: number,
+}
+
 export type Thurbox = {
     -- This plugin's own name. Always present.
     name: string,
@@ -298,6 +363,15 @@ export type Thurbox = {
     -- not in it, dotfiles never entered it, and nothing outside the active
     -- session's own directories can appear.
     files: (() -> FileTree)?,
+    -- Present only with `review`. Always a table — "no review is open" is a fact.
+    -- Reports the diff the *user* has open in thurbox's code-review view.
+    --
+    -- This is **not** a git binding. It produces no diff of your choosing, names
+    -- no revision range, reads no file and runs no command: it reads a snapshot
+    -- the host already built from the pane's own state. The list is bounded, so a
+    -- large diff arrives truncated with no cursor rather than as a tree the host
+    -- would refuse for exceeding its node budget.
+    review: (() -> ReviewDiff)?,
 }
 
 -- What a plugin's `init.luau` returns.

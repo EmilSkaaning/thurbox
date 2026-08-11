@@ -182,12 +182,20 @@ impl PluginVm {
         // `debug` are the ambient filesystem, process, clock and introspection
         // surfaces the runtime spec requires to be absent — omitting them is
         // how they are denied, not a later scrub of the globals table.
+        //
+        // `UTF8` is here for the same reason `MATH` is, and it was added by the
+        // code-review port: a pane that styles the *inside* of a line has to
+        // agree with the host about where one character ends, and the host counts
+        // characters. `string.byte` counts bytes, so a plugin lexing a line with
+        // one multi-byte character in it drifts for the rest of the line — a
+        // silently wrong pane rather than a refused one.
         let libs = StdLib::TABLE
             | StdLib::STRING
             | StdLib::MATH
             | StdLib::BIT
             | StdLib::BUFFER
             | StdLib::COROUTINE
+            | StdLib::UTF8
             | StdLib::VECTOR;
 
         let lua = Lua::new_with(libs, LuaOptions::default()).map_err(|e| classify(&e))?;

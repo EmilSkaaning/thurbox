@@ -17,8 +17,10 @@ keyboard, ADR-28). §8 records what the **second** port — the tasks pane, ADR-
 needed on top of them, and §9 the **third** — the file viewer, ADR-30, which
 closed §8's scrolling row. §10 records the first surface on the phase's list that
 was **not ported at all**: global search is not a pane, and no widening of the
-pane API would have made it one. Those three sections are the only part of this
-document still a worklist.
+pane API would have made it one. §11 records the **fourth** port — the code
+review's diff stream, ADR-31 — the first ported only in *part*, and the first to
+reach the host's execution and node bounds. Those four sections are the only part
+of this document still a worklist.
 
 The info panel has now been ported twice — first to the view tree in every
 build (ADR-26), then reproduced as the **bundled `info-panel` plugin** (ADR-27) —
@@ -525,3 +527,173 @@ reading of §6's "ordering" finding is stronger than it was: the phase's list is
 not sorted by difficulty but by *kind*, and the panes are done. What is left needs
 the non-pane extension point, which is the next thing to design rather than the
 next thing to port.
+
+## 11. The fourth port: the code review's diff stream (ADR-31)
+
+§10 read the phase's remaining list as "not sorted by difficulty but by *kind*",
+and said the code-review view is not a plain pane either. That reading holds and
+this section is what came of taking it seriously: the pane is ported **in part**,
+the part is reproduced completely, and the remainder is a list rather than a gap.
+
+It is also the first port to answer a question the three before it could not ask.
+Every earlier pane draws one row per record with two or three runs on it. A diff
+row is a gutter, one run **per syntax token**, and a background that has to reach
+the pane's right edge — thousands of times over. So this is where the view tree's
+bounds get measured against a real pane rather than against a fixture.
+
+### What was ported, and what was not
+
+**In scope:** the unified stream's *lines*. For each one, the
+`{old} {new} {sign}` line-number gutter in the muted role, the body tokenised and
+drawn one styled run per token, the insertion/deletion row tint carried to the
+pane's right edge, and the cursor's row in the theme's selection pair.
+
+**Out of scope, itemised** — the point of this table is that the remaining surface
+is enumerable:
+
+| Not ported | Why |
+|---|---|
+| the side-by-side layout | `paired_body_width` divides the pane's resolved width in two; no node carries a width |
+| the wrap toggle | `unified_diff_line_wrapped` chunks a body by the *available* width, and its chunk boundaries are its own arithmetic over a number the plugin is never told |
+| horizontal scroll | both window bounds are geometry |
+| file headers and hunk headers | expressible in shape (the new fill node is what a header's trailing rule wants), but the counts are drawn in `diff_added`/`diff_removed` — separate palette fields from the `added` token's `tool_allowed` — and the hunk header is `truncate`d with an ellipsis, which is §8's still-open clipping row |
+| comments, classification badges, the review summary | a second published shape and a second interaction; the stream is what is being measured |
+| reviewed marks and folding | they belong to the headers, above |
+| the find sub-mode | its bar needs §9's three missing features (a frame node, a cursor appearance, a bottom-anchored region), and its in-row match highlight *replaces* the syntax colouring, which is a third styling mode |
+| the target picker, the footer, the compose box | chrome and sub-modes, each owning keys a plugin pane does not receive |
+| the scrollbar | chrome outside the rows, as for the file viewer |
+| the central-pane seat | `PaneSlot` seats a plugin pane only on the right; the native review owns the centre *and* a column in the right slot |
+
+`the_out_of_scope_surface_is_absent_rather_than_approximated` asserts the plugin's
+pane contains none of it — no `@@`, no rule, no chevron, no `✓`, no badge, no
+`Search`. A port that had drawn a plausible-looking file header would have looked
+more complete and proved less.
+
+### What had to be widened: three things, all of them roles or residue
+
+**A tint** (`TextStyle::tint`, two members) — because the row background is the
+*only* thing distinguishing an insertion from a deletion in the body. The gutter's
+sign is one character and the body's colours belong to the syntax highlighter, so a
+"port" without the tint would not be a port of add/remove colouring at all. Like
+§9's `selected` it is a role the theme resolves; unlike it, it leaves the
+foreground to the token, and selection beats it.
+
+**A fill** (`ViewNode::Fill`) — because a background that stops where the text
+stops is not the row. This is the `gauge` trade a fourth time, applied to a line's
+leftover columns, and it is **half of §8's first open row**: put a fill *before* a
+run and the run is flush right. The ellipsizing clip that row also asks for is
+still open, because nothing in this scope truncates.
+
+**One style token** (`accent_bright`) — the colour `ui::syntax` gives a capitalised
+type name, and the only one of the six it uses that no token could name.
+
+And a fourth thing that is not a node at all: **the sandbox loaded no way to walk a
+string by character.** `StdLib::UTF8` was absent, so a plugin lexing a line
+containing one multi-byte character drifted for the rest of it. It is pure
+computation — no file, no process, no clock — so it is admissible for the reason
+`math` is, and it is *necessary* rather than convenient for any pane that styles
+the inside of a line. This is §6's lesson again: reading the pane's calls found the
+node gaps, and only running the plugin found this one.
+
+### What did **not** have to be widened, which is the stronger half
+
+**The kernel publishes no colouring.** The `review` section carries a line's raw
+text and its file's path; the bundled plugin carries the lexer, in Luau. Publishing
+`{text, token}` runs would have been smaller, shorter and faster, and it was
+rejected on §8's rule — publish a rendering only when two panes must agree about it
+— which bites hardest here, because syntax highlighting is the most obviously
+presentational thing in the pane and `src/ui/code_review.rs` is `ui::syntax`'s only
+reader. The cost is real: the two lexers must agree token for token, and nothing
+but the equality test makes them.
+
+**No filesystem and no git.** `Capability::Review` reads the diff the *user*
+opened. `Capability::Fs` stays undeclared (the teardown gate reserves it), and the
+vocabulary defines no `git` either.
+
+**No formatter.** After four ports §7's `thurbox.format.*` case is still made by
+exactly one pane.
+
+### The oracle is different here, and the difference is the finding
+
+The three earlier ports refactored the native pane to *draw* its view tree, so tree
+equality was frame equality by construction. This one does not, because
+`unified_diff_line` cannot be a geometry-free tree: it windows the body to
+`[h_scroll, h_scroll + avail)`, slices that window by **character count** against a
+resolved width, and the wrap mode reflows one logical row onto several by the same
+arithmetic.
+
+So the chain has two links: `tests/bundled_code_review.rs` asserts the plugin's
+tree equals `ui::code_review::diff_stream_tree`, and `ui::code_review`'s own tests
+paint `diff_row_tree` against the **untouched** `unified_diff_line` and require the
+frames to be identical. Without the second link the first would be two functions
+written in the same change agreeing about a format neither is obliged to match —
+which is exactly the shortcut Phase 4 asks a port not to take. The consequence to
+state plainly: the reproduction is validated at the level of **one painted row**,
+plus tree equality for the stream around it. It is not a claim that this pane's
+rendering is now the tree's.
+
+Two divergences fall out of that and are pinned by their own tests rather than
+smoothed over:
+
+| Divergence | Native | The tree |
+|---|---|---|
+| a tab in the body | the raw byte reaches the terminal | sanitized to four spaces on the way into a node |
+| letter case outside ASCII | Rust's `char::is_uppercase` is Unicode-aware | the Luau lexer classifies case for ASCII only |
+| a blank pad cell's foreground | unset (`Style::default()`) | the theme's primary foreground |
+
+The third is why the frame comparison requires symbol, background and modifiers to
+match everywhere and the foreground only where the cell is not blank: a space
+carries no ink. Every cell that *does* carry ink must match exactly.
+
+### The host's bounds, measured — and the documented one is not the tighter one
+
+This is the most transferable thing the port produced.
+
+A row of real code (`let total: Vec<Row> = rows.iter().map(|r| r.id).collect();`)
+costs about **26 nodes** — a gutter, a fill, and one per token. `MAX_NODES` is
+4096, so the node budget permits roughly **150 rows**: a diff of a few hundred
+lines does not fit, and a refused tree means the pane shows an error rather than a
+shorter diff.
+
+But at that size the plugin is **not** refused for its node budget. It is refused
+for its **execution** budget (`interrupt_budget`, 200 000 ticks), reached while the
+Luau row loop is still running — the tree is never returned, let alone converted.
+So the effective ceiling on a plugin diff pane is instructions, and the node budget
+is the second wall behind it. `the_hosts_bounds_are_reached_by_an_ordinary_diff`
+asserts both: that the node budget alone would allow under 300 rows, and that the
+error at that size names the execution budget.
+
+`MAX_REVIEW_ROWS` (60) is therefore a bound on the **section**, chosen so a
+representative row leaves both budgets comfortable — not so a pathological one is
+impossible. Nothing prevents a single dense 4096-character line from costing
+hundreds of nodes on its own, which is the precise sense in which this is the first
+pane the model cannot bound locally: *every other section bounds a row count
+because a row costs a fixed handful of nodes.*
+
+**Still open, and deliberately not designed:**
+
+| Open gap | Where the host stands | Cheapest closure |
+|---|---|---|
+| the budget is spent on rows the kernel windows away | the plugin builds every published row; the kernel picks the visible slice afterwards | window *before* conversion — a lazy row source, or a declared row budget the plugin is told. Both are shapes the model has refused for width and height (ADR-26, ADR-29, ADR-30), and one consumer is too few to design a third |
+| a per-row node budget | `MAX_NODES` is a whole-tree bound, so one dense row can refuse a whole pane | a per-child budget at conversion, refusing the row rather than the tree |
+| §8's ellipsizing clip | still open; the fill closed only the flush-right half | a line that clips with an ellipsis |
+| the four vocabulary rows §10 left open | unchanged (frame node, bottom-anchored row, search accent, italic) | this port needed none of them, and the find bar it would have drawn is out of scope |
+
+One thing to note about that last row, because a gate caught it:
+`tests/global_search_pane_gap.rs` listed a node named `Fill` as one of the shapes
+that would close §10's *bottom-anchored region*, and this port added a node with
+that name — so the probe reported the row closed. It is not: this fill is an
+**inline** run whose width is the residue of a *line*, and a horizontal residue
+anchors nothing vertically. The probe now asks the tree whether the fill it found
+is inlineable rather than trusting its name, which is the correction the gate
+existed to force.
+
+### What it means for the last surface
+
+The session list is what is left, and §10 already said selecting a row in it *is*
+switching the application's active session — a write, which the kernel-state
+channel does not do. Nothing here changes that. What this port adds to the record
+is a second, quantitative reason to design the non-pane extension point before
+porting it: the session list is small, but it is the pane most likely to be
+**rebuilt often**, and this pane established that the binding constraint on a
+plugin pane is not what it can express but how much work it may do per frame.

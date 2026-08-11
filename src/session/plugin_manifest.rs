@@ -85,6 +85,17 @@ pub enum Capability {
     /// reached the filesystem itself would be a different capability, asked for
     /// in a different sentence.
     Files,
+    /// Read the diff the code-review view currently has open — one entry per
+    /// line, with its path, its line numbers on each side, whether it is an
+    /// addition, a deletion or context, and its text.
+    ///
+    /// Deliberately **not** a version-control capability, for `Files`' reason:
+    /// it produces no diff of the plugin's choosing, names no revision range,
+    /// reads no file and runs no command. It reads the review the *user* opened,
+    /// which is why it is strictly narrower than a power that could ask git for
+    /// one — and why a pane written against it can be a reproduction of thurbox's
+    /// own rather than a different diff viewer.
+    Review,
 }
 
 impl Capability {
@@ -102,6 +113,7 @@ impl Capability {
             Capability::Automations => "automations",
             Capability::Tasks => "tasks",
             Capability::Files => "files",
+            Capability::Review => "review",
         }
     }
 
@@ -119,6 +131,7 @@ impl Capability {
             Capability::Automations,
             Capability::Tasks,
             Capability::Files,
+            Capability::Review,
         ]
     }
 
@@ -135,6 +148,7 @@ impl Capability {
                 | Capability::Automations
                 | Capability::Tasks
                 | Capability::Files
+                | Capability::Review
         )
     }
 }

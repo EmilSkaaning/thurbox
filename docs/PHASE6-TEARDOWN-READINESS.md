@@ -67,7 +67,8 @@ it, not a refactor done in pieces.
 
 ## 3. Phase 4 has started, but no pane has been handed over
 
-`src/plugin/bundled/` contains `hello`, `info-panel`, `tasks` and `file-viewer`.
+`src/plugin/bundled/` contains `hello`, `info-panel`, `tasks`, `file-viewer` and
+`code-review`.
 
 | Pane | Native renderer | Bundled plugin | Drawn by |
 |---|---|---|---|
@@ -76,13 +77,13 @@ it, not a refactor done in pieces.
 | Automations | `src/ui/automations_panel.rs` | absent | the native pane |
 | File viewer | `src/ui/file_viewer.rs` | `file-viewer` | the native pane |
 | Global search | `src/ui/global_search.rs` | none possible yet (PHASE4 §10) | the native pane |
-| Code review | `src/ui/code_review.rs` | absent | the native pane |
+| Code review | `src/ui/code_review.rs` | `code-review` (the diff stream only, PHASE4 §11) | the native pane |
 | Session list | `src/ui/project_list.rs` | absent | the native pane |
 
 `docs/PHASE4-PANE-READINESS.md` is the audit of what the plugin API could not
 express for the *first* of those panes; all five of its gaps are now closed
-(ADR-26, ADR-27, ADR-28), and §8 and §9 record what the second and third ports
-needed on top of them (ADR-29, ADR-30).
+(ADR-26, ADR-27, ADR-28), and §8, §9 and §11 record what the second, third and
+fourth ports needed on top of them (ADR-29, ADR-30, ADR-31).
 
 One row in the table above will not fill in by porting harder. §10 of the same
 document records **global search as structurally unportable** — it is a mode, not
@@ -91,10 +92,19 @@ own, and writes their cursors and the focus, none of which a plugin pane may do.
 `tests/global_search_pane_gap.rs` holds that verdict as probes, so whoever closes
 one of its blockers is told to revisit it.
 
-**A pane's row is ready only on handover, not on existence.** Three panes now show
+The code-review row is the first that is **partly** filled: the bundled plugin
+reproduces the unified diff stream's lines and nothing else, and §11 of the same
+document itemises the rest of the view — the paired layout, the headers, the
+comments, the marks, the find sub-mode, the target picker, the footer and the
+compose box — with the reason each is unported. That row therefore needs both a
+handover *and* the remaining surface before `src/ui/code_review.rs` can go, which
+is a longer list than any other pane's.
+
+**A pane's row is ready only on handover, not on existence.** Four panes now show
 why the distinction is load-bearing rather than pedantic: each plugin exists and
-reproduces its pane exactly, while the native renderer is still what the interface
-draws. Deleting `src/ui/info_panel.rs` today would remove the pane every
+reproduces its pane (the first three exactly, the fourth in the part it declares),
+while the native renderer is still what the interface draws. Deleting
+`src/ui/info_panel.rs` today would remove the pane every
 user is looking at. So `tests/teardown_gate.rs`'s pane probe is a conjunction —
 the bundled plugin exists **and** `src/app/view.rs` no longer names the pane's
 native renderer module — and `a_reproduced_pane_is_not_a_replaced_one` pins that

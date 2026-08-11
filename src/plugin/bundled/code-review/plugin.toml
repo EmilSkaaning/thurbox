@@ -1,0 +1,37 @@
+# thurbox's code review, as a plugin — the unified diff stream's lines.
+#
+# The fourth pane of Phase 4 and the first ported only in **part**: the native
+# view (`src/ui/code_review.rs`) also draws a paired side-by-side layout, file and
+# hunk headers, classified comments, reviewed marks, a find sub-mode, a target
+# picker, horizontal scroll, a wrap toggle, a footer and a compose box. Every one
+# of those is out of scope, itemised in the change's proposal and in
+# `docs/PHASE4-PANE-READINESS.md` §11, because a partial port that names its
+# boundary is worth more than a whole one that approximates.
+#
+# What it does reproduce is the part that stresses the view tree hardest: the
+# `{old} {new} {sign} ` line-number gutter, one styled run per syntax token, and
+# the insertion/deletion row tint carried to the pane's right edge by a fill.
+# `tests/bundled_code_review.rs` asserts the tree equals the kernel's builder,
+# which is in turn painted against the untouched native renderer.
+#
+# The syntax highlighter is **this plugin's own**, in Luau. The host publishes a
+# line's text and never its colouring: how a diff body reads is a pane's decision,
+# and a plugin arranging runs the kernel had already coloured would prove nothing.
+#
+# Two capabilities, and that is the whole reach: it renders, and it reads the diff
+# the review already has open. `review` grants no git — no diff of its choosing,
+# no revision, no file, no command.
+name = "code-review"
+api_version = 1
+
+capabilities = ["render", "review"]
+
+[[panes]]
+id = "diff"
+title = "Review (plugin)"
+slot = "right"
+# Off by default. The native review is still what F7 opens, so shipping this
+# visible would put a second diff on screen for every user. Turn it on to compare
+# them — side by side the plugin's copy is narrower, since a plugin pane is seated
+# only in the right column while the native review owns the centre.
+default_visible = false

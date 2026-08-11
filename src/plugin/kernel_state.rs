@@ -19,8 +19,8 @@
 use mlua::{Lua, Table};
 
 use crate::session::pane_context::{
-    AutomationSnapshot, FileNodeSnapshot, PaneContext, SessionSnapshot, SystemSnapshot,
-    TaskSnapshot,
+    AutomationSnapshot, FileNodeSnapshot, PaneContext, ReviewLineSnapshot, SessionSnapshot,
+    SystemSnapshot, TaskSnapshot,
 };
 
 /// Set `key` to `value` only when there is one.
@@ -236,12 +236,49 @@ fn build_file_node(lua: &Lua, node: &FileNodeSnapshot) -> mlua::Result<Table> {
     Ok(t)
 }
 
+/// The open review's diff stream:
+/// `{ lines = { … }, cursor = n?, numberWidth = n }`.
+///
+/// Always a table, for the file tree's reason — "no review is open" is knowledge
+/// the kernel has, and a pane draws its empty state from an empty list rather
+/// than from a nil. `cursor` is **one-based**, like `files.selected`, because it
+/// is the index a plugin hands straight back to `ui.list`.
+///
+/// `numberWidth` crosses because it is computed over the whole review, which the
+/// published window is not: see
+/// [`ReviewSnapshot::number_width`](crate::session::pane_context::ReviewSnapshot::number_width).
+pub fn review_table(lua: &Lua, context: &PaneContext) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    let lines = lua.create_table()?;
+    for (i, line) in context.review.lines.iter().enumerate() {
+        lines.set(i + 1, build_review_line(lua, line)?)?;
+    }
+    t.set("lines", lines)?;
+    set_opt(&t, "cursor", context.review.cursor.map(|i| i as u64 + 1))?;
+    t.set("numberWidth", context.review.number_width as u64)?;
+    Ok(t)
+}
+
+fn build_review_line(lua: &Lua, line: &ReviewLineSnapshot) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("path", line.path.clone())?;
+    // Absent rather than zero on the side the line is not on: a deletion has no
+    // new-side number, and `0` would be a number a pane could print.
+    set_opt(&t, "oldNo", line.old_no.map(u64::from))?;
+    set_opt(&t, "newNo", line.new_no.map(u64::from))?;
+    t.set("kind", line.kind)?;
+    // Raw: not tokenised, not windowed, not padded. Colouring a diff body is the
+    // pane's decision, so the text crosses and the highlighting does not.
+    t.set("text", line.text.clone())?;
+    Ok(t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session::pane_context::{
-        AgentMetricsSnapshot, GitSnapshot, StatusSnapshot, TasksSnapshot, UsageSnapshot,
-        UsageWindowSnapshot,
+        AgentMetricsSnapshot, GitSnapshot, ReviewSnapshot, StatusSnapshot, TasksSnapshot,
+        UsageSnapshot, UsageWindowSnapshot,
     };
     use crate::session::SessionStatus;
 
@@ -596,5 +633,84 @@ mod tests {
         let windows: Table = usage.get("windows").unwrap();
         let window: Table = windows.get(1).unwrap();
         assert_eq!(window.get::<u64>("resetsInSecs").unwrap(), 3_600);
+    }
+
+    fn review_context(lines: Vec<ReviewLineSnapshot>, cursor: Option<usize>) -> PaneContext {
+        PaneContext {
+            review: ReviewSnapshot {
+                lines,
+                cursor,
+                number_width: 4,
+            },
+            ..PaneContext::default()
+        }
+    }
+
+    fn review_line(
+        kind: &'static str,
+        old_no: Option<u32>,
+        new_no: Option<u32>,
+    ) -> ReviewLineSnapshot {
+        ReviewLineSnapshot {
+            path: "src/a.rs".to_string(),
+            old_no,
+            new_no,
+            kind,
+            text: "let x = 1;".to_string(),
+        }
+    }
+
+    /// A published diff crosses as a one-based array whose entries carry both
+    /// line numbers where they exist and neither where they do not.
+    #[test]
+    fn a_review_line_crosses_with_the_numbers_it_has() {
+        let lua = Lua::new();
+        let context = review_context(
+            vec![
+                review_line("add", None, Some(12)),
+                review_line("del", Some(11), None),
+                review_line("context", Some(12), Some(13)),
+            ],
+            Some(1),
+        );
+        let review = review_table(&lua, &context).unwrap();
+        let lines: Table = review.get("lines").unwrap();
+        assert_eq!(lines.raw_len(), 3);
+
+        let added: Table = lines.get(1).unwrap();
+        assert_eq!(added.get::<String>("kind").unwrap(), "add");
+        assert_eq!(added.get::<u64>("newNo").unwrap(), 12);
+        assert_eq!(
+            added.get::<mlua::Value>("oldNo").unwrap(),
+            mlua::Value::Nil,
+            "an insertion has no old-side number, and absent means absent"
+        );
+        assert_eq!(added.get::<String>("path").unwrap(), "src/a.rs");
+        assert_eq!(added.get::<String>("text").unwrap(), "let x = 1;");
+
+        let deleted: Table = lines.get(2).unwrap();
+        assert_eq!(deleted.get::<u64>("oldNo").unwrap(), 11);
+        assert_eq!(
+            deleted.get::<mlua::Value>("newNo").unwrap(),
+            mlua::Value::Nil
+        );
+
+        // One-based, because it is the index the plugin hands to `ui.list`.
+        assert_eq!(review.get::<u64>("cursor").unwrap(), 2);
+        assert_eq!(review.get::<u64>("numberWidth").unwrap(), 4);
+    }
+
+    /// No review open is a present, empty section — the pane draws its own empty
+    /// state rather than branching on a nil.
+    #[test]
+    fn an_empty_review_is_still_a_table() {
+        let lua = Lua::new();
+        let review = review_table(&lua, &PaneContext::default()).unwrap();
+        assert_eq!(review.get::<Table>("lines").unwrap().raw_len(), 0);
+        assert_eq!(
+            review.get::<mlua::Value>("cursor").unwrap(),
+            mlua::Value::Nil
+        );
+        assert_eq!(review.get::<u64>("numberWidth").unwrap(), 0);
     }
 }

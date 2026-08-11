@@ -10,7 +10,7 @@
 
 use ratatui::style::Color;
 
-use crate::ui::theme::Theme;
+use crate::session::view_tree::StyleToken;
 
 /// Per-language lexing knobs (just the line-comment marker for now).
 #[derive(Clone, Copy)]
@@ -128,30 +128,55 @@ const KEYWORDS: &[&str] = &[
 
 /// Tokenise `text` into `(slice, colour)` runs for rendering. Adjacent runs of
 /// the same colour are not merged (the caller renders each as a span).
+///
+/// A thin resolution of [`highlight_tokens`] against the active theme, so the
+/// lexer has exactly one implementation: the view-tree form has to name a
+/// [`StyleToken`] (a plugin may name no colour) and the ratatui form has to name
+/// a [`Color`], and two lexers agreeing token for token is precisely what the
+/// code-review pane and the bundled plugin reproducing it cannot afford to have
+/// drift.
 pub(crate) fn highlight(text: &str, lang: &Lang) -> Vec<(String, Color)> {
+    let palette = crate::ui::theme::current();
+    highlight_tokens(text, lang)
+        .into_iter()
+        .map(|(run, token)| {
+            let color = token
+                .map(|t| crate::ui::plugin_pane::token_color(t, &palette))
+                .unwrap_or(palette.text_primary);
+            (run, color)
+        })
+        .collect()
+}
+
+/// Tokenise `text` into `(slice, style role)` runs.
+///
+/// `None` is the theme's primary foreground — the role a plain identifier or an
+/// operator takes — which is also what a view-tree text run with no token draws
+/// in, so the two forms line up without a "primary" token existing.
+pub(crate) fn highlight_tokens(text: &str, lang: &Lang) -> Vec<(String, Option<StyleToken>)> {
     let chars: Vec<char> = text.chars().collect();
-    let mut out: Vec<(String, Color)> = Vec::new();
+    let mut out: Vec<(String, Option<StyleToken>)> = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         // Line comment: the marker and everything after it ends the line.
         if starts_with_at(&chars, i, lang.line_comment) {
-            out.push((chars[i..].iter().collect(), Theme::text_muted()));
+            out.push((chars[i..].iter().collect(), Some(StyleToken::Muted)));
             break;
         }
         // Each remaining token type scans its own run; dispatch by the first
-        // char and collect `[i..end]` with the matching colour.
+        // char and collect `[i..end]` with the matching role.
         let c = chars[i];
-        let (end, color) = if is_quote(c) {
-            (scan_string(&chars, i), Theme::branch_name())
+        let (end, token) = if is_quote(c) {
+            (scan_string(&chars, i), Some(StyleToken::Branch))
         } else if c.is_ascii_digit() {
-            (scan_number(&chars, i), Theme::status_working())
+            (scan_number(&chars, i), Some(StyleToken::StatusWorking))
         } else if c.is_alphabetic() || c == '_' {
             let end = scan_word(&chars, i);
-            (end, word_color(&chars[i..end]))
+            (end, word_token(&chars[i..end]))
         } else {
-            (scan_plain(&chars, i, lang), Theme::text_primary())
+            (scan_plain(&chars, i, lang), None)
         };
-        out.push((chars[i..end].iter().collect(), color));
+        out.push((chars[i..end].iter().collect(), token));
         i = end;
     }
     out
@@ -196,15 +221,15 @@ fn scan_word(chars: &[char], i: usize) -> usize {
     j
 }
 
-/// Colour for an identifier: keyword, capitalised type, or plain ident.
-fn word_color(word: &[char]) -> Color {
+/// Role for an identifier: keyword, capitalised type, or plain ident.
+fn word_token(word: &[char]) -> Option<StyleToken> {
     let s: String = word.iter().collect();
     if KEYWORDS.contains(&s.as_str()) {
-        Theme::accent()
+        Some(StyleToken::Accent)
     } else if word.first().is_some_and(|c| c.is_uppercase()) {
-        Theme::accent_bright()
+        Some(StyleToken::AccentBright)
     } else {
-        Theme::text_primary()
+        None
     }
 }
 
