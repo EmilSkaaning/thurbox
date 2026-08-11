@@ -164,6 +164,21 @@ This condition applies to a pane a bundled plugin reproduces. A pane row for a
 surface recorded structurally unportable, with no bundled plugin, is unready under
 condition 1 and names no oracle.
 
+**Once a row is ready, the inventory's rules about it invert, and the inventory MUST
+survive that.** Two rules read the tree in a direction only a blocked row satisfies,
+and both MUST be scoped to rows that are still blocked rather than left to fail on
+the first handover:
+
+- a rule asserting that the application still draws each pane's native renderer,
+  which is exactly what a handover stops being true; and
+- any rule that uses one particular pane as its worked example of a blocked row. An
+  example MUST name a pane that is still native, so the illustration cannot come to
+  assert the opposite of the tree it reads.
+
+An example naming a handed-over pane is the more dangerous of the two, because a
+mechanical repair — flipping the assertion to match — turns a test that argues *why*
+a row is blocked into one that merely records what the tree currently says.
+
 #### Scenario: A plugin exists but the native pane is still drawn
 
 - **WHEN** a bundled plugin for a pane exists and the application still calls that
@@ -217,4 +232,18 @@ condition 1 and names no oracle.
 - **WHEN** a bundled plugin reproduces a native pane
 - **THEN** the inventory asserts that the pane's oracle records the native tree,
   so a pane reproduced without a recording fails before any handover is attempted
+
+#### Scenario: A handed-over row is not required to still be drawn
+
+- **WHEN** the rule that every pane row names a native renderer the application
+  draws is checked after a handover
+- **THEN** the handed-over row is exempt because its verdict is ready, and every
+  blocked row is still required to name a renderer that is drawn
+
+#### Scenario: A worked example names a pane that is still native
+
+- **WHEN** the inventory illustrates why a reproduced-but-not-replaced pane is
+  blocked
+- **THEN** the pane it names is one the application still draws, so the example
+  fails loudly if that pane is handed over without being replaced in the example
 

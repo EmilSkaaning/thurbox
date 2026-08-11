@@ -104,10 +104,17 @@ on the compile-time feature. That leaves two renderings of one pane which differ
 by build rather than one pane, and it hands nothing over: the native renderer is
 still what the installed binary draws.
 
+**This requirement binds a pane until that pane's handover lands.** It is a rule
+about what a *port* may do, and it is discharged for a pane whose replacement has
+satisfied every condition the teardown inventory names — at which point the native
+renderer is deleted and the plugin's pane is the pane by definition, not by default.
+Discharging it for one pane leaves it binding every pane that has not been handed
+over, which is why the rule is scoped per pane rather than retired.
+
 #### Scenario: The default interface is unchanged
 
-- **WHEN** thurbox starts with the bundled plugin present and no stored
-  visibility choice
+- **WHEN** thurbox starts with a bundled plugin present that reproduces a pane
+  thurbox still draws, and no stored visibility choice
 - **THEN** the plugin's pane is off screen and the native pane renders as before
 
 #### Scenario: The native renderer is still protected
@@ -130,6 +137,14 @@ still what the installed binary draws.
   replacement is equivalent
 - **THEN** at least one of those snapshots must contain the pane, and a handover
   whose snapshots contain none of it MUST state that instead of citing them
+
+#### Scenario: A pane whose handover has landed
+
+- **WHEN** every condition the teardown inventory names is satisfied for a pane and
+  its native renderer is deleted
+- **THEN** this requirement is discharged for that pane and still binds every other
+  reproduced pane, so a second handover is argued on its own evidence rather than on
+  the first one's
 
 ### Requirement: The port reports whether the host surface sufficed
 

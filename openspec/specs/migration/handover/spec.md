@@ -1,0 +1,130 @@
+# migration/handover Specification
+
+## Purpose
+TBD - created by archiving change info-panel-handover. Update Purpose after archive.
+## Requirements
+### Requirement: A pane is handed over by deleting its native renderer
+
+A handover SHALL delete the pane's native renderer, not disable it. After a
+handover the module MUST NOT exist, no call to it MUST remain, and no
+compile-time or runtime switch MUST select between two renderings of the pane.
+
+Keeping the native renderer behind a flag would leave two panes that differ by
+build rather than one pane, and it hands nothing over: the deleted call site is
+what makes the plugin the pane.
+
+The kernel's own occupant of the handed-over seat SHALL be deleted with it. A
+retained visibility flag that no longer decides what is drawn is worse than a
+retained renderer, because it can still carve the seat — producing a bordered
+column nothing paints, which is the outcome the teardown inventory exists to
+prevent.
+
+#### Scenario: The native module is gone
+
+- **WHEN** the tree is searched for the handed-over pane's renderer
+- **THEN** neither the module nor any reference to it exists
+
+#### Scenario: The seat is carved only by a claim
+
+- **WHEN** no plugin pane claims the handed-over pane's seat
+- **THEN** the seat is not placed and the space goes where it went before the
+  seat existed, rather than being carved and left unpainted
+
+#### Scenario: The pane's action reports that nothing provides it
+
+- **WHEN** the action that used to toggle the native pane fires and no pane claims
+  its seat — because the plugin failed to load, or the build has no plugin host
+- **THEN** the action names what provides the pane instead of appearing to do
+  nothing
+
+### Requirement: A handed-over pane keeps the pane's identity
+
+The replacement SHALL be reachable, gated and placed exactly as the native pane
+was. Its manifest MUST bind the action that toggled the native pane and the
+`[features]` switch that gated it, and it MUST occupy the seat the native pane
+occupied — so the width rules, the share of the screen and the toggle a user
+already knows are unchanged.
+
+The replacement's title SHALL be the native pane's title. A title that marks the
+pane as a plugin is right for a reproduction drawn beside the original and wrong
+for the pane itself.
+
+The seed visibility SHALL be the visibility the native pane defaulted to. A
+handover changes which code draws a pane, not whether the pane is on screen.
+
+#### Scenario: The pane answers the action it always answered
+
+- **WHEN** the action that toggled the native pane fires
+- **THEN** the replacement pane is shown, in the seat the native pane occupied,
+  and firing it again hides it
+
+#### Scenario: The feature switch still gates the pane
+
+- **WHEN** the `[features]` switch that gated the native pane is turned off
+- **THEN** the replacement is not shown, occupies no seat and is not rendered, and
+  turning the switch back on restores the visibility the user last chose
+
+#### Scenario: The pane's own width rule is unchanged
+
+- **WHEN** the terminal is narrower than the width at which the native pane
+  appeared
+- **THEN** the seat is not placed, exactly as before
+
+### Requirement: A handover's evidence is the recording, not the builder it deletes
+
+A handover SHALL rewrite the pane's oracle against the checked-in recording of the
+native pane's tree, and the recordings MUST NOT be regenerated in the same change.
+An assertion regenerated from the replacement is a recording of the replacement, so
+the deletion would leave the pane constrained by itself.
+
+The oracle MUST still be able to fail for the reason it exists: after the handover
+it MUST compare the replacement's tree against the recording, not merely assert
+that the replacement renders.
+
+#### Scenario: The recordings are unchanged by the handover
+
+- **WHEN** the change that deletes the native renderer is reviewed
+- **THEN** the pane's recorded expectations are byte-identical to what they were
+  before it, so the baseline is still the native pane's tree
+
+#### Scenario: The rewritten oracle fails on a wrong row
+
+- **WHEN** the replacement is perturbed to draw one row differently
+- **THEN** the oracle fails, naming the row
+
+### Requirement: A behavioural difference a handover exposes is decided, not discovered
+
+Where the replacement and the native pane differ in a state no comparison case
+covers, the handover SHALL choose the behaviour deliberately, state why, and pin
+it with a test. It MUST NOT be left to be found after the deletion.
+
+An empty state is the case this rule exists for: comparison cases populate the
+pane, so a state in which the native pane drew nothing at all is exactly the state
+no oracle constrains.
+
+#### Scenario: The empty state is pinned
+
+- **WHEN** the handed-over pane is shown with none of the state it describes
+  present
+- **THEN** what it draws is asserted by a test, and the reason that behaviour was
+  preferred over the native pane's is recorded
+
+### Requirement: A build without the plugin host loses a handed-over pane, and says so
+
+A build configuration that excludes the plugin runtime SHALL lose a handed-over
+pane rather than degrade the interface. It MUST NOT carve the pane's seat, MUST NOT
+leave the pane's action silent, and MUST NOT keep collecting state only that pane
+read without a reader.
+
+The loss MUST be stated rather than discovered: the runtime is part of the default
+feature set, so no installed binary is in this configuration, and a change that
+removed it from the default set would remove the pane from every install — which
+the teardown inventory already fails on.
+
+#### Scenario: No empty seat without the host
+
+- **WHEN** the binary is built without the plugin runtime and the handed-over
+  pane's action fires
+- **THEN** no seat is carved, nothing is drawn where the pane was, and the action
+  reports that no pane provides it
+
