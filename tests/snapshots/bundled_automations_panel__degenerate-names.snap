@@ -8,5 +8,5 @@ list cursor=0 scrollbar=false
     text " — daily 09:00 · spawn · in 2m " accent bold
   line
     text " ● " secondary
-    text "x" secondary
+    text "x" secondary ellipsize
     text " — daily 09:00 · spawn · in 2m " secondary

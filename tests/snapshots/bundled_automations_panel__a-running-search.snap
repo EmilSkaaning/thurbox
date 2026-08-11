@@ -5,25 +5,25 @@ expression: "view_tree_record::tree(&native)"
 list cursor=2 scrollbar=false
   line
     text " ● " secondary
-    text "h" accent bold underline
-    text "ost " secondary
-    text "t" accent bold underline
-    text "ests" secondary
+    text "h" accent bold underline ellipsize
+    text "ost " secondary ellipsize
+    text "t" accent bold underline ellipsize
+    text "ests" secondary ellipsize
     text " — daily 09:00 · spawn · in 2m " secondary
   line
     text " ● " muted dim
-    text "nothing matched here" muted dim
+    text "nothing matched here" muted dim ellipsize
     text " — daily 09:00 · spawn · in 2m " muted dim
   line
     text " ● " accent bold
-    text "s" accent bold underline
-    text "el" accent bold
-    text "e" accent bold underline
-    text "cted " accent bold
-    text "a" accent bold underline
-    text "nd matched" accent bold
+    text "s" accent bold underline ellipsize
+    text "el" accent bold ellipsize
+    text "e" accent bold underline ellipsize
+    text "cted " accent bold ellipsize
+    text "a" accent bold underline ellipsize
+    text "nd matched" accent bold ellipsize
     text " — daily 09:00 · spawn · in 2m " accent bold
   line
     text " ○ " muted dim
-    text "dim and disabled" muted dim
+    text "dim and disabled" muted dim ellipsize
     text " — daily 09:00 · spawn · disabled " muted dim

@@ -29,12 +29,19 @@
 # focused, and it changes the three things `automations-write` defines. It reads
 # no session, runs no command, and touches no file.
 #
+# Nothing here knows the pane's size, and the rows still scroll *and* fit: the pane
+# names the row its cursor is on, and declares that the name's runs yield their width
+# (ADR-52) so the host cuts them with one ellipsis and leaves the marker and the whole
+# summary tail their columns (ADR-55). Before that declaration a long name was clipped
+# at the pane's edge and took the schedule, the action and the countdown with it.
+#
 # A *reproduction*, not a replacement — the pane seeds hidden, so the native pane
 # is what the left column shows until a user asks for this one, and the kernel
 # keeps every key and every surface the native pane has (its editor, its run
 # history, its wrap into the session list). `tests/bundled_automations_panel.rs`
 # asserts this plugin builds the identical view tree, paints the identical frame
-# when the pane scrolls, and reaches the same database rows its keys do.
+# when the pane scrolls and when a name overflows the column, and reaches the same
+# database rows its keys do.
 name = "automations"
 api_version = 1
 

@@ -5,21 +5,21 @@ expression: "view_tree_record::tree(&native)"
 list cursor=2 scrollbar=false
   line
     text " ● " secondary
-    text "one shot" secondary
+    text "one shot" secondary ellipsize
     text " — once · send · in 2m " secondary
   line
     text " ● " secondary
-    text "hourly job" secondary
+    text "hourly job" secondary ellipsize
     text " — hourly :15 · exec · in 2m " secondary
   line
     text " ● " accent bold
-    text "standup" accent bold
+    text "standup" accent bold ellipsize
     text " — weekdays 08:30 · spawn · in 2m " accent bold
   line
     text " ● " secondary
-    text "weekly nudge" secondary
+    text "weekly nudge" secondary ellipsize
     text " — Mondays 07:00 · send · in 2m " secondary
   line
     text " ● " secondary
-    text "power user" secondary
+    text "power user" secondary ellipsize
     text " — */7 3 * * * · exec · in 2m " secondary

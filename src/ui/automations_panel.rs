@@ -8,9 +8,13 @@
 //! [`ViewNode`] that [`super::plugin_pane::render_tree`] paints. The split is the
 //! one a plugin lives on:
 //!
-//! - [`resolve_rows`] is the **width** step — how wide a name may be once the
-//!   marker and the summary tail have taken their columns. A plugin never learns
-//!   its pane's width, so this stays the kernel's.
+//! - [`resolve_rows`] is the **selection** step: it composes each row's summary
+//!   and folds the pane's focus into a per-row `selected`. It used to be the
+//!   *width* step too — fitting the name to what the marker and the summary tail
+//!   left — and no longer is (ADR-55): the name's runs declare
+//!   [`TextStyle::ellipsize`] and the renderer cuts them, so this pane's tree and a
+//!   plugin's copy of it are equal at every width instead of only at one where the
+//!   fit was a no-op.
 //! - [`automations_tree`] is the **presentation** step and carries no geometry:
 //!   the enabled marker, the colour role, the selected/dimmed/resting precedence,
 //!   the matched-run emphasis, the empty-state line. That is the part
@@ -28,17 +32,24 @@
 //! (`ui::file_viewer::visible_window`) instead of two that could disagree. The
 //! pane calls it a second time for its click hitboxes, which need the window as
 //! numbers rather than as a paint.
+//!
+//! The **frame** is [`super::focus_block`], the one every other pane draws, rather
+//! than a block of this pane's own: `App::paint_plugin_pane` draws that block for a
+//! seated pane, so a pane keeping its own would change corners and colours at its
+//! handover (ADR-55).
 
-use ratatui::{
-    layout::Rect,
-    style::Style,
-    widgets::{Block, Borders},
-    Frame,
-};
-// Only the retained pre-port oracle (`legacy_*`) still assembles the rows out of
-// ratatui primitives and reaches for a palette colour by hand.
+use ratatui::{layout::Rect, Frame};
+// Everything below is the retained pre-port oracle's (`legacy_*`): it assembles the
+// rows out of ratatui primitives, reaches for a palette colour by hand, and fits a
+// name to a width — the last of which is what makes it the oracle for the fit the
+// renderer now applies (ADR-55).
+#[cfg(test)]
+use super::theme::Theme;
+#[cfg(test)]
+use super::truncate_ellipsis;
 #[cfg(test)]
 use ratatui::{
+    style::Style,
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -46,8 +57,7 @@ use ratatui::{
 use crate::session::motion::FrameTable;
 use crate::session::view_tree::{StyleToken, TextStyle, ViewNode};
 
-use super::theme::Theme;
-use super::{truncate_ellipsis, FocusLevel};
+use super::{focus_block, FocusLevel};
 
 /// One row in the automations pane (view data built by the app layer).
 ///
@@ -90,16 +100,17 @@ pub struct AutomationsPaneState<'a> {
     pub preview_selected: bool,
 }
 
-/// One row as the pane's view tree describes it: the name fitted to the column,
-/// its summary composed, and the three facts that pick its style.
+/// One row as the pane's view tree describes it: its summary composed, and the
+/// three facts that pick its style.
 ///
 /// Distinct from [`AutomationPaneEntry`] because this is the *resolved* row — the
-/// name has been fitted to a width, the summary composed, and `selected` has
-/// folded in the pane's focus — so building the tree from it needs no geometry and
-/// no focus.
+/// summary composed and `selected` folded in from the pane's focus — so building
+/// the tree from it needs no focus. It needs no geometry either, and since ADR-55
+/// it is given none: the name crosses whole and the runs that carry it declare
+/// that they yield their width.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomationRow {
-    /// Display name, already fitted to the column.
+    /// Display name, whole. Fitted by the renderer, not here.
     pub name: String,
     /// The composed `<schedule> · <action> · <when>` tail.
     pub summary: String,
@@ -142,24 +153,20 @@ pub fn render_automations_pane(
     area: Rect,
     state: &AutomationsPaneState<'_>,
 ) -> Vec<super::RowHitbox> {
-    // The pane's own bordered block, unchanged by the port: the tree is the
-    // *rows'* IR, and swapping the frame for the shared `focus_block` would be a
-    // visible change to a pane this change is only supposed to re-plumb.
-    let border_color = match state.focus {
-        FocusLevel::Focused => Theme::border_focused(),
-        _ => Theme::border_unfocused(),
-    };
-    let block = Block::default()
-        .title(" Automations ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color));
+    // The frame every other pane draws, and the one `App::paint_plugin_pane` draws
+    // for a seated pane — so this pane's border does not change at its handover
+    // (ADR-55). It also starts drawing `Active`, which this pane collapsed into
+    // `Inactive`: while the central-pane automation editor or its run history holds
+    // the keyboard, the band it came from is accent-bordered, as the ` Sessions `
+    // block above it has always been.
+    let block = focus_block(" Automations ", state.focus);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
         return Vec::new();
     }
 
-    let rows = resolve_rows(state, inner.width);
+    let rows = resolve_rows(state);
     let cursor = cursor_row(state);
     let tree = automations_tree(&rows, cursor, matches!(state.focus, FocusLevel::Focused));
     // A fresh frame table every paint: nothing in this pane animates, and a
@@ -202,33 +209,28 @@ fn cursor_row(state: &AutomationsPaneState<'_>) -> Option<usize> {
     (!state.entries.is_empty()).then(|| state.selected.min(state.entries.len() - 1))
 }
 
-/// Resolve how every row looks at a pane of `width`.
+/// Resolve how every row looks, at no particular width.
 ///
-/// The one width-dependent step in the pane: the name's fitted form, with the
-/// marker prefix and the whole summary tail reserved so neither is pushed off the
-/// row. A plugin reproducing this pane has no width, so it draws names whole and
-/// lets the renderer clip them — the one divergence
-/// `tests/bundled_automations_panel.rs` enumerates.
+/// Takes no geometry at all since ADR-55. It used to fit the name to
+/// `width − marker − summary` with `truncate_ellipsis`; the runs carrying the name
+/// now declare [`TextStyle::ellipsize`] and the renderer applies that same
+/// function, so the tree this builds is the tree a plugin with no width builds.
 ///
 /// Every row is resolved, not just the visible ones, because the window is the
 /// renderer's to choose from the tree's declared cursor.
-pub fn resolve_rows(state: &AutomationsPaneState<'_>, width: u16) -> Vec<AutomationRow> {
+pub fn resolve_rows(state: &AutomationsPaneState<'_>) -> Vec<AutomationRow> {
     let focused = matches!(state.focus, FocusLevel::Focused);
     // The same clamped index the tree anchors on, so the row that looks selected is
     // the row the list scrolls to. See [`cursor_row`].
     let cursor = cursor_row(state);
-    let width = width as usize;
     state
         .entries
         .iter()
         .enumerate()
         .map(|(i, e)| {
             let summary = row_summary(&e.schedule, e.action, e.enabled, e.due_in_secs);
-            let budget = width
-                .saturating_sub(row_prefix(e.enabled).chars().count())
-                .saturating_sub(row_tail(&summary).chars().count());
             AutomationRow {
-                name: truncate_ellipsis(&e.name, budget),
+                name: e.name.clone(),
                 summary,
                 enabled: e.enabled,
                 match_positions: e.match_positions.clone(),
@@ -281,6 +283,11 @@ pub fn automations_tree(rows: &[AutomationRow], cursor: Option<usize>, focused: 
 
 /// One automation row: `<marker> <name> — <summary>` with global-search matches
 /// emphasised.
+///
+/// The **name's** runs yield their width and nothing else on the line does, so an
+/// overflowing row is cut inside the name and keeps both its marker and its whole
+/// summary tail (ADR-52). Several runs when a search matched, cut as one string —
+/// which is why the flag goes on each of them rather than on a wrapper.
 fn row_node(row: &AutomationRow) -> ViewNode {
     let base = row_base_style(row);
     // The marker is its own run; the name follows so highlight byte offsets
@@ -296,7 +303,13 @@ fn row_node(row: &AutomationRow) -> ViewNode {
     };
     for (range, matched) in super::highlight::highlight_runs(&row.name, positions) {
         let style = if matched { MATCHED_STYLE } else { base };
-        runs.push(ViewNode::styled(&row.name[range], style));
+        runs.push(ViewNode::styled(
+            &row.name[range],
+            TextStyle {
+                ellipsize: true,
+                ..style
+            },
+        ));
     }
 
     runs.push(ViewNode::styled(row_tail(&row.summary), base));
@@ -309,6 +322,10 @@ fn row_node(row: &AutomationRow) -> ViewNode {
 /// A constant rather than a function of the base, for the tasks pane's
 /// reason: the layering only ever resolves to this, and the one base carrying an
 /// attribute of its own (dimmed) never has matches to emphasise.
+///
+/// It does **not** carry `ellipsize`: whether a run yields is a property of the
+/// *position* on the line (the name does, the marker and the tail do not), not of
+/// the emphasis, so [`row_node`] adds it where it applies.
 const MATCHED_STYLE: TextStyle = TextStyle {
     token: Some(StyleToken::Accent),
     bold: true,
@@ -457,14 +474,10 @@ mod tests {
     // *tokens*, and this is what checks the two resolve to the same cells.
 
     fn legacy_render(frame: &mut Frame, area: Rect, state: &AutomationsPaneState<'_>) {
-        let border_color = match state.focus {
-            FocusLevel::Focused => Theme::border_focused(),
-            _ => Theme::border_unfocused(),
-        };
-        let block = Block::default()
-            .title(" Automations ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color));
+        // The shared frame, so the whole-buffer comparison below stays a statement
+        // about the pane's *rows* rather than reporting the frame convergence
+        // (ADR-55) as a row divergence.
+        let block = focus_block(" Automations ", state.focus);
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -648,7 +661,7 @@ mod tests {
         let s = state(&entries, 99, FocusLevel::Focused, false);
 
         // The resolved rows: the last one is the cursor's.
-        let rows = resolve_rows(&s, 34);
+        let rows = resolve_rows(&s);
         assert!(!rows[0].selected);
         assert!(rows[1].selected, "the clamped cursor's row is drawn");
         assert_eq!(

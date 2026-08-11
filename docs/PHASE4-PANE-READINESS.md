@@ -2743,3 +2743,91 @@ So the verdict is recorded the way ADR-45 recorded the code review's — executa
 the reasons attached — and the pane stays. What is different from that refusal is the
 distance: this pane is now the **closest** of the four remaining, and what it needs is
 three decisions with known mechanisms rather than a grant with a security argument.
+
+## 30. The automations pane's last drawing gap, and the frame nobody had measured (ADR-55)
+
+The automations pane is the closest of the panes still drawn natively — every host
+decision it needed is closed, and its ten-row gate held exactly one **drawing** row,
+`no-fitted-name`. This section is that row closing, plus a second difference that no
+gate had a row for because no gate looked at the frame.
+
+### The fit: two halves, and only the second one makes the trees equal
+
+The native pane cut a row's name to `width − marker − summary` with
+`ui::truncate_ellipsis`. ADR-52 gave the catalogue a way to say that — a run declares
+that it **yields its width** and the kernel cuts the group — so the natural reading of
+the row was "the plugin needs one declaration". That reading is wrong by half.
+
+A pane that keeps cutting the string in its **own tree** while its reproduction declares
+the fit produces trees that differ *by construction*: the native tree carries
+`"an automation na…"` and the plugin's carries the whole name. No width makes those
+equal, and the only way to keep the equality test passing is to compare where the fit is
+a no-op — which is what this oracle did (`WIDE = 80`, asserted by a test whose name said
+so).
+
+So the row closed only when both halves landed: `resolve_rows` lost its `width` argument,
+and both trees mark the name's runs `ellipsize`. The gate's probe reads `resolve_rows`
+rather than the catalogue for exactly this reason, and its `stands` says which half is
+which.
+
+### What the enumerated divergence was hiding
+
+The left column is about **24 columns** at a 120-column terminal. This pane's summary
+tail alone (`— daily 09:00 · spawn · in 2m `) is 31. So every row overflows at the pane's
+real size, and the "enumerated divergence" covered the normal case while the equality
+covered a case that does not occur.
+
+And the divergence was not punctuation. A clip at the pane's edge removes whatever does
+not fit, which is the **tail** — the schedule, the action and the countdown. A
+long-named automation rendered as a marker and a cut name with no indication of when it
+runs, which is the row's whole content. With the declaration the marker and the tail keep
+their columns and the *name* gives way, which is what the native pane always did.
+
+The oracle's last divergence is therefore replaced by its opposite
+(`the_two_panes_paint_the_same_frame_when_a_name_overflows`): at 44 columns the two panes
+paint one frame, ellipsis and tail included, and at 30 — where the marker and the tail
+leave the name nothing — they agree on dropping it, because `truncate_ellipsis` returns
+nothing rather than a lone `…` that carries no information.
+
+### The frame, which was in no table
+
+| | Native pane | `App::paint_plugin_pane` |
+|---|---|---|
+| Corners | square (`Block::default()`) | rounded (`focus_block`) |
+| Title | unstyled | `ui::title_style(level)` |
+| Focused border | `border_focused` (= `accent`) | `accent_bright` |
+| `Active` | drawn as `Inactive` | plain `accent` |
+
+Four differences, and a handover would have applied all four silently. The pane's own
+module comment had recorded the decision to defer them ("swapping the frame for the
+shared `focus_block` would be a visible change to a pane this change is only supposed to
+re-plumb"), which was right for the port and is exactly wrong for the handover: the
+handover is the change that must not restyle anything.
+
+The fourth row is not styling. `App::pane_focus_level` has always returned three levels
+for this pane and the native renderer used two. `Active` means *the central-pane
+automation editor or its run history holds the keyboard* — the pane's own context, one
+`Ctrl+L` away — and it now shows an accent border, as the ` Sessions ` block above it
+always has.
+
+### The rule this adds
+
+**A pane's frame is converged before its handover, not during it**
+(`migration/handover`). A handover asserts that which code draws a pane changed and
+nothing else did; a commit that also moves a border makes that claim unverifiable,
+because the frame snapshot then moves for two reasons and a reviewer cannot separate an
+intended restyle from a regression. The accepted cost is that
+`empty_welcome_screen_renders` moves twice — corners here, the band's absence at the
+handover — with one reason each.
+
+Convergence runs **toward** the host's frame. `PaneDecl` gains no border field: a
+plugin-declared frame would let a pane draw itself as focused when it is not, which is
+what ADR-51 closed by resolving the level from the kernel's own focus.
+
+### Where the pane now stands
+
+`no-fitted-name` is closed and the gate asserts that **no `Vocabulary` row is outstanding
+at all** — the state the tasks pane reached immediately before its handover (§28).
+`the-module-is-a-model-too` narrowed with it: `ui::automations_panel` no longer owns a
+width step, so what remains of that row is `row_summary`, which `src/app/automation.rs`
+calls for the `Ctrl+P` modal, and which a handover has to move rather than delete.

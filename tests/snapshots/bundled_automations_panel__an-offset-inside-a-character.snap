@@ -5,8 +5,8 @@ expression: "view_tree_record::tree(&native)"
 list cursor=0 scrollbar=false
   line
     text " ● " secondary
-    text "a" accent bold underline
-    text "bc…" secondary
-    text " " accent bold underline
-    text "def" secondary
+    text "a" accent bold underline ellipsize
+    text "bc…" secondary ellipsize
+    text " " accent bold underline ellipsize
+    text "def" secondary ellipsize
     text " — daily 09:00 · spawn · in 2m " secondary

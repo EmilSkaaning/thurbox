@@ -3468,3 +3468,85 @@ its module note says what it measures, and four documents reference the name.
 remaining work is three decisions with known mechanisms rather than a grant with a
 security argument. The order the gate implies is (3), then (1), then (2) — decide the
 review's precedence first, because it is the only one that changes what the seat *means*.
+
+## ADR-55: The automations pane and its plugin converge on one frame and one fit
+
+**Context.** `tests/automations_pane_handover_gap.rs` recorded ten rows for this pane,
+and exactly one was about **drawing**: `no-fitted-name`. The native pane cut a row's
+name to `width − marker − summary` with `ui::truncate_ellipsis`; a plugin has no width,
+so its copy drew the name whole and the renderer clipped it at the pane's edge. ADR-52
+closed the *vocabulary* — `TextStyle::ellipsize` says a run yields its width and the
+kernel cuts the group — and the tasks pane adopted it. This pane had not.
+
+A second difference was in nobody's table, because no gate looked at the frame: the
+pane built its own `Block` (square corners, unstyled title, `border_focused` when
+focused) while `App::paint_plugin_pane` draws `ui::focus_block` (rounded, focus-styled
+title, `accent_bright`) — as it must, since a seat decides *where* a pane is drawn and
+never *how*.
+
+**Decision.** Both differences are closed in the **native** pane, in this change,
+before any handover.
+
+*The fit.* `resolve_rows` loses its `width` argument and keeps the name whole;
+`row_node` marks every run of the name `ellipsize` and leaves the marker and the
+`— <summary>` tail their intrinsic widths. The plugin declares the same through the
+style-table form. Both halves had to land together: a pane that keeps cutting the
+string in its own tree while its reproduction declares the fit produces trees that
+differ **by construction**, so no width makes them equal — which is why the closed
+row's probe reads `resolve_rows` rather than the catalogue.
+
+The loss this repairs is not cosmetic. The left column is ~24 columns at 120, where
+every one of this pane's rows overflows (the summary tail alone is ~31), so a clip at
+the pane edge took the schedule, the action and the countdown with it — the row's whole
+content. The oracle previously compared at a width where the fit was a no-op and
+enumerated the narrow case as a known divergence, which means its equality claim said
+nothing about the pane at its real size.
+
+*The frame.* `render_automations_pane` builds `focus_block(" Automations ", focus)`.
+Three visible consequences, recorded rather than absorbed: rounded corners (matching
+the ` Sessions ` block directly above it, which has always drawn them),
+`accent_bright` rather than `accent` while focused, and — the one that is not only
+styling — an **accent border at `Active`**. `App::pane_focus_level` has always returned
+three levels for this pane, `Active` being "the central-pane automation editor or its
+run history holds the keyboard"; the native pane collapsed it into `Inactive` and its
+own comment said so. `focus_block` draws it, which is the reading every other pane
+gives it.
+
+The convergence runs toward the kernel's frame and not the other way: `PaneDecl` gains
+no border or title field. A plugin-declared frame would let a pane draw itself as
+focused when it is not — the confusion ADR-51 closed by resolving the level from the
+focus the kernel owns.
+
+**Rejected.** *Publish the resolved width* — refused for the fifth time, and the
+reasons compound: a width is resolved during a frame while the snapshot is published on
+the tick, so a pane would cut to the wrong column for one frame after a resize; the two
+panes' rects are not the same rect while both exist; and it does not generalise, since
+the pane that genuinely needs geometry (the code review) needs wrapping and pairing
+rather than an ellipsis. *Publish an already-fitted name* — it would make the trees
+equal today with no new vocabulary, and would invert what a pane is: the snapshot would
+carry the pane's rendering rather than the model's fact, which `session::pane_context`
+exists not to do. *Leave the native pane fitting and enumerate the divergence* — the
+status quo, and it is the row that blocks the handover; it also means the enumerated
+case is the **normal** one. *Let a seated pane declare its own block* — see above.
+*Fold both into the handover* — refused, and this is the ordering rule the change adds
+to `migration/handover`: a handover claims that which code draws a pane changed and
+nothing else did, and a commit that also restyles a border makes that claim
+unverifiable. The cost is accepted — `empty_welcome_screen_renders` moves twice, once
+for the corners here and once for the band at the handover — because each move then has
+one reason.
+
+**Consequences.** `no-fitted-name` closes, and the gate now asserts that **no drawing
+row is outstanding at all** — the state the tasks pane's gate reached before its
+handover. `the-module-is-a-model-too` narrows with it: `ui::automations_panel` no longer
+owns a width step, so that row is now about the one function with a second consumer
+(`row_summary`, which `src/app/automation.rs` calls for the `Ctrl+P` modal). The
+oracle's last enumerated divergence is replaced by its opposite — at 44 columns the two
+panes paint one frame, and at 30, where the name gets no columns at all, they agree on
+dropping it. The thirteen recordings were regenerated from the native builder, which
+ADR-42 requires and permits only while that builder exists, and the diff was verified as
+a multiset: 49 lines, each the same line plus the word `ellipsize`.
+
+This is also the first pane to depend on ADR-52's "consecutive yielding runs share one
+budget" rule in practice. A name split at a global search's matched offsets is several
+runs and one string to a reader, and this pane's recordings include three matched
+offsets inside a multi-byte name.

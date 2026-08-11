@@ -5,13 +5,13 @@ expression: "view_tree_record::tree(&native)"
 list cursor=0 scrollbar=false
   line
     text " ● " accent bold
-    text "h" accent bold underline
-    text "éllo " accent bold
-    text "—" accent bold underline
-    text " wörld" accent bold
+    text "h" accent bold underline ellipsize
+    text "éllo " accent bold ellipsize
+    text "—" accent bold underline ellipsize
+    text " wörld" accent bold ellipsize
     text " — daily 09:00 · spawn · in 2m " accent bold
   line
     text " ● " secondary
-    text "日" accent bold underline
-    text "本語の自動化" secondary
+    text "日" accent bold underline ellipsize
+    text "本語の自動化" secondary ellipsize
     text " — daily 09:00 · spawn · in 2m " secondary

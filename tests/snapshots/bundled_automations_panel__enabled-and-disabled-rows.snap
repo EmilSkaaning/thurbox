@@ -5,13 +5,13 @@ expression: "view_tree_record::tree(&native)"
 list cursor=0 scrollbar=false
   line
     text " ● " secondary
-    text "nightly sync" secondary
+    text "nightly sync" secondary ellipsize
     text " — daily 09:00 · spawn · in 2m " secondary
   line
     text " ○ " muted
-    text "paused one" muted
+    text "paused one" muted ellipsize
     text " — daily 09:00 · spawn · disabled " muted
   line
     text " ○ " muted
-    text "disabled but scheduled" muted
+    text "disabled but scheduled" muted ellipsize
     text " — daily 09:00 · spawn · disabled " muted

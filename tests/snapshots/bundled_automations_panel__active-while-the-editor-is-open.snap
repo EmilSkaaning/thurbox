@@ -5,9 +5,9 @@ expression: "view_tree_record::tree(&native)"
 list cursor=0 scrollbar=false
   line
     text " ● " accent bold
-    text "being edited" accent bold
+    text "being edited" accent bold ellipsize
     text " — daily 09:00 · spawn · in 2m " accent bold
   line
     text " ● " secondary
-    text "other" secondary
+    text "other" secondary ellipsize
     text " — daily 09:00 · spawn · in 2m " secondary

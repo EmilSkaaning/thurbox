@@ -251,10 +251,11 @@ const BLOCKERS: &[Blocker] = &[
         needs: "deleting `src/ui/automations_panel.rs`, which is what a handover is for",
         stands: "that module is not only the pane's renderer. `row_summary` composes the row's \
                  tail for this pane **and** for the `Ctrl+P` list modal — `src/app/automation.rs` \
-                 calls it — so the two native surfaces cannot disagree, and `resolve_rows` is the \
-                 pane's **width** step, the fitting a plugin has no width to do. Deleting the \
-                 module deletes the modal's summary. The file viewer's gate found the same class \
-                 (ADR-39)",
+                 calls it — so the two native surfaces cannot disagree. Deleting the module \
+                 deletes the modal's summary. It used to own the pane's **width** step too, and \
+                 no longer does (ADR-55): `resolve_rows` takes no geometry, which narrows this row \
+                 to the one function that has a second consumer. The file viewer's gate found the \
+                 same class (ADR-39)",
         gap: Gap::Structural,
         blocked: true,
         probe: |root| {
@@ -348,24 +349,37 @@ const BLOCKERS: &[Blocker] = &[
         id: "no-fitted-name",
         needs: "the row's name fitted to the column with an ellipsis, so a long name never pushes \
                 the schedule-and-action tail off the pane",
-        stands: "the *vocabulary* closed with ADR-52 — a run may declare that it yields its width \
-                 and the renderer fits the group with an ellipsis, which is exactly the \
-                 \"ellipsizing clip plus a flush-right run\" ADR-29 named — and **this pane has \
-                 not adopted it**. `resolve_rows` still fits the name against \
-                 `width − prefix − tail`, so the tree it hands the renderer carries an \
-                 already-cut name while the plugin's carries a whole one, and no width can make \
-                 the two equal. Adoption is one declaration plus this pane's own re-recording, and \
-                 it belongs to its handover: the tasks pane did it in ADR-52 and its divergence \
-                 retired",
+        stands: "**closed** (ADR-55). The *vocabulary* closed first with ADR-52 — a run may \
+                 declare that it yields its width and the renderer fits the group with an \
+                 ellipsis — and this pane has now adopted it, in the two halves that had to land \
+                 together: the runs carrying the name declare `ellipsize`, **and** the native \
+                 pane stopped fitting (`resolve_rows` takes no width at all). Only the second \
+                 half makes the trees equal — a pane that keeps cutting the string itself while \
+                 its reproduction declares the fit produces trees that differ by construction, \
+                 which is why the probe reads the *native* pane rather than the catalogue. The \
+                 oracle's enumerated divergence is replaced by its opposite: at the pane's real \
+                 width both panes paint one frame, ellipsis and summary tail included",
         gap: Gap::Vocabulary,
-        blocked: true,
+        blocked: false,
         probe: |root| {
-            // Narrowed with ADR-52: the catalogue *can* say it now, so asking
-            // whether it can would report this row closed while the pane's copy
-            // still loses its tail. What decides it is whether **this pane** fits
-            // the name itself, since a pane that does cannot be reproduced by one
-            // that declares the fit.
-            source(root, "src/ui/automations_panel.rs").contains("truncate_ellipsis(&e.name")
+            // Both halves, because either alone would be the wrong claim. A probe
+            // reading only the declaration would report this closed for a pane whose
+            // tree still carries an already-cut name; a probe reading only the
+            // native pane would report it closed for a reproduction that never
+            // declared the fit and simply clips.
+            let module = source(root, "src/ui/automations_panel.rs");
+            // Scoped to `resolve_rows` rather than to the file, because the file still
+            // *contains* a fit: the retained pre-port oracle (`legacy_line`) cuts the
+            // name itself, and that is what makes it the oracle for the fit the
+            // renderer now applies. `block` rather than `method_body` — a free
+            // function is closed in column zero.
+            let resolve = block(root, "src/ui/automations_panel.rs", "pub fn resolve_rows(");
+            let native_stopped_fitting =
+                !resolve.contains("truncate_ellipsis") && !resolve.contains("width");
+            let native_declares_it = module.contains("ellipsize: true");
+            let plugin_declares_it = source(root, "src/plugin/bundled/automations/init.luau")
+                .contains("ellipsize = true");
+            !(native_stopped_fitting && native_declares_it && plugin_declares_it)
         },
     },
 ];
@@ -518,10 +532,17 @@ fn the_verdict_is_derived_from_the_blockers() {
         "every requirement is recorded met — the automations pane is portable, so hand it over \
          deliberately (and retire this gate) rather than leaving it passing vacuously"
     );
-    // The ordering the table implies, asserted rather than described: all three
-    // kinds are outstanding, and the row that decides the verdict is structural.
+    // The ordering the table implies, asserted rather than described. **No drawing
+    // row is outstanding** since ADR-55 — which is the state the tasks pane's gate
+    // reached before its handover, and the honest summary of this pane: what is left
+    // is not a thing the catalogue cannot say.
+    assert!(
+        outstanding(BLOCKERS, Gap::Vocabulary).is_empty(),
+        "the fitted name was this pane's last drawing gap; a new one means the table \
+         grew a row that should be named here: {:?}",
+        outstanding(BLOCKERS, Gap::Vocabulary)
+    );
     assert!(!outstanding(BLOCKERS, Gap::Wiring).is_empty());
-    assert!(!outstanding(BLOCKERS, Gap::Vocabulary).is_empty());
     let structural = outstanding(BLOCKERS, Gap::Structural);
     // The pane's own seat closed with ADR-46; what still decides the verdict is
     // the **central** seat, which the native pane's focus — not the pane's

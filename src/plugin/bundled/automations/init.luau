@@ -41,6 +41,11 @@
 -- placed a cursor this pane draws. thurbox's pane can act immediately because the
 -- kernel knows it is focused and is already drawing a cursor; this one would be
 -- acting on a row the user cannot see, so it refuses instead of guessing.
+--
+-- Nothing here knows the pane's size, and the rows still scroll *and* fit. The pane
+-- names the row its cursor is on and the host windows the list to it; it declares
+-- that the name's runs yield their width (`ellipsize`) and the host cuts them with
+-- one ellipsis, keeping the marker's and the summary's columns (ADR-52/ADR-55).
 
 local thurbox = require("@thurbox")
 local ui = thurbox.ui
@@ -60,6 +65,29 @@ type RowStyle = {
 
 local function text(content: string, style: RowStyle): ViewNode
     return ui.text(content, style.token, style.bold, style.underline, style.dim)
+end
+
+-- The same run, declaring that it **yields its width**: when the row is wider than
+-- the column the host cuts this run with an ellipsis and leaves every other run on
+-- the line its columns, so the marker *and* the whole `— <summary>` tail survive a
+-- long name. Without it a long name would be clipped at the pane's edge and take
+-- the schedule, the action and the countdown with it — which is the row's content.
+--
+-- Still no width here: the declaration is the intent and the host resolves the
+-- geometry. It goes through the style *table* form because the positional arguments
+-- are full.
+--
+-- A name split at the host's matched offsets is several such runs, and the host cuts
+-- consecutive yielding runs as **one** string — so the ellipsis falls where the whole
+-- name would have been cut rather than once per run.
+local function fittedText(content: string, style: RowStyle): ViewNode
+    return ui.text(content, {
+        token = style.token,
+        bold = style.bold,
+        underline = style.underline,
+        dim = style.dim,
+        ellipsize = true,
+    })
 end
 
 -- ── the summary ─────────────────────────────────────────────────────────────
@@ -204,7 +232,9 @@ local function rowNode(entry: AutomationEntry, selected: boolean): ViewNode
     -- two agreeing is what keeps the rule from mattering.
     local positions = if entry.dimmed then {} else entry.matchPositions
     for _, run in ipairs(matchedRuns(entry.name, positions)) do
-        table.insert(runs, text(run.text, if run.matched then MATCHED else base))
+        -- The name yields its width; the marker before it and the summary after it
+        -- do not, which is what decides where an overflowing row is cut.
+        table.insert(runs, fittedText(run.text, if run.matched then MATCHED else base))
     end
 
     table.insert(runs, text(` — {rowSummary(entry)} `, base))

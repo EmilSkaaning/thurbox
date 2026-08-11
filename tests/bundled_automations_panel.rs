@@ -22,12 +22,15 @@
 //!   the key at its edge and nothing completes it
 //!   ([`the_wrap_out_of_the_pane_stays_kernel_owned`]).
 //!
-//! One divergence is enumerated rather than absorbed by weakening a claim: the
-//! **fitted name** (the kernel fits a name to a width the plugin is never told).
-//! The pane's **placement** used to be a second one — `PaneSlot` named only the
-//! right column — and ADR-46 retired it: the reproduction now declares the seat its
-//! native counterpart occupies, so showing it compares the two panes in one rect
-//! ([`the_pane_is_placed_where_the_native_one_sits`]).
+//! **No divergence is enumerated any more**, and both of the two this file used to
+//! carry are kept pointing the other way rather than deleted. The **placement** went
+//! first (ADR-46): the reproduction declares the seat its native counterpart occupies,
+//! so showing it compares the two panes in one rect
+//! ([`the_pane_is_placed_where_the_native_one_sits`]). The **fitted name** went with
+//! ADR-55: neither side cuts a name any more — both declare that the name's runs yield
+//! their width and the kernel cuts them — so the assertion is now frame equality at a
+//! width where the fit fires, which is the pane's real size
+//! ([`the_two_panes_paint_the_same_frame_when_a_name_overflows`]).
 //!
 //! It lives in `tests/` for its predecessors' reason: this is the one place that
 //! must see both `ui::automations_panel` and `plugin::PluginHost`, and an
@@ -73,10 +76,6 @@ use thurbox::ui::automations_panel::{
     AutomationsPaneState,
 };
 use thurbox::ui::FocusLevel;
-
-/// A column with room to spare, so `resolve_rows` fits no name. Checked rather
-/// than trusted by [`the_comparison_size_adjusts_nothing`].
-const WIDE: u16 = 80;
 
 /// The recorder that turns a view tree into the checked-in expectation, shared
 /// with the other panes that record one (see its module note for why this is
@@ -145,19 +144,17 @@ impl Case {
             .collect()
     }
 
-    /// The rows the native pane resolves at `width`. Every row, in the model's
-    /// order: the window is the renderer's, resolved from the cursor below.
-    fn native_rows(&self, width: u16) -> Vec<AutomationRow> {
+    /// The rows the native pane resolves. Every row, in the model's order: the
+    /// window is the renderer's, resolved from the cursor below — and since ADR-55
+    /// so is the fit, so this takes no width at all.
+    fn native_rows(&self) -> Vec<AutomationRow> {
         let entries = self.entries();
-        resolve_rows(
-            &AutomationsPaneState {
-                entries: &entries,
-                selected: self.selected,
-                focus: self.focus,
-                preview_selected: self.preview,
-            },
-            width,
-        )
+        resolve_rows(&AutomationsPaneState {
+            entries: &entries,
+            selected: self.selected,
+            focus: self.focus,
+            preview_selected: self.preview,
+        })
     }
 
     /// The cursor's row, clamped — the one rule `cursor_row` and
@@ -167,8 +164,8 @@ impl Case {
         (!self.rows.is_empty()).then(|| self.selected.min(self.rows.len() - 1))
     }
 
-    fn native_tree(&self, width: u16) -> ViewNode {
-        automations_tree(&self.native_rows(width), self.cursor(), self.is_focused())
+    fn native_tree(&self) -> ViewNode {
+        automations_tree(&self.native_rows(), self.cursor(), self.is_focused())
     }
 
     /// The recording's name: the case name, slugified.
@@ -191,10 +188,10 @@ impl Case {
 
     /// The same rows as the snapshot a plugin reads.
     ///
-    /// Built from the model's rows rather than from the *resolved* ones, which is
-    /// the one place this differs from the tasks port's fixture: the published name
-    /// is deliberately unfitted, since a width belongs to a frame and the plugin's
-    /// pane is a different rect.
+    /// Built from the model's rows, which since ADR-55 is what the *resolved* rows
+    /// carry too: the published name is unfitted because a width belongs to a frame
+    /// and the plugin's pane is a different rect, and the native pane no longer fits
+    /// one either.
     fn context(&self) -> PaneContext {
         PaneContext {
             automations: AutomationsSnapshot {
@@ -513,6 +510,12 @@ fn paint(tree: &ViewNode, width: u16, height: u16) -> Buffer {
     buf
 }
 
+/// The glyphs of a painted buffer's first row, so a frame assertion can name what it
+/// expected instead of printing two buffers.
+fn row_text(buf: &Buffer, width: u16) -> String {
+    (0..width).map(|x| buf[(x, 0)].symbol()).collect()
+}
+
 /// Which row a tree's list names as its cursor.
 fn tree_cursor(tree: &ViewNode) -> Option<usize> {
     match tree {
@@ -549,7 +552,7 @@ fn the_plugin_builds_the_native_panes_view_tree() {
     for case in cases() {
         thurbox::session::pane_context::publish(case.context());
         let plugin = render(&host);
-        let native = case.native_tree(WIDE);
+        let native = case.native_tree();
         // Edge one: the checked-in expectation is the native pane's tree — the
         // edge that outlives `automations_tree`, and one only establishable while
         // that builder is here to generate it.
@@ -567,12 +570,19 @@ fn the_plugin_builds_the_native_panes_view_tree() {
     }
 }
 
-/// The equality above is only meaningful at a width where the kernel's fitting
-/// step is a no-op, so that is asserted rather than assumed.
+/// The equality above holds at **every** width, because neither side resolves one.
+///
+/// It used to be a statement about a chosen comparison size: `resolve_rows` fitted
+/// the name, so the trees could only be equal where the fit was a no-op, and the
+/// narrow case was an enumerated divergence. ADR-55 took the fit out of the tree, so
+/// this now pins the stronger fact — no row's name is cut before the renderer sees
+/// it — which is what makes
+/// [`the_two_panes_paint_the_same_frame_when_a_name_overflows`] a comparison of
+/// panes rather than of paddings.
 #[test]
-fn the_comparison_size_adjusts_nothing() {
+fn the_tree_carries_no_fitted_name() {
     for case in cases() {
-        let rows = case.native_rows(WIDE);
+        let rows = case.native_rows();
         assert_eq!(
             rows.len(),
             case.rows.len(),
@@ -582,7 +592,7 @@ fn the_comparison_size_adjusts_nothing() {
         for (resolved, original) in rows.iter().zip(&case.rows) {
             assert_eq!(
                 resolved.name, original.name,
-                "`{}` had a name fitted at the comparison size",
+                "`{}` had a name fitted before the tree",
                 case.name
             );
         }
@@ -597,7 +607,7 @@ fn the_compared_tree_is_a_whole_pane() {
         .into_iter()
         .find(|c| c.name == "a running search")
         .expect("the search case");
-    let tree = case.native_tree(WIDE);
+    let tree = case.native_tree();
     let (rows, selected) = match &tree {
         ViewNode::List {
             children, selected, ..
@@ -709,10 +719,15 @@ fn the_plugin_paints_the_native_frame_when_the_pane_scrolls() {
     };
     thurbox::session::pane_context::publish(case.context());
 
-    const WIDTH: u16 = 46;
+    // Wide enough that no name is cut: the marker takes 3 columns, these rows'
+    // summary tails take 31 and their names 13, so anything below 47 would fit the
+    // name instead — and the assertions below would then be about the *fit* rather
+    // than about the window, which is
+    // `the_two_panes_paint_the_same_frame_when_a_name_overflows`' subject.
+    const WIDTH: u16 = 60;
     const HEIGHT: u16 = 3;
     let plugin = paint(&render(&host), WIDTH, HEIGHT);
-    let native = paint(&case.native_tree(WIDE), WIDTH, HEIGHT);
+    let native = paint(&case.native_tree(), WIDTH, HEIGHT);
     assert_eq!(plugin, native, "the plugin's frame is not the native frame");
 
     // And that frame is the *scrolled* one — otherwise the two could agree by both
@@ -731,17 +746,23 @@ fn the_plugin_paints_the_native_frame_when_the_pane_scrolls() {
     );
 }
 
-/// **The remaining divergence: a name wider than the column.** The kernel fits it
-/// with an ellipsis, reserving the marker's and the whole summary's room, using a
-/// width the plugin is never told. The plugin draws the whole name and the renderer
-/// clips it at the pane edge — so a long name loses its ellipsis *and* its summary
-/// tail.
+/// **The retired divergence: a name wider than the column.** This was the pane's
+/// last enumerated difference, and it is now its opposite.
 ///
-/// Closing it needs a `line` that clips with an ellipsis and a flush-right run. The
-/// mechanism exists inside the renderer already (a gauge right-aligns its suffix);
-/// what is missing is a node that asks for it.
+/// The native pane used to cut the name itself, reserving the marker's and the whole
+/// summary's room from a width the plugin is never told; the plugin drew the name
+/// whole and the renderer clipped it at the pane's edge, taking the schedule, the
+/// action and the countdown with it. Since ADR-55 **neither** side fits: both trees
+/// mark the name's runs as yielding their width, and the kernel cuts them with the
+/// same `ui::truncate_ellipsis`. So the claim is frame equality at a width where the
+/// fit actually fires — the pane's real size, where the equality above could
+/// previously say nothing.
+///
+/// Asserted as a paint rather than as tree equality, which the case above already
+/// covers: the fit happens in the renderer, so only a painted frame shows the two
+/// panes cut in the same column.
 #[test]
-fn a_name_wider_than_the_column_is_fitted_by_the_kernel_only() {
+fn the_two_panes_paint_the_same_frame_when_a_name_overflows() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
     let host = host();
     let case = Case {
@@ -751,43 +772,44 @@ fn a_name_wider_than_the_column_is_fitted_by_the_kernel_only() {
         focus: FocusLevel::Inactive,
         preview: false,
     };
-    // Narrow enough that the name is fitted, wide enough that something is left of
-    // it: the marker takes 3 columns and this row's summary tail takes 31.
+    // Narrow enough that the name is cut, wide enough that something is left of it:
+    // the marker takes 3 columns and this row's summary tail takes 31.
     const NARROW: u16 = 44;
 
     thurbox::session::pane_context::publish(case.context());
-    let plugin = render(&host);
-    let native = case.native_tree(NARROW);
-    assert_ne!(
+    let plugin = paint(&render(&host), NARROW, 1);
+    let native = paint(&case.native_tree(), NARROW, 1);
+    assert_eq!(
         plugin, native,
-        "if these ever agree, the pane stopped fitting names and this divergence \
-         should be retired"
+        "the two panes must cut the name in the same column"
     );
-    assert!(
-        text_of(&native).contains('…'),
-        "the native pane fits the name: {:?}",
-        text_of(&native)
-    );
-    assert!(
-        !text_of(&plugin).contains('…'),
-        "the plugin draws the whole name and lets the renderer clip: {:?}",
-        text_of(&plugin)
-    );
-    // The summary is still *in* the plugin's tree — it is the renderer that will
-    // clip it, not the plugin that drops it.
-    assert!(text_of(&plugin).contains("daily 09:00 · spawn · in 2m"));
 
-    // Sharper still at a width where the prefix and the tail leave the name no
-    // columns at all: the native pane drops it entirely, since `truncate_ellipsis`
-    // returns nothing rather than a lone `…` that carries no information. So on a
-    // narrow column the two panes show *different information*, not merely
-    // different punctuation — which is the whole content of this divergence.
-    let cramped = text_of(&case.native_tree(30));
+    // And that frame is the *fitted* one — otherwise the two could agree by both
+    // clipping. The marker leads, the name ends in an ellipsis, and the whole
+    // summary tail survives, which is the half a clip at the pane edge lost.
+    let drawn = row_text(&plugin, NARROW);
+    assert!(drawn.contains('…'), "the name is ellipsized: {drawn:?}");
     assert!(
-        !cramped.contains("an automation"),
-        "the native pane drops a name it cannot fit: {cramped:?}"
+        drawn.contains("daily 09:00 · spawn · in 2m"),
+        "the summary tail keeps its columns: {drawn:?}"
     );
-    assert!(text_of(&plugin).contains("an automation name far wider than the column"));
+
+    // At a width where the marker and the tail leave the name no columns at all both
+    // panes drop it — `truncate_ellipsis` returns nothing rather than a lone `…` that
+    // carries no information — and they still agree, which is the edge the enumerated
+    // divergence used to be sharpest at.
+    const CRAMPED: u16 = 30;
+    let plugin = paint(&render(&host), CRAMPED, 1);
+    let native = paint(&case.native_tree(), CRAMPED, 1);
+    assert_eq!(
+        plugin, native,
+        "they agree where the name does not fit at all"
+    );
+    let drawn = row_text(&plugin, CRAMPED);
+    assert!(
+        !drawn.contains("an automation"),
+        "a name with no columns is dropped: {drawn:?}"
+    );
 }
 
 /// **The retired divergence: the pane's placement.** The reproduction used to be
