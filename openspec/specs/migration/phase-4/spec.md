@@ -108,8 +108,13 @@ still what the installed binary draws.
 about what a *port* may do, and it is discharged for a pane whose replacement has
 satisfied every condition the teardown inventory names — at which point the native
 renderer is deleted and the plugin's pane is the pane by definition, not by default.
-Discharging it for one pane leaves it binding every pane that has not been handed
-over, which is why the rule is scoped per pane rather than retired.
+
+For a pane **with a keyboard**, being discharged additionally requires that the
+keyboard survive: the replacement must answer the same scoped actions, against the
+same kernel state, still rebindable — which a pane declaring the kernel's key context
+does without the plugin being granted anything. A handover that re-implemented those
+keys in the plugin would have to be granted every power they exercise, and would be a
+different pane rather than the same one.
 
 #### Scenario: The default interface is unchanged
 
@@ -145,6 +150,13 @@ over, which is why the rule is scoped per pane rather than retired.
 - **THEN** this requirement is discharged for that pane and still binds every other
   reproduced pane, so a second handover is argued on its own evidence rather than on
   the first one's
+
+#### Scenario: A pane whose keyboard is the kernel's is handed over
+
+- **WHEN** a native pane with a scoped keyboard is deleted and its replacement declares
+  that key context
+- **THEN** every one of that context's actions still fires against the kernel's state,
+  and the plugin holds no new capability
 
 ### Requirement: The port reports whether the host surface sufficed
 

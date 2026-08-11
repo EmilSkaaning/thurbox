@@ -149,35 +149,12 @@ column. So while the runtime is part of the default build, the inventory SHALL
 assert that it is, and each pane row's verdict SHALL then turn on the remaining
 pane-level conditions alone.
 
-The fourth condition guards the **evidence** rather than the pane, and it is the
-one condition whose violation is invisible in a running binary. An oracle that
-compares a plugin's output against a builder the same deletion removes loses its
-right-hand side with that builder; the repair that compiles is to drop the
-comparison, and what survives is a test that the plugin renders without erroring.
-The pane would look correct and be unconstrained. So a pane whose recording does
-not exist yet MUST be recorded unready even when the first three conditions hold,
-and the failure MUST name the missing recording rather than only the rule — the
-recording is provable only while the native builder is present, so it cannot be
-supplied afterwards.
-
-This condition applies to a pane a bundled plugin reproduces. A pane row for a
-surface recorded structurally unportable, with no bundled plugin, is unready under
-condition 1 and names no oracle.
-
-**Once a row is ready, the inventory's rules about it invert, and the inventory MUST
-survive that.** Two rules read the tree in a direction only a blocked row satisfies,
-and both MUST be scoped to rows that are still blocked rather than left to fail on
-the first handover:
-
-- a rule asserting that the application still draws each pane's native renderer,
-  which is exactly what a handover stops being true; and
-- any rule that uses one particular pane as its worked example of a blocked row. An
-  example MUST name a pane that is still native, so the illustration cannot come to
-  assert the opposite of the tree it reads.
-
-An example naming a handed-over pane is the more dangerous of the two, because a
-mechanical repair — flipping the assertion to match — turns a test that argues *why*
-a row is blocked into one that merely records what the tree currently says.
+The inventory's own **worked example** of a blocked row MUST name a pane the
+interface still draws. Every handover falsifies the example that names the pane it
+hands over, and the repair that makes the suite pass is to invert that example's
+assertions — turning an argument about why a reproduction is not a replacement into a
+transcript of what the tree happens to say. So the example MUST be moved in the change
+that hands its pane over, and a rule MUST fail when it has not been.
 
 #### Scenario: A plugin exists but the native pane is still drawn
 
@@ -246,4 +223,9 @@ a row is blocked into one that merely records what the tree currently says.
   blocked
 - **THEN** the pane it names is one the application still draws, so the example
   fails loudly if that pane is handed over without being replaced in the example
+
+#### Scenario: The worked example is handed over
+
+- **WHEN** the pane the inventory illustrates a blocked row with becomes handed over
+- **THEN** a rule fails naming the example, so it is moved rather than inverted
 
