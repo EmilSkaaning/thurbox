@@ -1,0 +1,11 @@
+---
+source: tests/bundled_review_files.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=0 scrollbar=false
+  line
+    text "  "
+    text "M" status_working
+    text " a.rs  "
+    text "+1" diff_added
+    text " -1" diff_removed

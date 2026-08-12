@@ -1,0 +1,12 @@
+---
+source: tests/bundled_review_files.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=1 scrollbar=false
+  text "文档/" muted bold ellipsize
+  line
+    text "    " bold selected
+    text "M" bold selected
+    text " naïve.md  " bold selected
+    text "+1" bold selected
+    text " -1" bold selected

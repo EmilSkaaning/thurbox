@@ -4417,3 +4417,56 @@ three behaviours behind a flag, which is not a shared rule.
 moved. `file_tree_rows` is now reachable by the publication layer and nothing publishes it,
 because a pane drawing this list needs the rows *and* a seat, and the seat is the refused
 row.
+
+## ADR-66: The review's changed-files list is reproduced, and the list is published rather than derived
+
+**Context.** The code review is two panes. ADR-44 reproduced the diff; the changed-files
+list beside it had no reproduction, and `no-second-seat-for-the-changed-files-list` is the
+first of the five rows refusing this surface's handover. A handover may not be the moment
+a recording is first taken (ADR-48) — after the deletion the only available baseline is
+the plugin, which would make a plugin defect the expectation — so the port comes first.
+
+**Decision.** The published `review` section carries a **second list**: the changed-files
+tree (folder rows and file rows, each with depth, path, status name, counts and the
+reviewed flag) plus the row holding the file the diff's cursor is in. The bundled
+code-review plugin gains a second pane drawing it, seated in the right column and hidden,
+claiming neither the file-viewer seat nor the `ReviewFiles` keyboard.
+
+**The finding: the list is not a projection of the stream.** The obvious implementation is
+to filter the published rows for file headers. It fails twice, independently. The stream
+is bounded at 60 rows *over every kind* — because a diff line's node cost is unbounded,
+one per syntax token — so a twenty-file review exhausts it inside its first two files, and
+a pane filtering it would list a prefix and have no way to know. And the tree's order is
+not the stream's: it is grouped by directory and sorted by path segment, so a pane sorting
+for itself would compare strings by Lua's `strcoll` against Rust's byte-wise `str`
+ordering — agreeing on ASCII, diverging on a repository whose paths are not, in a pane
+nobody would think to test that way. The list therefore crosses for `number_width`'s
+reason: a quantity computed over the whole review is not derivable from a window onto it.
+
+**No capability was added, and that is the second time on this pane.** The rows go into the
+section the diff already reads; the manifest is still `["render", "review"]`. The rule the
+port followed is worth stating plainly: **a section grows, a grant does not** — where a
+reproduction needs a fact, the answer is to publish the fact into a capability the surface
+already holds, not to define a new one.
+
+**Two panes, one plugin.** They read one section, they are one surface to a user, and two
+manifests would be two lifecycles and two failure states for one review. `render(paneId)`
+already took the pane's id, so the second pane is a branch.
+
+**The builder takes snapshots.** `files_list_tree` moved from `&CodeReviewState` to
+`(&[ReviewFileRowSnapshot], Option<usize>)`, mirroring `review_stream_tree`. The native
+pane now renders from a snapshot of its own state, which is what makes "both panes are
+built from one description" true rather than aspirational — and lets the oracle build both
+sides from one fixture, so a failure is about the plugin rather than about two hand-written
+fixtures drifting.
+
+**The one enumerated divergence is the wire's bound.** `file_row_snapshots` takes its limit
+as an argument: the publication passes `MAX_REVIEW_FILE_ROWS`, the pane passes
+`usize::MAX`. A review with more than 400 changed files lists them all natively and the
+first 400 in the reproduction. Baking the bound into the producer would truncate the
+native column; omitting it would put an unbounded list on the wire.
+
+**What did not change.** No seat, no keyboard, no click, no scroll, no legend, and no gate
+row: all five of the code review's blockers keep their verdicts, and
+`the_reproduction_claims_neither_the_seat_nor_the_keyboard` asserts the manifest names
+neither the seat nor a key context — so the port cannot become a handover by omission.

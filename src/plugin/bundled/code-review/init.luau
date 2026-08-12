@@ -50,6 +50,8 @@ type ViewNode = thurbox.ViewNode
 type StyleToken = thurbox.StyleToken
 type DiffTint = thurbox.DiffTint
 type ReviewRow = thurbox.ReviewRow
+type ReviewFileRow = thurbox.ReviewFileRow
+type ReviewDiff = thurbox.ReviewDiff
 
 -- ── the syntax lexer ────────────────────────────────────────────────────────
 --
@@ -530,12 +532,72 @@ local function rowNode(row: ReviewRow, numberWidth: number, selected: boolean): 
     return lineRow(row, numberWidth, selected)
 end
 
--- ── the pane ────────────────────────────────────────────────────────────────
+-- ── the changed-files list ──────────────────────────────────────────────────
+--
+-- The review's *second* list, and a second pane: thurbox draws it in the
+-- file-viewer column while a review is open, with its own cursor — the file the
+-- diff's cursor is in — and its own keys. Nothing here derives it from the diff's
+-- rows: that stream is windowed by the host and ordered by the review, while this
+-- one is every changed file, grouped by directory.
+
+local function folderRow(row: ReviewFileRow): ViewNode
+    local style: thurbox.TextStyle = { token = "muted", bold = true, ellipsize = true }
+    return ui.text(string.rep("  ", row.depth) .. (row.name or "") .. "/", style)
+end
+
+local function fileRowNode(row: ReviewFileRow, current: boolean): ViewNode
+    local base: thurbox.TextStyle = { bold = current, selected = current }
+    -- The selection appearance owns the whole row: a tinted glyph on a
+    -- highlighted line is two backgrounds' worth of decision, and thurbox's rule
+    -- is that the cursor's row is one appearance.
+    local function tint(token: StyleToken): thurbox.TextStyle
+        return { token = if current then nil else token, bold = current, selected = current }
+    end
+    local path = row.path or ""
+    local name = string.match(path, "[^/]*$") or path
+    local mark = if row.reviewed then "✓ " else "  "
+    -- The same derivation a file header makes, from the status *name* the host
+    -- publishes: one table, so the two rows cannot disagree about a rename.
+    local letter, statusToken = fileStatus(row.status)
+    return ui.line({
+        ui.text(string.rep("  ", row.depth) .. mark, base),
+        ui.text(letter, tint(statusToken)),
+        ui.text(" " .. name .. "  ", base),
+        ui.text("+" .. tostring(row.added or 0), tint("diff_added")),
+        ui.text(" -" .. tostring(row.removed or 0), tint("diff_removed")),
+    })
+end
+
+local function filesPane(review: ReviewDiff?): ViewNode
+    local rows = if review then review.files else {}
+    if #rows == 0 then
+        -- Nothing to list, and nothing to say about it: the native column draws
+        -- an empty box for a review with no files, so this one does too.
+        return ui.list({})
+    end
+    local cursor = if review then review.fileCursor else nil
+    local nodes: { ViewNode } = {}
+    for i, row in ipairs(rows) do
+        if row.row == "folder" then
+            table.insert(nodes, folderRow(row))
+        else
+            table.insert(nodes, fileRowNode(row, i == cursor))
+        end
+    end
+    -- The window opens at the top when the diff's cursor is on a row belonging to
+    -- no file (the summary section), which is what naming the first row does.
+    return ui.list(nodes, cursor or 1)
+end
+
+-- ── the panes ───────────────────────────────────────────────────────────────
 
 return {
-    render = function(_paneId: string): ViewNode
+    render = function(paneId: string): ViewNode
         local readReview = thurbox.review
         local review = if readReview then readReview() else nil
+        if paneId == "files" then
+            return filesPane(review)
+        end
         local rows = if review then review.rows else {}
 
         if #rows == 0 then

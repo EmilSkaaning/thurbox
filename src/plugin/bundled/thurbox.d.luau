@@ -463,6 +463,29 @@ export type ReviewRow = {
     label: string?,
 }
 
+-- One row of the review's **changed-files tree**, tagged by `row`.
+--
+-- Two kinds: a `"folder"` row is a directory header (`depth`, `name`), and a
+-- `"file"` row is a changed file (`depth`, `path`, `status`, `added`, `removed`,
+-- `reviewed`). Facts, not glyphs, exactly as `ReviewRow` — the status letter, the
+-- reviewed mark and the basename are yours to derive.
+--
+-- The tree is grouped by directory and sorted by path segment, which is thurbox's
+-- own rule: deriving it from `ReviewDiff.rows` would give a different order, and a
+-- shorter list — the row stream is windowed and this one is not.
+export type ReviewFileRow = {
+    row: string,
+    depth: number,
+    -- `folder`
+    name: string?,
+    -- `file`
+    path: string?,
+    status: string?,
+    added: number?,
+    removed: number?,
+    reviewed: boolean?,
+}
+
 -- The open review's row stream.
 --
 -- `cursor` is the 1-based row the review's cursor is on — hand it to `ui.list`'s
@@ -470,10 +493,16 @@ export type ReviewRow = {
 -- gutter's two number columns; it crosses because it is computed over the *whole*
 -- review, which the published window is not, so a pane deriving it would draw a
 -- narrower gutter than thurbox's own.
+--
+-- `files` is the review's second list — the changed-files tree — and `fileCursor`
+-- is the 1-based row of it holding the file the diff's cursor is in, absent when
+-- that cursor is on the summary section.
 export type ReviewDiff = {
     rows: { ReviewRow },
     cursor: number?,
     numberWidth: number,
+    files: { ReviewFileRow },
+    fileCursor: number?,
 }
 
 -- One row of the session list.

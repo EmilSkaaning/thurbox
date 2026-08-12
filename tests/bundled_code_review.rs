@@ -193,6 +193,8 @@ impl Case {
     fn context(&self) -> PaneContext {
         PaneContext {
             review: ReviewSnapshot {
+                file_rows: Vec::new(),
+                file_cursor: None,
                 rows: self.rows.clone(),
                 cursor: self.cursor,
                 number_width: self.number_width,

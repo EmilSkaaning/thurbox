@@ -7869,9 +7869,12 @@ impl App {
         // the tree builder a plugin is compared against read one description of a
         // pane's rows rather than two.
         let (rows, cursor) = state.snapshot_rows();
+        let (file_rows, file_cursor) = state.snapshot_file_rows();
 
         pc::ReviewSnapshot {
             rows,
+            file_rows,
+            file_cursor,
             cursor,
             number_width: crate::ui::code_review::gutter_number_width(&state.files),
         }

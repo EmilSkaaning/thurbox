@@ -1,0 +1,11 @@
+---
+source: tests/bundled_review_files.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=0 scrollbar=false
+  line
+    text "  " bold selected
+    text "?" bold selected
+    text " a.rs  " bold selected
+    text "+1" bold selected
+    text " -0" bold selected

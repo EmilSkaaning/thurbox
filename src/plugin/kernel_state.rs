@@ -19,8 +19,9 @@
 use mlua::{Lua, Table};
 
 use crate::session::pane_context::{
-    AutomationRowSnapshot, FileNodeSnapshot, PaneContext, ReviewLineSnapshot, ReviewRowSnapshot,
-    SessionRowSnapshot, SessionSnapshot, SystemSnapshot, TaskSnapshot, UpcomingAutomationSnapshot,
+    AutomationRowSnapshot, FileNodeSnapshot, PaneContext, ReviewFileRowSnapshot,
+    ReviewLineSnapshot, ReviewRowSnapshot, SessionRowSnapshot, SessionSnapshot, SystemSnapshot,
+    TaskSnapshot, UpcomingAutomationSnapshot,
 };
 
 /// Set `key` to `value` only when there is one.
@@ -318,7 +319,49 @@ pub fn review_table(lua: &Lua, context: &PaneContext) -> mlua::Result<Table> {
     }
     t.set("rows", rows)?;
     set_opt(&t, "cursor", context.review.cursor.map(|i| i as u64 + 1))?;
+    // The review's second list, published beside the stream because it is neither
+    // derivable from it (the stream is bounded) nor ordered like it (the tree is
+    // grouped by directory). Its cursor is one-based for `cursor`'s reason.
+    let files = lua.create_table()?;
+    for (i, row) in context.review.file_rows.iter().enumerate() {
+        files.set(i + 1, build_review_file_row(lua, row)?)?;
+    }
+    t.set("files", files)?;
+    set_opt(
+        &t,
+        "fileCursor",
+        context.review.file_cursor.map(|i| i as u64 + 1),
+    )?;
     t.set("numberWidth", context.review.number_width as u64)?;
+    Ok(t)
+}
+
+/// One published changed-files row, tagged `row` with its kind.
+fn build_review_file_row(lua: &Lua, row: &ReviewFileRowSnapshot) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    match row {
+        ReviewFileRowSnapshot::Folder { depth, name } => {
+            t.set("depth", *depth as u64)?;
+            t.set("name", name.clone())?;
+        }
+        ReviewFileRowSnapshot::File {
+            depth,
+            path,
+            status,
+            added,
+            removed,
+            reviewed,
+        } => {
+            t.set("depth", *depth as u64)?;
+            t.set("path", path.clone())?;
+            // The wire name, not the glyph — the rule a file header already follows.
+            t.set("status", *status)?;
+            t.set("added", *added as u64)?;
+            t.set("removed", *removed as u64)?;
+            t.set("reviewed", *reviewed)?;
+        }
+    }
+    t.set("row", row.wire_name())?;
     Ok(t)
 }
 
@@ -1007,6 +1050,8 @@ mod tests {
     fn review_context(rows: Vec<ReviewRowSnapshot>, cursor: Option<usize>) -> PaneContext {
         PaneContext {
             review: ReviewSnapshot {
+                file_rows: Vec::new(),
+                file_cursor: None,
                 rows,
                 cursor,
                 number_width: 4,

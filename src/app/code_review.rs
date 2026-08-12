@@ -387,6 +387,69 @@ impl CodeReviewState {
         }
     }
 
+    /// The changed-files tree a pane is published, and which of its rows holds
+    /// the file the diff's cursor is in.
+    ///
+    /// A second list over the same review, extracted here for
+    /// [`Self::snapshot_rows`]'s reason: the published section and whatever draws
+    /// the list read one description of it. The tree itself is
+    /// [`crate::session::review::file_tree_rows`], so the grouping and the sort are
+    /// the model's rather than a pane's.
+    ///
+    /// Bounded by [`pc::MAX_REVIEW_FILE_ROWS`]; the anchor is dropped when it falls
+    /// past the bound, so a pane never receives an index into rows it was not given.
+    pub(crate) fn snapshot_file_rows(&self) -> (Vec<pc::ReviewFileRowSnapshot>, Option<usize>) {
+        self.file_row_snapshots(pc::MAX_REVIEW_FILE_ROWS)
+    }
+
+    /// The same rows, bounded by the caller.
+    ///
+    /// The bound is an argument because the two readers disagree about it and both
+    /// are right: a publication is a wire and caps what crosses, while the pane
+    /// drawing this list locally has the whole review in hand and shows all of it.
+    /// Passing `usize::MAX` is the pane's answer; the difference between the two is
+    /// the one divergence the reproduction enumerates.
+    pub(crate) fn file_row_snapshots(
+        &self,
+        limit: usize,
+    ) -> (Vec<pc::ReviewFileRowSnapshot>, Option<usize>) {
+        use crate::session::review::FileTreeRow;
+        let current = self.current_file();
+        let mut rows = Vec::new();
+        let mut cursor = None;
+        for row in crate::session::review::file_tree_rows(&self.files) {
+            if rows.len() >= limit {
+                break;
+            }
+            let published = match row {
+                FileTreeRow::Folder { depth, name } => {
+                    pc::ReviewFileRowSnapshot::Folder { depth, name }
+                }
+                FileTreeRow::File { depth, index } => {
+                    // A row whose file has gone is skipped rather than published
+                    // empty, matching `snapshot_row`: the tree is derived from the
+                    // same `files`, so this is unreachable and stays honest.
+                    let Some(f) = self.files.get(index) else {
+                        continue;
+                    };
+                    if current == Some(index) {
+                        cursor = Some(rows.len());
+                    }
+                    pc::ReviewFileRowSnapshot::File {
+                        depth,
+                        path: f.path.clone(),
+                        status: f.status.as_str(),
+                        added: f.added_count(),
+                        removed: f.deleted_count(),
+                        reviewed: self.reviewed_files.contains(&f.path),
+                    }
+                }
+            };
+            rows.push(published);
+        }
+        (rows, cursor)
+    }
+
     /// The rows a plugin pane is published, and the cursor's index into them.
     ///
     /// The one extraction from [`Self::rows`] into the pane snapshot: both the

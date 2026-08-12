@@ -3459,3 +3459,41 @@ to a reader that holds no diff.
 **What is left on this pane.** All five: the contested second seat, the resolved width its
 three layouts divide against, the click that means a column, the overlay anchored to a row,
 and the compose box's multi-line body.
+
+## 41. The review's second pane is reproduced, and its list is published (ADR-66)
+
+The changed-files list had no reproduction. Its handover row is the first of the five
+refusing this surface, and a handover may not be the moment a recording is first taken —
+so this is the port, and it hands nothing over.
+
+**The list is published, not derived, and the reason is two independent facts.** The
+published row stream looks like a superset of the changed files: every file has a header
+row in it. It is not. The stream is bounded at 60 rows over *every* kind, because a diff
+line costs one node per syntax token and nothing else in the catalogue is unbounded —
+so a twenty-file review exhausts the budget inside its first two files, and a pane
+filtering that stream would list a prefix of the files with nothing to tell it so. And the
+tree's order is not the stream's: grouped by directory, sorted by path segment, which is
+`session::review::file_tree_rows`. A pane sorting for itself would be comparing strings by
+Lua's collation against Rust's byte-wise ordering — identical on ASCII, and not guaranteed
+anywhere else.
+
+**No capability was added.** The rows join the `review` section the diff already reads and
+the manifest is unchanged at `["render", "review"]`. The rule, stated because this is the
+second time this pane has produced it: **a section grows, a grant does not.**
+
+**Two panes, one plugin.** One published section, one surface, one lifecycle. The entry
+point already took the pane's id, so the second pane is a branch rather than a second
+module — and the second pane is seated in the *right column*, hidden, claiming neither the
+file-viewer seat nor the `ReviewFiles` keyboard. Both absences are asserted against the
+shipped manifest, so a port cannot become a handover by omission.
+
+**The kernel's builder now takes the published rows**, mirroring `review_stream_tree`, so
+both panes are built from one description of what a pane receives rather than from two that
+must agree. The one enumerated divergence is the wire's bound: `file_row_snapshots` takes
+its limit as an argument, and the pane passes `usize::MAX` where the publication passes 400.
+
+**What is left on this pane.** All five rows, unchanged: the contested second seat, the
+resolved width, the click that means a column, the row-anchored overlay, and the compose
+box's multi-line body. What the port changes is that the seat row is now the *only* thing
+standing between this list and its handover — the drawing, the model, the window and the
+recording are all in place.

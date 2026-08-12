@@ -40,3 +40,19 @@ slot = "right"
 # them — side by side the plugin's copy is narrower, since a plugin pane is seated
 # only in the right column while the native review owns the centre.
 default_visible = false
+
+# The review's **second** pane: the changed-files tree thurbox draws in the
+# file-viewer column while a review is open. A reproduction like the diff above, and
+# in the right column for the same reason — the seat it belongs in is the one the
+# native list still holds, and that contest is the row its handover is refused on
+# (`no-second-seat-for-the-changed-files-list`).
+#
+# It declares no keyboard, because the pane thurbox draws is still the native one and
+# a declaration would take the keys off a list nobody could see. It needs no
+# capability of its own: the tree, its order and the cursor's file all cross in the
+# same `review` section the diff reads.
+[[panes]]
+id = "files"
+title = "Changed files (plugin)"
+slot = "right"
+default_visible = false

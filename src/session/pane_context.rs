@@ -618,11 +618,80 @@ impl ReviewRowSnapshot {
     }
 }
 
+/// One row of the review's **changed-files tree**: a directory header or a file.
+///
+/// A second list over the same review, and not derivable from [`ReviewSnapshot::rows`]
+/// for two reasons the pane would otherwise get wrong. The stream is bounded by
+/// [`MAX_REVIEW_ROWS`], which a large review exhausts inside its first files, so a
+/// pane counting file headers would list a prefix of the changed files and call it
+/// the set. And the tree's **order** is not the stream's: files are grouped by
+/// directory and sorted by path segments, which is
+/// [`super::review::file_tree_rows`]'s rule — a pane sorting for itself would
+/// diverge on the first pair of paths whose ordering is not obvious.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewFileRowSnapshot {
+    /// A directory header the files below it sit under.
+    Folder {
+        /// Indentation level; a path's first segment sits at zero.
+        depth: usize,
+        /// The segment's own name, without its parents.
+        name: String,
+    },
+    /// A changed file.
+    File {
+        /// Indentation level, which is how many directories precede it.
+        depth: usize,
+        /// The file's path within the review, which is what a row is named by
+        /// elsewhere in this section. The **basename** a row draws is derived from
+        /// it by the pane, as the file viewer derives nothing and the diff's own
+        /// header draws the whole path.
+        path: String,
+        /// Stable wire name of the file's status: `modified`, `added`, `deleted`
+        /// or `renamed`. The glyph is the pane's, as it is on a file header.
+        status: &'static str,
+        /// Inserted lines in this file.
+        added: usize,
+        /// Deleted lines in this file.
+        removed: usize,
+        /// The user has marked the file reviewed.
+        reviewed: bool,
+    },
+}
+
+impl ReviewFileRowSnapshot {
+    /// Stable wire name of the row's kind.
+    ///
+    /// Spelled `row`, matching [`ReviewRowSnapshot::wire_name`], so a pane reads
+    /// both of this section's lists the same way.
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            ReviewFileRowSnapshot::Folder { .. } => "folder",
+            ReviewFileRowSnapshot::File { .. } => "file",
+        }
+    }
+}
+
+/// Most changed-file rows a publication carries.
+///
+/// Bounded like every other list here, and generously: a row costs a handful of
+/// nodes with no unbounded part — unlike a diff line, whose body is one node per
+/// token — so the limit exists to bound the *wire*, not the tree. Past it the
+/// section carries the first rows and no cursor, for [`MAX_REVIEW_ROWS`]'s reason.
+pub const MAX_REVIEW_FILE_ROWS: usize = 400;
+
 /// The open review's row stream.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReviewSnapshot {
     /// One entry per published row, in the order the pane lists them.
     pub rows: Vec<ReviewRowSnapshot>,
+    /// The changed-files tree, in the order a pane lists it.
+    pub file_rows: Vec<ReviewFileRowSnapshot>,
+    /// Which of `file_rows` holds the file the diff's cursor is in, zero-based.
+    ///
+    /// `None` when the cursor is on a row belonging to no file — the summary
+    /// section — where the native pane highlights nothing and opens its window at
+    /// the top. Also `None` past [`MAX_REVIEW_FILE_ROWS`], for `cursor`'s reason.
+    pub file_cursor: Option<usize>,
     /// The row a list scrolls to, zero-based into `rows`. `None` when there are
     /// none, or when the cursor falls past [`MAX_REVIEW_ROWS`] — for
     /// [`FilesSnapshot::selected`]'s reason.

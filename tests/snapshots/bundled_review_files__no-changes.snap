@@ -1,0 +1,5 @@
+---
+source: tests/bundled_review_files.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=none scrollbar=false

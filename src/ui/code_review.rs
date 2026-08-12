@@ -1213,8 +1213,10 @@ pub(crate) fn render_files_list(
         return Vec::new();
     }
 
-    let rows = crate::session::review::file_tree_rows(&state.files);
-    let tree = files_list_tree(state, &rows);
+    // Unbounded, because this pane holds the whole review: the publication's cap
+    // is a property of the wire, not of the list.
+    let (rows, cursor) = state.file_row_snapshots(usize::MAX);
+    let tree = files_list_tree(&rows, cursor);
     let palette = crate::ui::theme::current();
     // Painted through the renderer a plugin pane's tree goes through, so the
     // window, the row rects and every cell inside a row are resolved once —
@@ -1236,11 +1238,16 @@ pub(crate) fn render_files_list(
             // numbering and yields no hitbox — clicking a directory jumps
             // nowhere, exactly as it did when the rows were spans.
             match rows.get(hit.index - 1)? {
-                crate::session::review::FileTreeRow::File { index, .. } => Some(RowHitbox {
-                    rect: hit.rect,
-                    index: *index,
-                }),
-                crate::session::review::FileTreeRow::Folder { .. } => None,
+                pc::ReviewFileRowSnapshot::File { path, .. } => {
+                    // Back to the index the review knows the file by: the tree is
+                    // sorted, so a row's position in it is not the file's.
+                    let index = state.files.iter().position(|f| &f.path == path)?;
+                    Some(RowHitbox {
+                        rect: hit.rect,
+                        index,
+                    })
+                }
+                pc::ReviewFileRowSnapshot::Folder { .. } => None,
             }
         })
         .collect()
@@ -1253,32 +1260,54 @@ pub(crate) fn render_files_list(
 /// diff's own cursor sits in, and is `None` on the summary section — where this
 /// list highlights nothing and the window opens at the top, which is what naming
 /// the first row as the anchor does.
-pub(crate) fn files_list_tree(
-    state: &CodeReviewState,
-    rows: &[crate::session::review::FileTreeRow],
-) -> ViewNode {
-    use crate::session::review::FileTreeRow;
-    let current = state.current_file();
+pub fn files_list_tree(rows: &[pc::ReviewFileRowSnapshot], cursor: Option<usize>) -> ViewNode {
     let children = rows
         .iter()
-        .map(|row| match row {
-            FileTreeRow::Folder { depth, name } => folder_row_tree(*depth, name),
-            FileTreeRow::File { depth, index } => {
-                file_row_tree(state, *index, *depth, current == Some(*index))
-            }
+        .enumerate()
+        .map(|(i, row)| match row {
+            pc::ReviewFileRowSnapshot::Folder { depth, name } => folder_row_tree(*depth, name),
+            pc::ReviewFileRowSnapshot::File {
+                depth,
+                path,
+                status,
+                added,
+                removed,
+                reviewed,
+            } => file_row_tree(
+                FileRow {
+                    depth: *depth,
+                    path,
+                    status,
+                    added: *added,
+                    removed: *removed,
+                    reviewed: *reviewed,
+                },
+                Some(i) == cursor,
+            ),
         })
         .collect();
-    let anchor = current
-        .and_then(|ci| {
-            rows.iter()
-                .position(|r| matches!(r, FileTreeRow::File { index, .. } if *index == ci))
-        })
-        .unwrap_or(0);
     ViewNode::List {
         children,
-        selected: Some(anchor),
+        // The window opens at the top when the diff's cursor is on a row belonging
+        // to no file, which is what the native pane did with no file to anchor on.
+        // An empty list has no cursor at all — naming a row of a list with none
+        // would be an index into nothing.
+        selected: (!rows.is_empty()).then(|| cursor.unwrap_or(0)),
         scrollbar: false,
     }
+}
+
+/// One published changed file, as the row builder needs it.
+///
+/// A struct rather than six arguments, which is the shape `clippy::too_many_arguments`
+/// asks for and the shape the snapshot already has.
+struct FileRow<'a> {
+    depth: usize,
+    path: &'a str,
+    status: &'static str,
+    added: usize,
+    removed: usize,
+    reviewed: bool,
 }
 
 /// A directory header row in the changed-files tree.
@@ -1301,14 +1330,9 @@ fn folder_row_tree(depth: usize, name: &str) -> ViewNode {
 /// A file row in the changed-files tree: indented name + colored status glyph
 /// and `+`/`-` counts (the selection appearance owns the whole row on the file
 /// the diff's cursor is in).
-fn file_row_tree(state: &CodeReviewState, index: usize, depth: usize, current: bool) -> ViewNode {
-    let f = &state.files[index];
-    let mark = if state.reviewed_files.contains(&f.path) {
-        "✓ "
-    } else {
-        "  "
-    };
-    let name = f.path.rsplit('/').next().unwrap_or(&f.path);
+fn file_row_tree(f: FileRow<'_>, current: bool) -> ViewNode {
+    let mark = if f.reviewed { "✓ " } else { "  " };
+    let name = f.path.rsplit('/').next().unwrap_or(f.path);
     let base = TextStyle {
         bold: current,
         selected: current,
@@ -1320,12 +1344,15 @@ fn file_row_tree(state: &CodeReviewState, index: usize, depth: usize, current: b
         token: (!current).then_some(token),
         ..base
     };
+    let status = crate::session::review::FileStatus::parse(f.status);
+    let glyph = status.map(|s| s.glyph()).unwrap_or("?");
+    let token = status.map(status_token).unwrap_or(Token::StatusWorking);
     ViewNode::Line(vec![
-        ViewNode::styled(format!("{}{mark}", "  ".repeat(depth)), base),
-        ViewNode::styled(f.status.glyph(), tint(status_token(f.status))),
+        ViewNode::styled(format!("{}{mark}", "  ".repeat(f.depth)), base),
+        ViewNode::styled(glyph, tint(token)),
         ViewNode::styled(format!(" {name}  "), base),
-        ViewNode::styled(format!("+{}", f.added_count()), tint(Token::DiffAdded)),
-        ViewNode::styled(format!(" -{}", f.deleted_count()), tint(Token::DiffRemoved)),
+        ViewNode::styled(format!("+{}", f.added), tint(Token::DiffAdded)),
+        ViewNode::styled(format!(" -{}", f.removed), tint(Token::DiffRemoved)),
     ])
 }
 
@@ -2070,14 +2097,14 @@ mod tests {
         state: &CodeReviewState,
         width: u16,
     ) -> (ratatui::buffer::Buffer, ratatui::buffer::Buffer) {
-        let rows = crate::session::review::file_tree_rows(&state.files);
+        let (rows, cursor) = state.file_row_snapshots(usize::MAX);
         let height = rows.len() as u16;
         let area = Rect::new(0, 0, width, height);
 
         let mut tree_term = Terminal::new(TestBackend::new(width, height)).unwrap();
         tree_term
             .draw(|f| {
-                let tree = files_list_tree(state, &rows);
+                let tree = files_list_tree(&rows, cursor);
                 crate::ui::plugin_pane::render_tree_rows(
                     &tree,
                     area,
@@ -2089,10 +2116,11 @@ mod tests {
             .unwrap();
 
         let current = state.current_file();
+        let legacy_rows = crate::session::review::file_tree_rows(&state.files);
         let mut legacy_term = Terminal::new(TestBackend::new(width, height)).unwrap();
         legacy_term
             .draw(|f| {
-                let lines: Vec<Line> = rows
+                let lines: Vec<Line> = legacy_rows
                     .iter()
                     .map(|row| match row {
                         crate::session::review::FileTreeRow::Folder { depth, name } => {
