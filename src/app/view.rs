@@ -78,7 +78,17 @@ fn pane_clicks(pane: &crate::plugin::PluginPane) -> PaneClicks {
             KeyContext::Automations => Some(ClickAction::SelectAutomation),
             KeyContext::Tasks => Some(ClickAction::SelectTask),
             KeyContext::FileViewer => Some(ClickAction::SelectFileRow),
-            KeyContext::Global | KeyContext::Terminal => None,
+            // The review's two panes select by *row of the review's own model*,
+            // which no click action names: the diff's cursor is a `ReviewRow`
+            // index and the changed-files cursor is derived from it
+            // (`CodeReviewState::current_file`). Recording nothing is the honest
+            // answer the doc above describes, and it is one of the reasons the
+            // pane's handover is still refused
+            // (`tests/code_review_pane_handover_gap.rs`).
+            KeyContext::CodeReview
+            | KeyContext::ReviewFiles
+            | KeyContext::Global
+            | KeyContext::Terminal => None,
         };
         return match (row, App::focus_for_keyboard(context)) {
             (Some(row), Some(focus)) => PaneClicks::ToKernel { row, focus },

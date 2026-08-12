@@ -3912,3 +3912,68 @@ unportable) and the code review. A build with no plugin host has no file viewer 
 `InputFocus::FileViewer`; `plugins` is a default feature, so no install is in that
 position, and `ToggleFileViewer` says so in that build's own words rather than doing
 nothing.
+
+## ADR-59: The code review's keyboard becomes actions — and four capability rows close without a grant
+
+**Context.** `tests/code_review_pane_handover_gap.rs` refused this pane on eleven rows,
+and its module doc named the reason ADR-51's route could not reach it: the review's keys
+were **not actions at all**. `KeyContext` had six members and none was a review, and
+`handle_code_review_key` / `handle_review_files_key` were captures keyed on `self.focus`,
+run ahead of the keybinding lookup. There was nothing for a pane's declaration to name.
+The refusal recorded the ordering that follows — the keys become scoped actions **first**
+— and this is that step, taken in its own change rather than inside a handover for the
+reason ADR-52 gives about the frame: a commit that rewrites a keyboard *and* moves who
+paints a pane makes a lost key unattributable.
+
+**Decision.** Two key contexts (`CodeReview`, `ReviewFiles`) and 39 scoped rebindable
+actions, both contexts in `KeyContext::pane_keyboards()` and mapped by
+`App::focus_for_keyboard`. `review_escape_chord` and `handle_review_files_key` are
+deleted; `handle_code_review_key` shrinks to `handle_code_review_submode_key`, which
+captures only the three sub-modes that own every key while open — the target picker, the
+compose box, and the find query while it is being typed.
+
+**Two contexts rather than one**, because the panes disagree about `j`, `k`, `g`, `G` and
+`Enter`: the diff walks rows and the list walks files. A single context would branch on
+focus inside its dispatcher, which is the capture wearing an action's name, and the F1
+editor would show one row for two behaviours.
+
+**The finding.** Four of the refused rows named a **power no capability performs** —
+writing a review record, retargeting the diff, reaching the clipboard and the agent,
+moving the cursor — and all four closed with **no grant**. The kernel keeps the key and
+performs the effect against its own `CodeReviewState`, exactly as it keeps the file
+viewer's directory read and editor launch (ADR-58). Each row is re-verdicted met only
+when the kernel performs the key *and* the capability it named is still absent, so a
+grant appearing flips it back to blocked — which is what stops "the grant was
+unnecessary" reading as "the grant happened". `no-cursor-write` is the sharpest of the
+four: the table had called it "the cheapest place a view-state write could start", and it
+never started.
+
+**Two decided behavioural differences.** The panes stop swallowing unlisted global chords
+— `Ctrl+F` and `Ctrl+R` now fork and restart from a review, as they do from every other
+pane — because a per-pane allowlist of which globals work is the inconsistency a context
+lookup exists to remove. And half-paging moves from `Ctrl+D`/`Ctrl+U` to `d`/`u`: the
+capture *shadowed* `DeleteSession` and `OpenRestoreSessions`, which a declared default may
+not do (`macos_default_set_has_no_conflicts` reports it), and `d`/`u` are `less`'s
+half-window keys, rebindable to `Ctrl+D` by anyone who wants the shadowing back.
+
+**Rejected: adding a `review-write` capability.** It is what the row asked for and it
+would have been the host's fourth capability with no consumer. It is also strictly worse
+than the declaration: a pane granted the write would still lose every surface its focus
+opens — the compose box, the target picker — so two new grants would buy less than one
+declaration.
+
+**Rejected: withholding the two contexts from `pane_keyboards()` until a handover.** One
+line smaller, and it makes the four re-verdicts unprovable: the rows would rest on "the
+kernel would perform this if a pane could declare the context", a promise rather than a
+fact, where the gate's whole design is a verdict re-derived from the source. The risk it
+opens is closed by construction — `App::session_ring` offers the two review stops only
+while `active_review().is_some()`, so a pane declaring either is focusable exactly while
+a review is open.
+
+**Consequence.** The handover is still refused, on five rows: the second seat, the
+resolved width three layouts divide against, the click's column, the anchored compose
+overlay, and the multi-line field inside it. `src/ui/code_review.rs` is unchanged and is
+still what thurbox draws. The row that this change taught, and the one a future attempt
+should read first: **giving the kernel a key closes the write, not the surface the key
+opens.** `c` writes a comment the kernel can perform; the box it opens anchors to a row
+of a tree the kernel did not lay out.

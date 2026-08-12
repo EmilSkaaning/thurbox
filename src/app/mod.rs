@@ -8616,6 +8616,8 @@ impl App {
             KeyContext::Automations => Some(InputFocus::Automations),
             KeyContext::Tasks => Some(InputFocus::TaskList),
             KeyContext::FileViewer => Some(InputFocus::FileViewer),
+            KeyContext::CodeReview => Some(InputFocus::CodeReview),
+            KeyContext::ReviewFiles => Some(InputFocus::ReviewFiles),
             // Neither scopes a pane, which is why a manifest cannot declare them
             // (`KeyContext::pane_keyboards`). Answered rather than panicked so the
             // table stays a total function.
@@ -8668,8 +8670,17 @@ impl App {
                     })
                 })
             }
+            // The review's find bar and its compose box are the same *kind* of
+            // thing as the file viewer's bar — kernel state on a kernel key — but
+            // neither is seat chrome: the bar sits inside the diff's own frame and
+            // the compose box floats at the selected row, which a band subtracted
+            // from a seat cannot express. Recorded as `no-anchored-overlay` /
+            // `no-in-pane-text-field` in `tests/code_review_pane_handover_gap.rs`
+            // rather than approximated here.
             KeyContext::SessionList
             | KeyContext::Automations
+            | KeyContext::CodeReview
+            | KeyContext::ReviewFiles
             | KeyContext::Global
             | KeyContext::Terminal => None,
         }
@@ -8756,6 +8767,20 @@ impl App {
             },
             KeyContext::FileViewer => match self.focus {
                 InputFocus::FileViewer => FocusLevel::Focused,
+                _ => FocusLevel::Inactive,
+            },
+            // The review's two panes are focused as a pair: one holds the
+            // keyboard while the other stays on screen showing the same review,
+            // so the idle one is `Active` rather than `Inactive` — its selection
+            // still tracks the diff's cursor and must stay marked.
+            KeyContext::CodeReview => match self.focus {
+                InputFocus::CodeReview => FocusLevel::Focused,
+                InputFocus::ReviewFiles => FocusLevel::Active,
+                _ => FocusLevel::Inactive,
+            },
+            KeyContext::ReviewFiles => match self.focus {
+                InputFocus::ReviewFiles => FocusLevel::Focused,
+                InputFocus::CodeReview => FocusLevel::Active,
                 _ => FocusLevel::Inactive,
             },
             // No pane, so no level. `Inactive` rather than a panic, for

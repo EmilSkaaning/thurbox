@@ -11,37 +11,45 @@
 //! words: a verdict written in markdown is a fact about a build that expires without
 //! telling anyone.
 //!
-//! ## ADR-51's route does not reach this pane, and that is a finding
+//! ## ADR-51's route now reaches this pane, and that is the finding
 //!
 //! Since ADR-51 a pane may declare that it **is** thurbox's pane for a key context,
 //! and the kernel then resolves that context's actions and performs them itself
 //! while the pane holds focus — which is how a pane keeps a keyboard whose effects a
-//! plugin could never be granted. Four panes can take that route.
+//! plugin could never be granted.
 //!
-//! This one cannot, and [`the_reviews_keyboard_resolves_no_action`] is why: the
-//! review's keyboard is not in the keybinding system at all. There is no
-//! `KeyContext` for it and no `Action` to resolve, so there is nothing for a
-//! declaration to name. The route is a reason the ordering in ADR-45 stands rather
-//! than a shortcut past it: this pane's keys must become scoped actions **first**,
-//! and then it would have what the other four already have.
+//! This pane could not take that route, because its keyboard was not in the
+//! keybinding system at all: there was no `KeyContext` for it and no `Action` to
+//! resolve, so a declaration had nothing to name. ADR-59 wrote the names —
+//! `KeyContext::CodeReview` and `KeyContext::ReviewFiles`, 39 scoped rebindable
+//! actions, both contexts declarable — in its own change, ahead of any handover, for
+//! the reason the frame convergence rule gives: a commit that rewrites a keyboard
+//! *and* moves who draws a pane makes a lost key unattributable.
+//!
+//! Five of this table's rows closed with it, and none of them by a grant. Four had
+//! named a **power** — writing a review record, retargeting the diff, reaching the
+//! clipboard and the agent, moving the cursor — and each is now performed by the
+//! kernel on the kernel's own key. Each of those rows still asserts that the
+//! capability it named was **not** granted, so "the grant was unnecessary" cannot
+//! come to read as "the grant happened". That is the file viewer's finding (ADR-58)
+//! a second time, on the pane whose keys looked like they needed the most.
 //!
 //! **Three findings this gate exists to keep true**, and they are why this pane is
-//! the furthest from a handover rather than the closest:
+//! still the furthest from a handover:
 //!
 //! - [`the_review_is_two_seats_not_one`]. Every earlier refusal needed one seat.
 //!   This surface is two panes: the diff in the **central** pane, and the
 //!   changed-files list in the **file-viewer column** — its own focus
 //!   (`InputFocus::ReviewFiles`), its own keys, and force-shown by `App::layout_for`
-//!   for as long as a review is open. One plugin would have to be granted, focused
-//!   and navigated in two columns at once. ADR-46 gave a plugin the first of the two
-//!   and deliberately not the second, so the finding narrowed rather than closed.
-//! - [`the_reviews_keyboard_resolves_no_action`]. The tasks, automations and
-//!   session-list refusals could each name the scoped `Action`s a plugin binding
-//!   would replace. This pane's keys are **not actions at all**: `KeyContext` has six
-//!   members and none is a review, and `handle_code_review_key` /
-//!   `handle_review_files_key` are captures keyed on `self.focus`, run ahead of the
-//!   keybinding lookup. So the keys are not rebindable, the F1 editor has never
-//!   listed them, and no `keybindings.json` could restore them after a handover.
+//!   for as long as a review is open. Both seats have names now, and the second is
+//!   *preempted by this very list*, so a plugin-drawn review would need the seat its
+//!   own other half takes away.
+//! - [`the_reviews_keyboard_is_scoped_rebindable_actions`]. The finding that
+//!   reversed. The keys are declared, rebindable, listed by the F1 editor and
+//!   writable to `keybindings.json`, and the only capture left ahead of the lookup is
+//!   the three sub-modes that own **every** key while they are open. So the keyboard
+//!   is no longer what refuses the handover — which is worth pinning, because it is
+//!   the row a future attempt will assume is still true.
 //! - [`the_mouse_channel_carries_a_row_where_the_pane_needs_a_column`]. The pane is
 //!   documented mouse-first, and a plugin pane's click reports a row. Most of the
 //!   difference is missing target *kinds* (eleven footer buttons, a scrollbar, a
@@ -49,13 +57,14 @@
 //!   side-by-side row, the half clicked decides which side of the diff a comment
 //!   attaches to (`CodeReviewState::click_side`). No extra target kind closes that.
 //!
-//! And one row where this pane is **closer** than the session list, which is the
-//! point of a gate rather than a verdict:
+//! And one row that closed in a way worth keeping visible:
 //! [`the_review_cursor_is_a_narrower_grant_than_the_session_lists`]. The session
 //! list's cursor *is* the application's active session, so making it writable is the
-//! widest grant in the host. This pane's cursor is a row inside a view the user
-//! already opened. Two rows spelled alike, very different prices — and the narrower
-//! one is where the work would start.
+//! widest grant in the host; this pane's cursor is a row inside a view the user
+//! already opened, and the table used to call it "the cheapest place a view-state
+//! write could start". It never started. The keyboard closed it, and the seam still
+//! has no cursor write — which is the evidence that the session list's row does not
+//! need one either.
 //!
 //! Three things this gate is deliberately not:
 //!
@@ -201,49 +210,87 @@ const BLOCKERS: &[Blocker] = &[
         needs: "the pane's keyboard: navigation (`j`/`k`, `g`/`G`, `{`/`}`, `[`/`]`, page and \
                 half-page), the comment keys (`c`/`f`/`s`), marks (`r`/`R`), layout (`v`/`w`), \
                 the target picker (`t`), find (`/`, `n`/`N`) and export (`y`/`e`)",
-        stands: "none of it is an `Action`. `KeyContext` names six scopes and no review, and \
-                 `App::handle_key` runs `handle_code_review_key` and `handle_review_files_key` \
-                 **before** the keybinding lookup, keyed on `self.focus`. A handed-over pane is \
-                 focused as `InputFocus::PluginPane`, which those captures do not name and which \
-                 `focus_key_context` maps to `KeyContext::Global` — so a plugin binding has no \
-                 action to claim, the keys are not rebindable today, and no keybindings file \
-                 could restore them. Turning them into scoped actions is a keybinding-vocabulary \
-                 change and precedes anything plugin-facing",
+        stands: "**closed by ADR-59.** `KeyContext` names the two panes — `CodeReview` for the \
+                 diff and `ReviewFiles` for the changed-files list, two because they disagree \
+                 about `j`, `k`, `g`, `G` and `Enter` — and 39 scoped actions carry the keys. \
+                 `App::focus_key_context` scopes each focus to its context, \
+                 `dispatch_code_review_action` / `dispatch_review_files_action` perform them, and \
+                 both contexts are in `KeyContext::pane_keyboards()`, so a pane may declare \
+                 either. The only capture left ahead of the lookup is \
+                 `handle_code_review_submode_key`: the target picker, the compose box and the \
+                 find query while it is being typed, which own every key while open — a letter \
+                 typed into a field is text, not a command. Two decided differences: the panes \
+                 stopped swallowing unlisted global chords, and half-paging moved from \
+                 `Ctrl+D`/`Ctrl+U` to `d`/`u`, because a *declared* scoped default may not \
+                 shadow a global chord",
         gap: Gap::Structural,
-        blocked: true,
+        blocked: false,
         probe: |root| {
             let contexts = variant_names(&block(
                 root,
                 "src/session/keybindings.rs",
                 "pub enum KeyContext",
             ));
-            let no_review_context = !contexts.iter().any(|c| c.contains("Review"));
-            let handle = method_body(root, "src/app/key_handlers.rs", "fn handle_key");
-            let captured_before_lookup = handle
-                .find("handle_code_review_key")
-                .zip(handle.find("lookup_in"))
-                .is_some_and(|(capture, lookup)| capture < lookup);
+            let both_contexts = ["CodeReview", "ReviewFiles"]
+                .iter()
+                .all(|c| contexts.iter().any(|v| v == c));
+            let declarable = {
+                let body =
+                    method_body(root, "src/session/keybindings.rs", "pub fn pane_keyboards(");
+                body.contains("KeyContext::CodeReview") && body.contains("KeyContext::ReviewFiles")
+            };
+            // Scoped where focus is resolved, and dispatched: a context nothing
+            // resolves into and nothing performs would be two names, not a keyboard.
             let focus_ctx = method_body(root, "src/app/key_handlers.rs", "fn focus_key_context");
-            no_review_context && captured_before_lookup && !focus_ctx.contains("PluginPane")
+            let scoped = focus_ctx.contains("KeyContext::CodeReview")
+                && focus_ctx.contains("KeyContext::ReviewFiles");
+            let keys = source(root, "src/app/key_handlers.rs");
+            let dispatched = keys.contains("dispatch_code_review_action")
+                && keys.contains("dispatch_review_files_action");
+            // And the captures are gone bar the sub-modes, which is the half a
+            // "the actions exist" probe would miss: both could be true while the
+            // capture still ran first and ate every key.
+            let only_submodes_captured =
+                keys.contains("handle_code_review_submode_key") && !keys.contains("files_key");
+            !(both_contexts && declarable && scoped && dispatched && only_submodes_captured)
         },
     },
     Blocker {
         id: "no-review-write",
         needs: "`r`/`R` (mark a file or hunk reviewed), `c`/`f`/`s` and the compose box (write a \
                 line, file or summary comment), and editing or deleting one",
-        stands: "the mutation seam's five operations set a task's status, delete a task, set an \
-                 automation's enabled flag, run one and delete one. None addresses a review: \
-                 there is no `review_comments` write and no `review_marks` write, and denial is \
-                 by the absence of a binding, so there is nothing to refuse either",
+        stands: "**met, and by no grant.** The mutation seam is exactly what it was — five \
+                 operations over tasks and automations, no `review_comments` write and no \
+                 `review_marks` write — and this row goes on asserting that. What closed it is \
+                 the keyboard: `r`/`R` are `ReviewToggleFileMark`/`ReviewToggleHunkMark` and \
+                 `c`/`f`/`s` are `ReviewComment`/`ReviewFileComment`/`ReviewSummaryComment`, all \
+                 scoped to `KeyContext::CodeReview` and all performed by \
+                 `App::dispatch_code_review_action` against the kernel's own `CodeReviewState`. A \
+                 pane declaring that keyboard writes a review without holding any power to. \
+                 Drawing the compose box is a different row (`no-anchored-overlay`) and stays \
+                 open",
         gap: Gap::Structural,
-        blocked: true,
+        blocked: false,
         probe: |root| {
-            let methods = writer_methods(root);
-            !methods.iter().any(|m| {
+            let no_capability = !writer_methods(root).iter().any(|m| {
                 ["review", "comment", "mark", "reviewed"]
                     .iter()
                     .any(|n| m.contains(n))
-            })
+            });
+            let kernel_performs = kernel_performs_review_keys(
+                root,
+                &[
+                    "ReviewToggleFileMark",
+                    "ReviewToggleHunkMark",
+                    "ReviewComment",
+                    "ReviewFileComment",
+                    "ReviewSummaryComment",
+                ],
+            );
+            // Met only when **both** hold. A grant appearing would flip this row
+            // back to blocked, which is how "the grant was unnecessary" stays
+            // distinguishable from "the grant happened".
+            !(no_capability && kernel_performs)
         },
     },
     Blocker {
@@ -255,9 +302,13 @@ const BLOCKERS: &[Blocker] = &[
                  that runs a version-control command, which `review`'s own contract states as the \
                  point: it publishes the review the **user** opened. A pane asking to retarget is \
                  asking to choose what gets diffed, which is a different power from reading a \
-                 diff",
+                 diff. **Met, and by no grant**: nothing in the vocabulary runs a \
+                 version-control command and this row still asserts it — `t` is \
+                 `Action::ReviewOpenTargetPicker`, and the kernel starts the \
+                 `ReviewBuildKind::Retarget` worker on its own key. Drawing the picker is \
+                 `no-anchored-overlay`'s and stays open",
         gap: Gap::Structural,
-        blocked: true,
+        blocked: false,
         probe: |root| {
             let no_vcs_capability = !capability_names(root)
                 .iter()
@@ -265,19 +316,22 @@ const BLOCKERS: &[Blocker] = &[
             let retarget_is_a_worker_build = source(root, "src/app/code_review.rs")
                 .contains("ReviewBuildKind")
                 && source(root, "src/app/code_review.rs").contains("Retarget");
-            no_vcs_capability && retarget_is_a_worker_build
+            let kernel_performs = kernel_performs_review_keys(root, &["ReviewOpenTargetPicker"]);
+            !(no_vcs_capability && retarget_is_a_worker_build && kernel_performs)
         },
     },
     Blocker {
         id: "no-export-operation",
         needs: "`y` (copy the compiled review as markdown to the clipboard) and `e` (paste it \
                 into the session's agent as a prompt to address it)",
-        stands: "neither reach exists. The seam writes records, not the clipboard and not a \
-                 session's pty, and no capability names either. `e` is the review's whole export \
-                 story — thurbox deliberately has no submit-to-forge — so a handed-over pane \
-                 would lose the loop the feature exists to close",
+        stands: "**met, and by no grant.** Neither reach exists — the seam writes records, not \
+                 the clipboard and not a session's pty, and no capability names either — and this \
+                 row goes on asserting both. `e` is the review's whole export story, since \
+                 thurbox deliberately has no submit-to-forge, and it survives a handover because \
+                 `y`/`e` are `ReviewCopyMarkdown`/`ReviewSendToAgent`: the kernel copies and the \
+                 kernel pastes into the session it already owns",
         gap: Gap::Structural,
-        blocked: true,
+        blocked: false,
         probe: |root| {
             let methods = writer_methods(root);
             let no_seam_reach = !methods.iter().any(|m| {
@@ -288,7 +342,9 @@ const BLOCKERS: &[Blocker] = &[
             let no_capability = !capability_names(root)
                 .iter()
                 .any(|c| ["clipboard", "prompt", "agent", "pty"].contains(&c.as_str()));
-            no_seam_reach && no_capability
+            let kernel_performs =
+                kernel_performs_review_keys(root, &["ReviewCopyMarkdown", "ReviewSendToAgent"]);
+            !(no_seam_reach && no_capability && kernel_performs)
         },
     },
     Blocker {
@@ -296,20 +352,27 @@ const BLOCKERS: &[Blocker] = &[
         needs: "every navigation key, and the wheel: they move `CodeReviewState::selected`, which \
                 is the row the published section names as its cursor and the row the \
                 changed-files list highlights",
-        stands: "a pane reads the cursor and cannot move it. This is the session list's row \
-                 (ADR-43) with a **narrower** shape, which is the reason to state it separately: \
-                 that pane's cursor is the application's active session, so writing it is the \
-                 widest grant in the host, whereas this one is a row inside a view the user \
-                 already opened — nothing outside the review reads it except the changed-files \
-                 highlight. It is therefore the cheapest place a view-state write could start, \
-                 and the order this table implies",
+        stands: "**met, and by no grant** — which is the row's whole point. It used to read as \
+                 the cheapest place a view-state write could start, being the session list's row \
+                 (ADR-43) in a narrower shape: that pane's cursor is the application's active \
+                 session, so writing it is the widest grant in the host, whereas this one is a \
+                 row inside a view the user already opened. No write started. Every navigation \
+                 key is a scoped action — `ReviewDown`/`ReviewUp` and the file, hunk and page \
+                 jumps — and the kernel moves `CodeReviewState::selected` itself, so the seam \
+                 still has no cursor write and this row still asserts it. The **wheel** is not \
+                 covered: a plugin pane's wheel is not a key, and it belongs to \
+                 `mouse-carries-no-column`",
         gap: Gap::Structural,
-        blocked: true,
+        blocked: false,
         probe: |root| {
-            let methods = writer_methods(root);
-            !methods
+            let no_capability = !writer_methods(root)
                 .iter()
-                .any(|m| ["cursor", "select", "focus"].iter().any(|n| m.contains(n)))
+                .any(|m| ["cursor", "select", "focus"].iter().any(|n| m.contains(n)));
+            let kernel_performs = kernel_performs_review_keys(
+                root,
+                &["ReviewDown", "ReviewUp", "ReviewNextFile", "ReviewNextHunk"],
+            );
+            !(no_capability && kernel_performs)
         },
     },
     Blocker {
@@ -387,12 +450,16 @@ const BLOCKERS: &[Blocker] = &[
         id: "no-in-pane-text-field",
         needs: "the find sub-mode's bar and the compose box's body — a query and a multi-line \
                 body typed **inside** the pane, with a cursor shown where the caret is",
-        stands: "a plugin pane can receive keys with `input`, so accumulating a string is within \
-                 reach, but drawing one is not: no node carries a caret appearance, and the find \
-                 bar's in-row match emphasis *replaces* the syntax colouring for the matched run \
-                 — a third styling mode over a tree whose runs are already the pane's tokens. \
-                 The other half of find is `no-cursor-write`: stepping matches moves the review's \
-                 selection",
+        stands: "**narrowed to the compose body.** The find bar has a route it did not have: the \
+                 file viewer's `PaneChrome::SearchBar` (ADR-58) draws exactly this — a bordered \
+                 query line with a block cursor and a `matched/total` counter, from kernel state, \
+                 on a kernel key — and `ReviewFind`/`ReviewNextMatch` are kernel keys now, so the \
+                 query, the caret and the count would be the kernel's here too. What has no route \
+                 is the **compose box's body**: a multi-line field inside an overlay anchored to \
+                 a row (`no-anchored-overlay`), which no chrome band reaches. The in-row match \
+                 emphasis is unexpressible either way — it *replaces* the syntax colouring for a \
+                 matched run, a third styling mode over a tree whose runs are already the pane's \
+                 tokens",
         gap: Gap::Vocabulary,
         blocked: true,
         probe: |root| {
@@ -544,6 +611,25 @@ fn capability_names(root: &Path) -> Vec<String> {
     names
 }
 
+/// Whether the kernel performs each named review key itself: the action is declared,
+/// it is scoped to one of the review contexts, and a dispatcher runs it.
+///
+/// This is what a row saying "met, and by no grant" rests on, so all three halves are
+/// checked. An `Action` variant with no context would resolve nowhere; a context with
+/// no dispatcher would resolve into nothing; and either alone would let a row claim the
+/// kernel performs a key it silently drops.
+fn kernel_performs_review_keys(root: &Path, actions: &[&str]) -> bool {
+    let keys = source(root, "src/session/keybindings.rs");
+    let context = method_body(root, "src/session/keybindings.rs", "pub fn context(");
+    let dispatch = source(root, "src/app/code_review.rs");
+    actions.iter().all(|a| {
+        let declared = keys.contains(&format!("    {a},"));
+        let scoped = context.contains(&format!("Action::{a}"));
+        let performed = dispatch.contains(&format!("Action::{a} =>"));
+        declared && scoped && performed
+    })
+}
+
 /// A recorded verdict is only worth having if it cannot drift from the tree.
 #[test]
 fn recorded_blockers_match_the_tree() {
@@ -585,23 +671,38 @@ fn the_verdict_is_derived_from_the_blockers() {
          deliberately (and retire this gate) rather than leaving it passing vacuously"
     );
     // The ordering the table implies, asserted rather than described: the rows that
-    // decide the verdict are structural, and the two seats are among them.
+    // decide the verdict are structural, and the second seat is among them.
     assert!(!outstanding(BLOCKERS, Gap::Wiring).is_empty());
     assert!(!outstanding(BLOCKERS, Gap::Vocabulary).is_empty());
     let structural = outstanding(BLOCKERS, Gap::Structural);
-    // The central seat closed with ADR-46; the review's *second* seat did not, and
-    // with the capture-keyed keyboard it is what still decides the verdict.
+    // What still decides the verdict: the review's *second* seat, and the resolved
+    // width its three layouts divide against. The central seat closed with ADR-46 and
+    // the keyboard with ADR-59.
     assert!(
         structural.contains(&"no-second-seat-for-the-changed-files-list")
-            && structural.contains(&"keys-are-a-capture-not-actions"),
-        "the second seat and the capture-keyed keyboard are what decide this verdict, and both \
-         are structural: {structural:?}"
+            && structural.contains(&"no-resolved-width"),
+        "the second seat and the resolved width are what decide this verdict, and both are \
+         structural: {structural:?}"
     );
-    assert!(
-        !structural.contains(&"no-central-seat"),
-        "the central seat is closed (ADR-46) — a table recording it outstanding again means the \
-         seating regressed: {structural:?}"
-    );
+    for closed in ["no-central-seat", "keys-are-a-capture-not-actions"] {
+        assert!(
+            !structural.contains(&closed),
+            "`{closed}` is closed — a table recording it outstanding again means the route \
+             regressed: {structural:?}"
+        );
+    }
+    // **None of the outstanding rows is a missing capability.** The four that named one
+    // closed without a grant, so a reader arriving at this table must not be able to
+    // infer "it needs a power a plugin is not given" from the rows that are left: each
+    // is a seat, a geometry, an event shape or a node the tree has no word for.
+    for row in BLOCKERS.iter().filter(|b| b.blocked) {
+        assert!(
+            !row.stands.contains("no capability names")
+                && !row.stands.contains("there is nothing to refuse"),
+            "`{}` reads as a missing capability, and none of the outstanding rows is one",
+            row.id
+        );
+    }
 
     // The other direction: a table where every row landed permits the handover.
     let all_met: Vec<Blocker> = BLOCKERS
@@ -642,12 +743,15 @@ fn the_review_is_two_seats_not_one() {
          (the kernel's own occupant of that seat is deleted since ADR-58): {layout}"
     );
 
-    // And the second seat is a pane in its own right: its own focus, its own key
-    // capture, its own ring stop.
+    // And the second seat is a pane in its own right: its own focus, its own keyboard,
+    // its own ring stop. Its keys are a `KeyContext` of their own since ADR-59, which
+    // is a *stronger* statement of the same fact than the capture it replaced — a
+    // context exists precisely because this list means different things by `j` and
+    // `Enter` than the diff does.
     let keys = source(&root, "src/app/key_handlers.rs");
     assert!(
-        keys.contains("handle_review_files_key"),
-        "the changed-files list should capture its own keys"
+        keys.contains("KeyContext::ReviewFiles"),
+        "the changed-files list should scope a keyboard of its own"
     );
     assert!(
         keys.contains("InputFocus::ReviewFiles"),
@@ -678,62 +782,98 @@ fn the_review_is_two_seats_not_one() {
     );
 }
 
-/// **The second finding.** The pane's keys are a capture, not actions — so a handover
-/// loses them with nothing to name in their place, and no configuration file can put
-/// them back.
+/// **The second finding, reversed.** The pane's keys are scoped, rebindable actions, so
+/// the route every other handover took now reaches this pane too.
 ///
-/// Pinned separately because it is the sentence a future attempt will want to argue
-/// with. The earlier refusals lost *bindable* actions; this one loses keys that were
-/// never bindable, which makes "let the plugin declare the bindings" not merely
-/// insufficient but inexpressible.
+/// Pinned separately because it is the sentence a future attempt will assume is still
+/// what it was. The earlier refusals lost *bindable* actions; this one used to lose keys
+/// that were never bindable, which made "let the plugin declare the bindings" not merely
+/// insufficient but inexpressible. It is expressible now — and the pane is still refused,
+/// on five rows the keyboard has no bearing on.
 #[test]
-fn the_reviews_keyboard_resolves_no_action() {
+fn the_reviews_keyboard_is_scoped_rebindable_actions() {
     let root = repo_root();
 
-    // No review scope exists in the keybinding vocabulary.
+    // Two contexts, because the diff and the changed-files list disagree about five
+    // keys — a single context would have to branch on focus inside the dispatcher,
+    // which is the capture wearing an action's name.
     let contexts = variant_names(&block(
         &root,
         "src/session/keybindings.rs",
         "pub enum KeyContext",
     ));
-    assert!(
-        !contexts.iter().any(|c| c.contains("Review")),
-        "a review key context now exists — if the pane's keys became actions, re-verdict \
-         `keys-are-a-capture-not-actions`: {contexts:?}"
-    );
+    for context in ["CodeReview", "ReviewFiles"] {
+        assert!(
+            contexts.iter().any(|c| c == context),
+            "`KeyContext::{context}` should scope one of the review's two panes: {contexts:?}"
+        );
+    }
 
-    // The captures run ahead of the lookup, keyed on the focused surface.
+    // Declarable, which is the last step of the route: a pane may say it *is*
+    // thurbox's review, and the kernel then performs the actions.
+    let keyboards = method_body(
+        &root,
+        "src/session/keybindings.rs",
+        "pub fn pane_keyboards(",
+    );
+    for context in ["CodeReview", "ReviewFiles"] {
+        assert!(
+            keyboards.contains(&format!("KeyContext::{context}")),
+            "`KeyContext::{context}` should be declarable by a pane: {keyboards}"
+        );
+    }
+    let focus_table = method_body(&root, "src/app/mod.rs", "pub(crate) fn focus_for_keyboard");
+    for focus in ["InputFocus::CodeReview", "InputFocus::ReviewFiles"] {
+        assert!(
+            focus_table.contains(focus),
+            "a declared review keyboard should be delivered to `{focus}`: {focus_table}"
+        );
+    }
+
+    // Rebindable, which is what a capture could never be: every review action is in
+    // the F1 editor's flattened order, so it can be selected, captured and persisted.
+    let sections = source(&root, "src/session/keybindings.rs");
+    for section in ["Code review (when focused)", "Review files (when focused)"] {
+        assert!(
+            sections.contains(section),
+            "the help overlay should list a `{section}` section"
+        );
+    }
+
+    // And the capture that remains is the sub-modes' only. Both halves: a lookup that
+    // resolves nothing would be a vocabulary with no effect, and a capture still
+    // running first would be the old world with new names.
     let handle = method_body(&root, "src/app/key_handlers.rs", "fn handle_key");
-    let capture = handle
-        .find("handle_code_review_key")
-        .expect("the review should capture keys in handle_key");
-    let files = handle
-        .find("handle_review_files_key")
-        .expect("the changed-files list should capture keys in handle_key");
-    let lookup = handle
-        .find("lookup_in")
-        .expect("the keybinding lookup should follow the captures");
     assert!(
-        capture < lookup && files < lookup,
-        "both captures should run before the keybinding lookup, which is why a scoped action \
-         could not reach them anyway"
+        handle.contains("handle_code_review_submode_key"),
+        "the review's sub-modes should still capture ahead of the lookup: {handle}"
     );
-
-    // And a focused plugin pane resolves in the global scope, so it sees neither.
+    assert!(
+        !handle.contains("handle_review_files_key"),
+        "the changed-files list should have no capture left — its keys are actions: {handle}"
+    );
     let focus_ctx = method_body(&root, "src/app/key_handlers.rs", "fn focus_key_context");
+    for context in ["KeyContext::CodeReview", "KeyContext::ReviewFiles"] {
+        assert!(
+            focus_ctx.contains(context),
+            "the focused review pane should resolve keys in `{context}`: {focus_ctx}"
+        );
+    }
+
+    // The one review key that was *already* an action is the toggle that opens the
+    // view, which is not one of the pane's own keys — kept so the reversal cannot be
+    // read as "the review had no actions before".
     assert!(
-        !focus_ctx.contains("PluginPane"),
-        "`focus_key_context` now names a plugin pane — re-verdict the keyboard row and check \
-         which scope it lands in: {focus_ctx}"
+        sections.contains("Action::ToggleReview"),
+        "opening the review was a bindable action before its contents were"
     );
 
-    // The one review key that *is* an action is the toggle that opens the view, which
-    // is not one of the pane's own keys — stated so the row cannot be read as "the
-    // review has no actions at all".
-    let actions = source(&root, "src/session/keybindings.rs");
+    // The reproduction did not grow a keyboard with the vocabulary: a pane declaring
+    // a context for a view it does not draw would be a declaration with no consumer.
+    let manifest = source(&root, "src/plugin/bundled/code-review/plugin.toml");
     assert!(
-        actions.contains("Action::ToggleReview"),
-        "opening the review is a bindable action, unlike anything inside it"
+        !manifest.contains("key_context"),
+        "the bundled reproduction must not declare a keyboard while the native pane draws"
     );
 }
 
@@ -790,15 +930,20 @@ fn the_mouse_channel_carries_a_row_where_the_pane_needs_a_column() {
     );
 }
 
-/// **The row where this pane is closer than the session list**, which a gate that only
-/// repeated "the cursor is kernel state" would hide.
+/// **The row that closed without the grant it was the cheapest case for.**
 ///
 /// The session list's cursor is the application's active session — the thing the
 /// central pane, the info panel, the file viewer and the review are all showing — so
 /// writing it is the widest grant in the host. This pane's cursor is a row inside a
 /// view the user already opened, read by the review and by the changed-files
-/// highlight and by nothing else. So a narrow "name the row you are on" capability is
-/// the cheapest first step, and this test is what keeps that ordering true.
+/// highlight and by nothing else, so the table called it the cheapest place a
+/// view-state write could start.
+///
+/// It never started, and this test is now what keeps *that* true: the cursor moves on
+/// the kernel's own scoped actions and the seam still has no cursor write. Kept rather
+/// than retired, because the argument generalises — if the narrowest case did not need
+/// a write, the session list's row does not either, and a future change proposing one
+/// should have to fail this test to get it.
 #[test]
 fn the_review_cursor_is_a_narrower_grant_than_the_session_lists() {
     let root = repo_root();
@@ -827,14 +972,19 @@ fn the_review_cursor_is_a_narrower_grant_than_the_session_lists() {
         "the published section should carry that cursor, which is what a plugin reads"
     );
 
-    // Neither is writable, which is the row itself.
+    // Neither is writable, and this one moves anyway — which is the row.
     let methods = writer_methods(&root);
     assert!(
         !methods
             .iter()
             .any(|m| ["cursor", "select"].iter().any(|n| m.contains(n))),
-        "a cursor write now exists — re-verdict `no-cursor-write` here and in the session list's \
-         gate, and check which of the two it covers: {methods:?}"
+        "a cursor write now exists — the narrowest case for one closed without it (ADR-59), so a \
+         write added here needs a reason that is not this pane: {methods:?}"
+    );
+    assert!(
+        kernel_performs_review_keys(&root, &["ReviewDown", "ReviewUp"]),
+        "the review's cursor should move on the kernel's own scoped actions, which is what closed \
+         `no-cursor-write` in place of a grant"
     );
 }
 

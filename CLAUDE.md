@@ -2393,10 +2393,21 @@ code_review`.
   keyboard defaults to New (the addition), a mouse click uses the column it hit
   (`App::cr_click_row` → `click_side`; left = Old, right = New). **Mouse-first**
   (no vim modal): click a diff line to select/comment, click footer buttons, drag
-  the scrollbar, wheel-scroll. **tuicr nav keys**: `j`/`k` + arrows, PageUp/Down + `Ctrl+D`/`U`,
-  `g`/`G`, `{`/`}` (or Tab) next/prev file, `[`/`]` next/prev hunk. Every footer
+  the scrollbar, wheel-scroll. **tuicr nav keys**: `j`/`k` + arrows, PageUp/Down + `d`/`u`
+  half-page, `g`/`G`, `{`/`}` (or Tab) next/prev file, `[`/`]` next/prev hunk. Every footer
   button is labelled with its key (`Comment·c`, `Send→Agent·e`, `Find·/`, …) so
   the shortcuts are discoverable; the changed-files column shows a nav-key legend.
+  Every one of those keys is a **rebindable scoped action** (ADR-59) in one of two
+  contexts — `KeyContext::CodeReview` for the diff, `KeyContext::ReviewFiles` for the
+  changed-files list, two because they mean different things by `j`, `g`/`G` and
+  `Enter` — so the F1 editor lists them and `keybindings.json` can move them, like
+  every other pane's. Only three sub-modes stay literal (the target picker, the
+  compose box, the find query while it is being typed): each owns every key while
+  open, so a letter is text rather than a command. Two consequences of the keys
+  becoming *declared*: the panes no longer swallow unlisted global chords (`Ctrl+F`
+  forks and `Ctrl+R` restarts from a review, as everywhere else), and half-paging is
+  `d`/`u` rather than `Ctrl+D`/`Ctrl+U` — a scoped default may not shadow a global
+  chord, and `d`/`u` are `less`'s half-window keys. Rebind either back if you want it.
 - **Long lines: horizontal scroll + wrap toggle.** A diff line wider than the
   pane doesn't get lost. By default the body scrolls horizontally with
   `Left`/`Right` (or `h`/`l`) while the line-number gutter stays pinned
@@ -2876,7 +2887,8 @@ chord strings, e.g. `{ "QuitApp": ["ctrl+a"] }`):
   (mtime poll — see `docs/CONFIG.md`).
 
 **Context-scoped bindings.** Each `Action` has a `KeyContext` (`Global`,
-`SessionList`, `Automations`, `Tasks`, `FileViewer`, `Terminal`). Global
+`SessionList`, `Automations`, `Tasks`, `FileViewer`, `CodeReview`, `ReviewFiles`,
+`Terminal`). Global
 actions are active everywhere; scoped actions fire only while their pane is
 focused, so a single-letter key like `j` can drive the file viewer, session
 list, automations pane, and tasks pane independently (and the terminal still

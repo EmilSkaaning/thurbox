@@ -1512,6 +1512,83 @@ fn review_files_pane_navigates_and_opens_into_diff() {
     assert!(matches!(h.app.focus, InputFocus::CodeReview));
 }
 
+/// The diff pane's keys resolve through the **keybinding lookup** since they became
+/// `KeyContext::CodeReview` actions, which is what makes them rebindable and what a
+/// handed-over pane would declare itself the pane for (ADR-59).
+///
+/// Asserted through a *rebind* rather than through the default chord: a capture would
+/// keep passing a `j`-moves-down test forever, and only a moved key tells the two
+/// routes apart.
+#[test]
+fn review_keys_resolve_through_the_keybinding_lookup() {
+    let mut h = Harness::standard(1);
+    open_review(&mut h, 3);
+    let before = h.app.active_review().unwrap().selected;
+
+    // The default: `j` moves down.
+    h.key(KeyCode::Char('j'), KeyModifiers::NONE);
+    assert!(h.app.active_review().unwrap().selected > before);
+
+    // Move it to `z`, and the review follows — a capture keyed on `j` could not.
+    h.app.keybindings.rebind(
+        crate::session::Action::ReviewDown,
+        crate::session::keybindings::KeyChord::plain('z'),
+    );
+    let moved = h.app.active_review().unwrap().selected;
+    h.key(KeyCode::Char('z'), KeyModifiers::NONE);
+    assert!(
+        h.app.active_review().unwrap().selected > moved,
+        "a rebound review key should move the cursor"
+    );
+    h.key(KeyCode::Char('j'), KeyModifiers::NONE);
+    assert_eq!(
+        h.app.active_review().unwrap().selected,
+        moved + 1,
+        "the old chord should no longer move the cursor"
+    );
+}
+
+/// Half-paging is `d`/`u` rather than `Ctrl+D`/`Ctrl+U` (ADR-59): a *declared* scoped
+/// default may not shadow a global chord, and those two are `DeleteSession` and
+/// `OpenRestoreSessions`.
+#[test]
+fn review_half_pages_on_d_and_u() {
+    let mut h = Harness::standard(1);
+    open_review(&mut h, 5);
+
+    h.key(KeyCode::Char('d'), KeyModifiers::NONE);
+    let paged = h.app.active_review().unwrap().selected;
+    assert!(paged > 1, "`d` should page down, not step: {paged}");
+    h.key(KeyCode::Char('u'), KeyModifiers::NONE);
+    assert_eq!(
+        h.app.active_review().unwrap().selected,
+        0,
+        "`u` should page back to the top"
+    );
+}
+
+/// A global chord the old capture swallowed now fires from the review, which is the
+/// second decided difference in ADR-59: the panes resolve keys the way every other
+/// pane does instead of carrying an allowlist of which globals work.
+#[test]
+fn review_no_longer_swallows_global_chords() {
+    let mut h = Harness::standard(1);
+    h.app.features.perf_hud = true;
+    open_review(&mut h, 2);
+
+    // F12 was in neither the escape allowlist nor the pane's own keys, so it used to
+    // be swallowed with no effect.
+    h.func(12);
+    assert!(
+        h.app.show_perf_hud,
+        "a global action should fire from the focused diff pane"
+    );
+    assert!(
+        h.app.active_review().is_some(),
+        "and it should not have closed the review"
+    );
+}
+
 #[test]
 fn review_jump_to_file_anchors_header_to_top() {
     let mut h = Harness::standard(1);

@@ -112,6 +112,61 @@ pub enum Action {
     FileViewerSearch,
     FileViewerNextMatch,
     FileViewerPrevMatch,
+    // ── Code review, the diff pane (scoped) ─────────────────────────────
+    ReviewDown,
+    ReviewUp,
+    /// Half a page down. `d` rather than `Ctrl+D`: a scoped default may not
+    /// shadow a global chord (see [`Action::default_chords_for`]).
+    ReviewPageDown,
+    ReviewPageUp,
+    ReviewTop,
+    ReviewBottom,
+    ReviewNextFile,
+    ReviewPrevFile,
+    ReviewNextHunk,
+    ReviewPrevHunk,
+    /// Scroll the diff body left; the line-number gutter stays pinned.
+    ReviewScrollLeft,
+    ReviewScrollRight,
+    /// Unified ↔ paired side-by-side layout.
+    ReviewToggleSideBySide,
+    /// Soft-wrap long lines instead of scrolling them.
+    ReviewToggleWrap,
+    /// Open the target picker (Working / Branch / a commit).
+    ReviewOpenTargetPicker,
+    ReviewComment,
+    ReviewFileComment,
+    ReviewSummaryComment,
+    /// Mark the selection's **file** reviewed.
+    ReviewToggleFileMark,
+    /// Mark the selection's **hunk** reviewed.
+    ReviewToggleHunkMark,
+    /// Copy the compiled review to the clipboard as markdown.
+    ReviewCopyMarkdown,
+    /// Paste the compiled review into the session's agent as a prompt.
+    ReviewSendToAgent,
+    ReviewDeleteComment,
+    /// Edit the comment under the cursor, else fold/unfold its file.
+    ReviewActivate,
+    ReviewFind,
+    ReviewNextMatch,
+    ReviewPrevMatch,
+    /// Clear a committed search if one is active, else close the review.
+    ReviewClose,
+    // ── Code review, the changed-files pane (scoped) ────────────────────
+    ReviewFilesNext,
+    ReviewFilesPrev,
+    ReviewFilesPageDown,
+    ReviewFilesPageUp,
+    ReviewFilesTop,
+    ReviewFilesBottom,
+    /// Drop focus into the diff, already scrolled to the selected file.
+    ReviewFilesOpen,
+    ReviewFilesToggleFileMark,
+    ReviewFilesToggleHunkMark,
+    /// Search the diff: opens the find sub-mode and moves focus to it.
+    ReviewFilesFind,
+    ReviewFilesClose,
     // ── Terminal (scoped) ───────────────────────────────────────────────
     TerminalScrollUp,
     TerminalScrollDown,
@@ -135,6 +190,11 @@ pub enum KeyContext {
     Automations,
     Tasks,
     FileViewer,
+    /// The code review's diff pane.
+    CodeReview,
+    /// The code review's changed-files list, which is a pane of its own: its own
+    /// focus, its own keys, and its own column.
+    ReviewFiles,
     Terminal,
 }
 
@@ -150,12 +210,21 @@ impl KeyContext {
     /// - [`KeyContext::Terminal`]'s keys are translated to bytes and written to a
     ///   PTY (`agent::input::key_to_bytes`), so a pane claiming it would sit there
     ///   receiving nothing, with no error to explain it.
+    ///
+    /// The two review contexts are **conditional** surfaces — they exist while a
+    /// code review is open and not otherwise — and are in the set on the same
+    /// terms as the rest. The condition is the kernel's and lives where focus is
+    /// resolved (`App::session_ring` offers those stops only for an open review),
+    /// not in a manifest: a plugin cannot see thurbox's surfaces, so a declared
+    /// condition would let one manifest decide when another's pane is reachable.
     pub fn pane_keyboards() -> &'static [KeyContext] {
         &[
             KeyContext::SessionList,
             KeyContext::Automations,
             KeyContext::Tasks,
             KeyContext::FileViewer,
+            KeyContext::CodeReview,
+            KeyContext::ReviewFiles,
         ]
     }
 }
@@ -222,6 +291,45 @@ impl Action {
             Action::FileViewerSearch,
             Action::FileViewerNextMatch,
             Action::FileViewerPrevMatch,
+            Action::ReviewDown,
+            Action::ReviewUp,
+            Action::ReviewPageDown,
+            Action::ReviewPageUp,
+            Action::ReviewTop,
+            Action::ReviewBottom,
+            Action::ReviewNextFile,
+            Action::ReviewPrevFile,
+            Action::ReviewNextHunk,
+            Action::ReviewPrevHunk,
+            Action::ReviewScrollLeft,
+            Action::ReviewScrollRight,
+            Action::ReviewToggleSideBySide,
+            Action::ReviewToggleWrap,
+            Action::ReviewOpenTargetPicker,
+            Action::ReviewComment,
+            Action::ReviewFileComment,
+            Action::ReviewSummaryComment,
+            Action::ReviewToggleFileMark,
+            Action::ReviewToggleHunkMark,
+            Action::ReviewCopyMarkdown,
+            Action::ReviewSendToAgent,
+            Action::ReviewDeleteComment,
+            Action::ReviewActivate,
+            Action::ReviewFind,
+            Action::ReviewNextMatch,
+            Action::ReviewPrevMatch,
+            Action::ReviewClose,
+            Action::ReviewFilesNext,
+            Action::ReviewFilesPrev,
+            Action::ReviewFilesPageDown,
+            Action::ReviewFilesPageUp,
+            Action::ReviewFilesTop,
+            Action::ReviewFilesBottom,
+            Action::ReviewFilesOpen,
+            Action::ReviewFilesToggleFileMark,
+            Action::ReviewFilesToggleHunkMark,
+            Action::ReviewFilesFind,
+            Action::ReviewFilesClose,
             Action::TerminalScrollUp,
             Action::TerminalScrollDown,
             Action::TerminalPageUp,
@@ -293,6 +401,45 @@ impl Action {
             Action::FileViewerSearch => "Start search",
             Action::FileViewerNextMatch => "Next match",
             Action::FileViewerPrevMatch => "Previous match",
+            Action::ReviewDown => "Next row",
+            Action::ReviewUp => "Previous row",
+            Action::ReviewPageDown => "Half page down",
+            Action::ReviewPageUp => "Half page up",
+            Action::ReviewTop => "First row",
+            Action::ReviewBottom => "Last row",
+            Action::ReviewNextFile => "Next file",
+            Action::ReviewPrevFile => "Previous file",
+            Action::ReviewNextHunk => "Next hunk",
+            Action::ReviewPrevHunk => "Previous hunk",
+            Action::ReviewScrollLeft => "Scroll left",
+            Action::ReviewScrollRight => "Scroll right",
+            Action::ReviewToggleSideBySide => "Toggle side-by-side",
+            Action::ReviewToggleWrap => "Toggle wrap",
+            Action::ReviewOpenTargetPicker => "Change review target",
+            Action::ReviewComment => "Comment on line",
+            Action::ReviewFileComment => "Comment on file",
+            Action::ReviewSummaryComment => "Review summary comment",
+            Action::ReviewToggleFileMark => "Mark file reviewed",
+            Action::ReviewToggleHunkMark => "Mark hunk reviewed",
+            Action::ReviewCopyMarkdown => "Copy review as markdown",
+            Action::ReviewSendToAgent => "Send review to agent",
+            Action::ReviewDeleteComment => "Delete comment",
+            Action::ReviewActivate => "Edit comment / fold file",
+            Action::ReviewFind => "Find in diff",
+            Action::ReviewNextMatch => "Next match",
+            Action::ReviewPrevMatch => "Previous match",
+            Action::ReviewClose => "Clear search / close review",
+            Action::ReviewFilesNext => "Next file",
+            Action::ReviewFilesPrev => "Previous file",
+            Action::ReviewFilesPageDown => "Half page down",
+            Action::ReviewFilesPageUp => "Half page up",
+            Action::ReviewFilesTop => "First file",
+            Action::ReviewFilesBottom => "Last file",
+            Action::ReviewFilesOpen => "Open in diff",
+            Action::ReviewFilesToggleFileMark => "Mark file reviewed",
+            Action::ReviewFilesToggleHunkMark => "Mark hunk reviewed",
+            Action::ReviewFilesFind => "Find in diff",
+            Action::ReviewFilesClose => "Close review",
             Action::TerminalScrollUp => "Scroll up one line",
             Action::TerminalScrollDown => "Scroll down one line",
             Action::TerminalPageUp => "Scroll up half page",
@@ -370,6 +517,45 @@ impl Action {
             | Action::FileViewerSearch
             | Action::FileViewerNextMatch
             | Action::FileViewerPrevMatch => KeyContext::FileViewer,
+            Action::ReviewDown
+            | Action::ReviewUp
+            | Action::ReviewPageDown
+            | Action::ReviewPageUp
+            | Action::ReviewTop
+            | Action::ReviewBottom
+            | Action::ReviewNextFile
+            | Action::ReviewPrevFile
+            | Action::ReviewNextHunk
+            | Action::ReviewPrevHunk
+            | Action::ReviewScrollLeft
+            | Action::ReviewScrollRight
+            | Action::ReviewToggleSideBySide
+            | Action::ReviewToggleWrap
+            | Action::ReviewOpenTargetPicker
+            | Action::ReviewComment
+            | Action::ReviewFileComment
+            | Action::ReviewSummaryComment
+            | Action::ReviewToggleFileMark
+            | Action::ReviewToggleHunkMark
+            | Action::ReviewCopyMarkdown
+            | Action::ReviewSendToAgent
+            | Action::ReviewDeleteComment
+            | Action::ReviewActivate
+            | Action::ReviewFind
+            | Action::ReviewNextMatch
+            | Action::ReviewPrevMatch
+            | Action::ReviewClose => KeyContext::CodeReview,
+            Action::ReviewFilesNext
+            | Action::ReviewFilesPrev
+            | Action::ReviewFilesPageDown
+            | Action::ReviewFilesPageUp
+            | Action::ReviewFilesTop
+            | Action::ReviewFilesBottom
+            | Action::ReviewFilesOpen
+            | Action::ReviewFilesToggleFileMark
+            | Action::ReviewFilesToggleHunkMark
+            | Action::ReviewFilesFind
+            | Action::ReviewFilesClose => KeyContext::ReviewFiles,
             Action::TerminalScrollUp
             | Action::TerminalScrollDown
             | Action::TerminalPageUp
@@ -560,6 +746,91 @@ impl Action {
             Action::FileViewerPrevMatch => {
                 vec![KeyChord::normalized(KeyModifiers::NONE, KeyCode::Char('N'))]
             }
+            // Code review, the diff pane. tuicr's key set, with one deliberate
+            // move: the native capture paged on `Ctrl+D`/`Ctrl+U`, which are
+            // `DeleteSession` and `OpenRestoreSessions` globally. A capture could
+            // shadow them silently; a *declared* default cannot —
+            // `contexts_overlap(Global, CodeReview)` is true, so the pair would be
+            // reported by `conflict_warnings` as a chord thurbox itself
+            // double-bound. `d`/`u` are `less`'s half-window keys, free in both
+            // review contexts, and rebindable to `Ctrl+D` by anyone who wants the
+            // shadowing back — visibly, with the F1 editor naming what it took.
+            Action::ReviewDown => vec![KeyChord::plain('j'), KeyChord::key(KeyCode::Down)],
+            Action::ReviewUp => vec![KeyChord::plain('k'), KeyChord::key(KeyCode::Up)],
+            Action::ReviewPageDown => {
+                vec![KeyChord::plain('d'), KeyChord::key(KeyCode::PageDown)]
+            }
+            Action::ReviewPageUp => vec![KeyChord::plain('u'), KeyChord::key(KeyCode::PageUp)],
+            Action::ReviewTop => vec![KeyChord::plain('g'), KeyChord::key(KeyCode::Home)],
+            Action::ReviewBottom => vec![
+                KeyChord::normalized(KeyModifiers::NONE, KeyCode::Char('G')),
+                KeyChord::key(KeyCode::End),
+            ],
+            // Tab/BackTab mirror the brace jumps for keyboards where `{`/`}` are
+            // awkward.
+            Action::ReviewNextFile => {
+                vec![KeyChord::plain('}'), KeyChord::key(KeyCode::Tab)]
+            }
+            Action::ReviewPrevFile => {
+                vec![KeyChord::plain('{'), KeyChord::key(KeyCode::BackTab)]
+            }
+            Action::ReviewNextHunk => vec![KeyChord::plain(']')],
+            Action::ReviewPrevHunk => vec![KeyChord::plain('[')],
+            // `h`/`l` are free in the diff pane — "open" is a changed-files key.
+            Action::ReviewScrollLeft => vec![KeyChord::plain('h'), KeyChord::key(KeyCode::Left)],
+            Action::ReviewScrollRight => {
+                vec![KeyChord::plain('l'), KeyChord::key(KeyCode::Right)]
+            }
+            Action::ReviewToggleSideBySide => vec![KeyChord::plain('v')],
+            Action::ReviewToggleWrap => vec![KeyChord::plain('w')],
+            Action::ReviewOpenTargetPicker => vec![KeyChord::plain('t')],
+            Action::ReviewComment => vec![KeyChord::plain('c')],
+            Action::ReviewFileComment => vec![KeyChord::plain('f')],
+            Action::ReviewSummaryComment => vec![KeyChord::plain('s')],
+            Action::ReviewToggleFileMark => vec![KeyChord::plain('r')],
+            Action::ReviewToggleHunkMark => {
+                vec![KeyChord::normalized(KeyModifiers::NONE, KeyCode::Char('R'))]
+            }
+            Action::ReviewCopyMarkdown => vec![KeyChord::plain('y')],
+            Action::ReviewSendToAgent => vec![KeyChord::plain('e')],
+            Action::ReviewDeleteComment => {
+                vec![KeyChord::plain('x'), KeyChord::key(KeyCode::Delete)]
+            }
+            Action::ReviewActivate => vec![KeyChord::key(KeyCode::Enter)],
+            Action::ReviewFind => vec![KeyChord::plain('/')],
+            Action::ReviewNextMatch => vec![KeyChord::plain('n')],
+            Action::ReviewPrevMatch => {
+                vec![KeyChord::normalized(KeyModifiers::NONE, KeyCode::Char('N'))]
+            }
+            Action::ReviewClose => vec![KeyChord::key(KeyCode::Esc)],
+            // Code review, the changed-files pane. The same letters as the diff
+            // pane where they mean the same thing, kept apart by the context
+            // lookup where they do not (`g`/`G` reach the first/last *file* here,
+            // and `Enter`/`l` open rather than fold).
+            Action::ReviewFilesNext => vec![KeyChord::plain('j'), KeyChord::key(KeyCode::Down)],
+            Action::ReviewFilesPrev => vec![KeyChord::plain('k'), KeyChord::key(KeyCode::Up)],
+            Action::ReviewFilesPageDown => {
+                vec![KeyChord::plain('d'), KeyChord::key(KeyCode::PageDown)]
+            }
+            Action::ReviewFilesPageUp => {
+                vec![KeyChord::plain('u'), KeyChord::key(KeyCode::PageUp)]
+            }
+            Action::ReviewFilesTop => vec![KeyChord::plain('g'), KeyChord::key(KeyCode::Home)],
+            Action::ReviewFilesBottom => vec![
+                KeyChord::normalized(KeyModifiers::NONE, KeyCode::Char('G')),
+                KeyChord::key(KeyCode::End),
+            ],
+            Action::ReviewFilesOpen => vec![
+                KeyChord::key(KeyCode::Enter),
+                KeyChord::plain('l'),
+                KeyChord::key(KeyCode::Right),
+            ],
+            Action::ReviewFilesToggleFileMark => vec![KeyChord::plain('r')],
+            Action::ReviewFilesToggleHunkMark => {
+                vec![KeyChord::normalized(KeyModifiers::NONE, KeyCode::Char('R'))]
+            }
+            Action::ReviewFilesFind => vec![KeyChord::plain('/')],
+            Action::ReviewFilesClose => vec![KeyChord::key(KeyCode::Esc)],
             Action::TerminalScrollUp => vec![KeyChord::shift(KeyCode::Up)],
             Action::TerminalScrollDown => vec![KeyChord::shift(KeyCode::Down)],
             // Alt+Page fallbacks: Terminal.app/iTerm2 intercept Shift+PageUp/
@@ -697,6 +968,55 @@ pub fn help_sections() -> Vec<(&'static str, Vec<Action>)> {
                 FileViewerSearch,
                 FileViewerNextMatch,
                 FileViewerPrevMatch,
+            ],
+        ),
+        (
+            "Code review (when focused)",
+            vec![
+                ReviewDown,
+                ReviewUp,
+                ReviewPageDown,
+                ReviewPageUp,
+                ReviewTop,
+                ReviewBottom,
+                ReviewNextFile,
+                ReviewPrevFile,
+                ReviewNextHunk,
+                ReviewPrevHunk,
+                ReviewScrollLeft,
+                ReviewScrollRight,
+                ReviewToggleSideBySide,
+                ReviewToggleWrap,
+                ReviewOpenTargetPicker,
+                ReviewComment,
+                ReviewFileComment,
+                ReviewSummaryComment,
+                ReviewToggleFileMark,
+                ReviewToggleHunkMark,
+                ReviewCopyMarkdown,
+                ReviewSendToAgent,
+                ReviewDeleteComment,
+                ReviewActivate,
+                ReviewFind,
+                ReviewNextMatch,
+                ReviewPrevMatch,
+                ReviewClose,
+            ],
+        ),
+        (
+            "Review files (when focused)",
+            vec![
+                ReviewFilesNext,
+                ReviewFilesPrev,
+                ReviewFilesPageDown,
+                ReviewFilesPageUp,
+                ReviewFilesTop,
+                ReviewFilesBottom,
+                ReviewFilesOpen,
+                ReviewFilesToggleFileMark,
+                ReviewFilesToggleHunkMark,
+                ReviewFilesFind,
+                ReviewFilesClose,
             ],
         ),
         (
@@ -1710,6 +2030,64 @@ mod tests {
         );
     }
 
+    /// The review's two keyboards are declarable by a pane, which is the last step
+    /// of ADR-51's route and what closed four of the code review's handover rows —
+    /// each of which named a power no capability performs.
+    #[test]
+    fn the_review_contexts_are_pane_keyboards() {
+        for context in [KeyContext::CodeReview, KeyContext::ReviewFiles] {
+            assert!(
+                KeyContext::pane_keyboards().contains(&context),
+                "{context:?} should be declarable by a pane"
+            );
+            // Round-trips as its own name, because a manifest spells it.
+            let json = serde_json::to_string(&context).expect("serialize");
+            assert_eq!(
+                serde_json::from_str::<KeyContext>(&json).expect("parse"),
+                context
+            );
+        }
+        // Two contexts rather than one: the diff and the changed-files list mean
+        // different things by `j`, `g` and `Enter`, so their chords must be able to
+        // coexist.
+        assert!(!contexts_overlap(
+            KeyContext::CodeReview,
+            KeyContext::ReviewFiles
+        ));
+    }
+
+    /// The review's declared defaults shadow no global chord.
+    ///
+    /// `macos_default_set_has_no_conflicts` already fails if one does, but it fails
+    /// for the whole map at once. This names the rule that moved half-paging off
+    /// `Ctrl+D`/`Ctrl+U`, so a future change putting it back reads the reason in the
+    /// failure rather than in a commit message.
+    #[test]
+    fn no_review_default_shadows_a_global_chord() {
+        let kb = KeyBindings::default();
+        let globals: Vec<(Action, Vec<KeyChord>)> = Action::all()
+            .iter()
+            .filter(|a| a.context() == KeyContext::Global)
+            .map(|a| (*a, kb.chords_for(*a).to_vec()))
+            .collect();
+        for action in Action::all().iter().filter(|a| {
+            matches!(
+                a.context(),
+                KeyContext::CodeReview | KeyContext::ReviewFiles
+            )
+        }) {
+            for chord in kb.chords_for(*action) {
+                for (global, chords) in &globals {
+                    assert!(
+                        !holds(chords, *chord),
+                        "{action:?}'s default {} shadows the global {global:?}",
+                        chord.display()
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn chord_parse_round_trip() {
         let cases = ["ctrl+n", "f1", "shift+pageup", "alt+enter", "q", "space"];
@@ -2084,6 +2462,45 @@ mod tests {
                 Action::FileViewerSearch => 0,
                 Action::FileViewerNextMatch => 0,
                 Action::FileViewerPrevMatch => 0,
+                Action::ReviewDown => 0,
+                Action::ReviewUp => 0,
+                Action::ReviewPageDown => 0,
+                Action::ReviewPageUp => 0,
+                Action::ReviewTop => 0,
+                Action::ReviewBottom => 0,
+                Action::ReviewNextFile => 0,
+                Action::ReviewPrevFile => 0,
+                Action::ReviewNextHunk => 0,
+                Action::ReviewPrevHunk => 0,
+                Action::ReviewScrollLeft => 0,
+                Action::ReviewScrollRight => 0,
+                Action::ReviewToggleSideBySide => 0,
+                Action::ReviewToggleWrap => 0,
+                Action::ReviewOpenTargetPicker => 0,
+                Action::ReviewComment => 0,
+                Action::ReviewFileComment => 0,
+                Action::ReviewSummaryComment => 0,
+                Action::ReviewToggleFileMark => 0,
+                Action::ReviewToggleHunkMark => 0,
+                Action::ReviewCopyMarkdown => 0,
+                Action::ReviewSendToAgent => 0,
+                Action::ReviewDeleteComment => 0,
+                Action::ReviewActivate => 0,
+                Action::ReviewFind => 0,
+                Action::ReviewNextMatch => 0,
+                Action::ReviewPrevMatch => 0,
+                Action::ReviewClose => 0,
+                Action::ReviewFilesNext => 0,
+                Action::ReviewFilesPrev => 0,
+                Action::ReviewFilesPageDown => 0,
+                Action::ReviewFilesPageUp => 0,
+                Action::ReviewFilesTop => 0,
+                Action::ReviewFilesBottom => 0,
+                Action::ReviewFilesOpen => 0,
+                Action::ReviewFilesToggleFileMark => 0,
+                Action::ReviewFilesToggleHunkMark => 0,
+                Action::ReviewFilesFind => 0,
+                Action::ReviewFilesClose => 0,
                 Action::TerminalScrollUp => 0,
                 Action::TerminalScrollDown => 0,
                 Action::TerminalPageUp => 0,
@@ -2092,7 +2509,7 @@ mod tests {
         }
         // The listed variants must equal Action::all().len(). If you add
         // a variant, update both `Action::all()` and the match above.
-        const EXPECTED: usize = 62;
+        const EXPECTED: usize = 101;
         assert_eq!(Action::all().len(), EXPECTED);
         for a in Action::all() {
             classify(*a);

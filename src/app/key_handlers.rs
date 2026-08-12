@@ -120,17 +120,13 @@ impl App {
             return;
         }
 
-        // The native code-review view captures keys (nav / comment / compose)
-        // before the global lookup; focus/quit chords fall through so the user
-        // can always leave.
-        if self.handle_code_review_key(code, mods) {
-            return;
-        }
-
-        // The review's changed-files list (file-viewer column) likewise captures
-        // its navigation keys before the global lookup, with the same fall-through
-        // for focus/quit chords.
-        if self.handle_review_files_key(code, mods) {
+        // The code review's three text/selector sub-modes — the target picker, the
+        // compose box, and the find query while it is being typed — own every key
+        // while they are open, so they are captured ahead of the lookup. The
+        // pane's own keyboard is *not* captured: it resolves as
+        // `KeyContext::CodeReview` / `KeyContext::ReviewFiles` actions below, which
+        // is what makes it rebindable.
+        if self.handle_code_review_submode_key(code, mods) {
             return;
         }
 
@@ -211,6 +207,11 @@ impl App {
             InputFocus::Automations => KeyContext::Automations,
             InputFocus::TaskList => KeyContext::Tasks,
             InputFocus::FileViewer if !self.file_viewer.search_active => KeyContext::FileViewer,
+            // Same rule as the file viewer's search field: while one of the
+            // review's sub-modes owns the keyboard, a letter is text rather than
+            // a command, so the pane's scoped actions must not resolve.
+            InputFocus::CodeReview if !self.review_submode_active() => KeyContext::CodeReview,
+            InputFocus::ReviewFiles => KeyContext::ReviewFiles,
             InputFocus::Terminal => KeyContext::Terminal,
             // The editor / run-history focuses are capture sub-modes handled
             // before the lookup, so they stay on Global here.
@@ -1437,6 +1438,45 @@ impl App {
             | Action::FileViewerSearch
             | Action::FileViewerNextMatch
             | Action::FileViewerPrevMatch => self.dispatch_file_viewer_action(action),
+            Action::ReviewDown
+            | Action::ReviewUp
+            | Action::ReviewPageDown
+            | Action::ReviewPageUp
+            | Action::ReviewTop
+            | Action::ReviewBottom
+            | Action::ReviewNextFile
+            | Action::ReviewPrevFile
+            | Action::ReviewNextHunk
+            | Action::ReviewPrevHunk
+            | Action::ReviewScrollLeft
+            | Action::ReviewScrollRight
+            | Action::ReviewToggleSideBySide
+            | Action::ReviewToggleWrap
+            | Action::ReviewOpenTargetPicker
+            | Action::ReviewComment
+            | Action::ReviewFileComment
+            | Action::ReviewSummaryComment
+            | Action::ReviewToggleFileMark
+            | Action::ReviewToggleHunkMark
+            | Action::ReviewCopyMarkdown
+            | Action::ReviewSendToAgent
+            | Action::ReviewDeleteComment
+            | Action::ReviewActivate
+            | Action::ReviewFind
+            | Action::ReviewNextMatch
+            | Action::ReviewPrevMatch
+            | Action::ReviewClose => self.dispatch_code_review_action(action),
+            Action::ReviewFilesNext
+            | Action::ReviewFilesPrev
+            | Action::ReviewFilesPageDown
+            | Action::ReviewFilesPageUp
+            | Action::ReviewFilesTop
+            | Action::ReviewFilesBottom
+            | Action::ReviewFilesOpen
+            | Action::ReviewFilesToggleFileMark
+            | Action::ReviewFilesToggleHunkMark
+            | Action::ReviewFilesFind
+            | Action::ReviewFilesClose => self.dispatch_review_files_action(action),
             Action::TerminalScrollUp
             | Action::TerminalScrollDown
             | Action::TerminalPageUp

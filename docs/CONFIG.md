@@ -509,6 +509,15 @@ Maps `Action` names to one or more chord strings:
 - Unknown action names, invalid chords, and the same chord bound to two
   actions in overlapping contexts are reported at startup (the file
   still loads; bad entries fall back to defaults).
+- **Scopes.** An action is either global or scoped to one pane's
+  `KeyContext` — `SessionList`, `Automations`, `Tasks`, `FileViewer`,
+  `CodeReview` (the code review's diff), `ReviewFiles` (its changed-files
+  list), or `Terminal`. A scoped action fires only while its pane is
+  focused, so single-letter keys can mean different things per pane and
+  stay free for the terminal to forward to the PTY. A scoped chord beats a
+  global one in its own pane, which is why a chord bound to both is
+  reported: the pane's action wins everywhere it is focused, and the global
+  one is unreachable there.
 - **Terminal passthrough.** When a session **terminal is focused**, the
   readline / shell line-editing chords (`Ctrl+A` start-of-line, `Ctrl+E`
   end-of-line, `Ctrl+W` delete-word, `Ctrl+U` kill-line, `Ctrl+R`

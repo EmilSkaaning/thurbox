@@ -1818,13 +1818,13 @@ write could start, and the gate says so rather than leaving two rows that read a
 
 | Row | Kind | Needs |
 |---|---|---|
-| `no-central-seat` | structural | the central pane; `PaneSlot` offers only the right column |
+| `no-central-seat` | structural | the central pane; `PaneSlot` offers only the right column — **closed in §21** |
 | `no-second-seat-for-the-changed-files-list` | structural | a second pane, in a second column, granted as one surface |
-| `keys-are-a-capture-not-actions` | structural | the pane's keys to *become* actions first |
-| `no-review-write` | structural | `review_comments` / `review_marks` writes the seam does not have |
-| `no-retarget-operation` | structural | `t` runs `git diff`/`git show` on a worker; no capability runs git |
-| `no-export-operation` | structural | `y` the clipboard, `e` the session's pty — neither reachable |
-| `no-cursor-write` | structural | every navigation key; narrower than the session list's |
+| `keys-are-a-capture-not-actions` | structural | the pane's keys to *become* actions first — **closed in §34** |
+| `no-review-write` | structural | `review_comments` / `review_marks` writes the seam does not have — **closed in §34, by no grant** |
+| `no-retarget-operation` | structural | `t` runs `git diff`/`git show` on a worker; no capability runs git — **closed in §34, by no grant** |
+| `no-export-operation` | structural | `y` the clipboard, `e` the session's pty — neither reachable — **closed in §34, by no grant** |
+| `no-cursor-write` | structural | every navigation key; narrower than the session list's — **closed in §34, by no grant** |
 | `no-resolved-width` | structural | `v`, `w`, `←`/`→`, and the ellipsis §19 enumerated |
 | `mouse-carries-no-column` | wiring | targets a wider event carries, plus one coordinate it cannot |
 | `no-anchored-overlay` | vocabulary | the compose box floats at a row; the target picker over the diff |
@@ -3099,3 +3099,94 @@ the value (`app`), and **not** to the pure-data layer if it performs effects —
 `session::review`'s example. A shared helper goes to its layer's own vocabulary, which is
 where `visible_window` went. The session list's module row can be taken on those terms; its
 window row cannot, and that is what is left.
+
+## 34. The code review's keyboard, and the four capability rows that closed without one (ADR-59)
+
+§20 refused this pane on eleven rows and named the first step of the ordering it
+implied: *the pane's keys become scoped actions — a keybinding change, no plugin
+involved*. This is that step, and it closed **five** rows rather than one.
+
+### What the pane had instead of a keyboard
+
+Two handlers in `src/app/code_review.rs`, both keyed on `self.focus` and both run from
+`App::handle_key` ahead of `KeyBindings::lookup_in`. Each opened with
+`review_escape_chord` — an allowlist of eleven global actions permitted to fall through
+— and closed by swallowing everything else. So thurbox's largest pane had ~39 keys that
+`Action` did not name, `KeyContext` had no scope for, the F1 editor had never listed and
+no `keybindings.json` could move, in an application whose help overlay is a live
+keybinding **editor**.
+
+### Two contexts, 39 actions
+
+`KeyContext::CodeReview` (the diff) and `KeyContext::ReviewFiles` (the changed-files
+list). Two rather than one because the panes disagree about five keys: in the diff
+`j`/`k` walk rows, `g`/`G` reach the first and last row *including* the trailing
+summary, and `Enter` edits a comment or folds a file; in the list `j`/`k` walk files
+with the diff following, `g`/`G` reach the first and last *file*, and `Enter` drops
+focus into the diff. One context would have had to branch on focus inside its
+dispatcher, which is the capture wearing an action's name.
+
+Both are in `KeyContext::pane_keyboards()` and both are mapped by
+`App::focus_for_keyboard`, so the route terminates: a pane may declare either.
+
+### The finding: four rows named a power, and none of them needed a grant
+
+| Row | What it asked for | What closed it |
+|---|---|---|
+| `no-review-write` | a `review_comments` / `review_marks` write | `r`/`R`/`c`/`f`/`s` are scoped actions the kernel performs against its own `CodeReviewState` |
+| `no-retarget-operation` | a capability that runs `git` | `t` is `ReviewOpenTargetPicker`; the kernel starts the `ReviewBuildKind::Retarget` worker |
+| `no-export-operation` | the clipboard and a session's pty | `y`/`e` are `ReviewCopyMarkdown`/`ReviewSendToAgent`, both the kernel's |
+| `no-cursor-write` | a view-state write, "the cheapest place one could start" | every navigation key moves `CodeReviewState::selected` in the kernel |
+
+This is ADR-58's finding a second time, on the pane whose keys looked like they needed
+the *most*. Each of those four rows keeps asserting, in its own probe, that the
+capability it named is still absent — the row is met only when the kernel performs the
+key **and** no grant exists, so a capability appearing flips it back to blocked. That is
+what stops "the grant was unnecessary" from becoming indistinguishable from "the grant
+happened".
+
+`the_verdict_is_derived_from_the_blockers` now also asserts that **none** of the
+outstanding rows reads as a missing capability, so a reader arriving at the remaining
+table cannot infer one from it.
+
+### Two decided behavioural differences
+
+**A global chord fires from the review.** `review_escape_chord` is deleted rather than
+reproduced. `Ctrl+F` (fork) and `Ctrl+R` (restart) used to do nothing in a review; they
+now behave as they do in every other pane. A per-pane allowlist of which global keys
+work is exactly the inconsistency the context lookup exists to remove.
+
+**Half-paging moved from `Ctrl+D`/`Ctrl+U` to `d`/`u`.** The capture *shadowed*
+`DeleteSession` and `OpenRestoreSessions`. A capture can do that silently; a declared
+default cannot — `contexts_overlap(Global, CodeReview)` is true, so
+`macos_default_set_has_no_conflicts` reports the pair as a chord thurbox itself
+double-bound. `d`/`u` are `less`'s half-window keys and are rebindable, so the shadowing
+is available on request, visibly, with the F1 editor naming what it took.
+
+A third difference is a consequence rather than a choice: the F1 overlay's list grew by
+41 rows, so its scrollbar thumb is shorter. That is the only snapshot this change moved.
+
+### What stays captured
+
+Three sub-modes, in one function (`handle_code_review_submode_key`): the target picker,
+the compose box, and the find query while it is being typed. Each owns every key while
+it is open, and a letter typed into a field is text rather than a command — the file
+viewer's rule (`focus_key_context` falls back to `Global` while `search_active`) applied
+to this pane's three fields.
+
+### What still refuses the handover
+
+Five rows, and the keyboard has no bearing on any of them.
+
+| Row | Why a kernel key does not reach it |
+|---|---|
+| `no-second-seat-for-the-changed-files-list` | the file-viewer seat is preempted by this very list (ADR-58); a plugin-drawn review needs the seat its own other half takes away |
+| `no-resolved-width` | `v`, `w` and `←`/`→` divide or chunk against a width a view tree does not carry |
+| `mouse-carries-no-column` | `click_side` is a coordinate, not a target kind |
+| `no-anchored-overlay` | the compose box anchors to the selected **row** — and the kernel knows the screen row of every row it painted from a plugin's tree, not which of them is the review's cursor |
+| `no-in-pane-text-field` | narrowed to the compose body; the find bar now has a route (`PaneChrome::SearchBar`, ADR-58) and the body does not |
+
+The fourth row is the sharpest of the five and the one this change learned: giving the
+kernel a key closes the **write** and not the **surface** the key opens. `c` writes a
+comment the kernel can perform; the box it opens is anchored inside content the kernel
+did not lay out.

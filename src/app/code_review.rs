@@ -1514,49 +1514,29 @@ impl App {
         }
     }
 
-    /// Whether `code`/`mods` is a global chord the review panes must let through
-    /// to the global path so the user can always leave: the focus cycle, quit,
-    /// the review toggle itself (so its key closes the pane like every other
-    /// toggleable pane), and the overlay openers (help, settings, theme, search)
-    /// so those modals stay reachable while a review is open. None collide with
-    /// the panes' own keys (plain letters + nav). Shared by the diff pane and the
-    /// changed-files pane so the two never drift.
-    fn review_escape_chord(&self, code: KeyCode, mods: KeyModifiers) -> bool {
-        matches!(
-            self.keybindings.lookup(code, mods),
-            Some(
-                crate::session::Action::FocusForward
-                    | crate::session::Action::FocusBackward
-                    | crate::session::Action::QuitApp
-                    | crate::session::Action::ToggleReview
-                    // The sibling central-pane view: `ToggleShell` (F8) leaves
-                    // the review straight to the shell, mirroring how the
-                    // Shell tab does — so the F-keys switch views from anywhere.
-                    | crate::session::Action::ToggleShell
-                    | crate::session::Action::ToggleHelp
-                    | crate::session::Action::OpenSettings
-                    | crate::session::Action::OpenThemePicker
-                    | crate::session::Action::ToggleInfoPanel
-                    | crate::session::Action::ToggleSessionList
-                    | crate::session::Action::GlobalSearch
-            )
-        )
-    }
-
-    /// Key capture for the code-review view (called before the global keybinding
-    /// lookup). Returns `true` when consumed. Focus/quit chords pass through so
-    /// the user can always leave.
-    pub(crate) fn handle_code_review_key(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
+    /// Key capture for the review's **sub-modes**, called before the global
+    /// keybinding lookup. Returns `true` when consumed.
+    ///
+    /// The pane's own keyboard is not here: since the review's keys became scoped
+    /// actions (`KeyContext::CodeReview` / `KeyContext::ReviewFiles`) they resolve
+    /// through `KeyBindings::lookup_in` like every other pane's, which is what
+    /// makes them rebindable and what a handed-over pane would declare itself the
+    /// pane for.
+    ///
+    /// What stays captured is the three sub-modes that own **every** key while
+    /// they are open — the target picker, the compose box, and the find query
+    /// while it is being typed. A letter typed into a text field is text, not a
+    /// command, so these are literal for the same reason the file viewer's search
+    /// field is (`App::focus_key_context` falls back to `Global` there). The F1
+    /// panel lists them under *Fixed (not rebindable)*.
+    pub(crate) fn handle_code_review_submode_key(
+        &mut self,
+        code: KeyCode,
+        mods: KeyModifiers,
+    ) -> bool {
         if self.focus != InputFocus::CodeReview {
             return false;
         }
-        // The review's `Ctrl+D`/`Ctrl+U` paging is deliberately not an escape
-        // chord, so it keeps paging rather than deleting/restoring sessions.
-        if self.review_escape_chord(code, mods) {
-            return false;
-        }
-
-        // Sub-modes capture all keys: the target picker, then the compose box.
         if self
             .active_review()
             .is_some_and(|cr| cr.target_picker.is_some())
@@ -1564,120 +1544,96 @@ impl App {
             self.handle_target_picker_key(code);
             return true;
         }
-        let composing = self.active_review().is_some_and(|cr| cr.compose.is_some());
-        if composing {
+        if self.active_review().is_some_and(|cr| cr.compose.is_some()) {
             self.handle_review_compose_key(code, mods);
             return true;
         }
-        // The search query line, while being typed, captures all keys.
-        let searching = self
+        if self
             .active_review()
-            .is_some_and(|cr| cr.search.as_ref().is_some_and(|s| s.editing));
-        if searching {
+            .is_some_and(|cr| cr.search.as_ref().is_some_and(|s| s.editing))
+        {
             self.handle_review_search_key(code, mods);
             return true;
         }
+        false
+    }
 
-        let ctrl = mods.contains(KeyModifiers::CONTROL);
-        // Ctrl+D / Ctrl+U half-page (pager convention). Handled before the guard
-        // below since they are the only Ctrl chords this view acts on.
-        if ctrl {
-            match code {
-                KeyCode::Char('d') => self.cr_page(true),
-                KeyCode::Char('u') => self.cr_page(false),
-                _ => {}
+    /// Whether a sub-mode owns the keyboard, so the diff pane's scoped actions
+    /// must not resolve. Read by `App::focus_key_context`, which drops to
+    /// `KeyContext::Global` while this holds — the file viewer's rule for its
+    /// search field, applied to this pane's three fields.
+    pub(crate) fn review_submode_active(&self) -> bool {
+        self.active_review().is_some_and(|cr| {
+            cr.target_picker.is_some()
+                || cr.compose.is_some()
+                || cr.search.as_ref().is_some_and(|s| s.editing)
+        })
+    }
+
+    /// Run a `CodeReview`-scoped action against the open review. Always consumes
+    /// the key (`true`), like every other scoped pane dispatcher.
+    pub(crate) fn dispatch_code_review_action(&mut self, action: crate::session::Action) -> bool {
+        use crate::session::Action;
+        match action {
+            Action::ReviewDown => self.cr_move(1),
+            Action::ReviewUp => self.cr_move(-1),
+            Action::ReviewPageDown => self.cr_page(true),
+            Action::ReviewPageUp => self.cr_page(false),
+            Action::ReviewTop => self.cr_home_end(false),
+            Action::ReviewBottom => self.cr_home_end(true),
+            Action::ReviewNextFile => self.cr_jump_file(true),
+            Action::ReviewPrevFile => self.cr_jump_file(false),
+            Action::ReviewNextHunk => self.cr_jump_hunk(true),
+            Action::ReviewPrevHunk => self.cr_jump_hunk(false),
+            Action::ReviewScrollLeft => self.cr_scroll_h(-8),
+            Action::ReviewScrollRight => self.cr_scroll_h(8),
+            Action::ReviewToggleSideBySide => self.cr_toggle_side_by_side(),
+            Action::ReviewToggleWrap => self.cr_toggle_wrap(),
+            Action::ReviewOpenTargetPicker => self.cr_open_target_picker(),
+            Action::ReviewComment => self.cr_start_comment(false),
+            Action::ReviewFileComment => self.cr_start_comment(true),
+            Action::ReviewSummaryComment => self.cr_start_summary(),
+            Action::ReviewToggleFileMark => self.cr_toggle_reviewed(false),
+            Action::ReviewToggleHunkMark => self.cr_toggle_reviewed(true),
+            Action::ReviewCopyMarkdown => self.cr_copy_markdown(),
+            Action::ReviewSendToAgent => self.cr_send_to_agent(),
+            Action::ReviewDeleteComment => self.cr_delete_selected(),
+            Action::ReviewActivate => self.cr_enter(),
+            Action::ReviewFind => self.cr_start_search(),
+            Action::ReviewNextMatch => self.cr_search_step(true),
+            Action::ReviewPrevMatch => self.cr_search_step(false),
+            // One action rather than two, so a committed search still costs one
+            // keystroke to undo without putting the pane's internal state into
+            // the user's keymap.
+            Action::ReviewClose => {
+                if self.active_review().is_some_and(|cr| cr.search.is_some()) {
+                    self.cr_close_search();
+                } else {
+                    self.close_code_review();
+                }
             }
-            return true;
-        }
-        // Swallow any other Ctrl/Alt chord so it can't trip a plain-letter
-        // command (Ctrl+F must not start a file comment, etc.). The global
-        // escape chords already fell through above.
-        if mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
-            return true;
-        }
-        match code {
-            // Esc clears an active (confirmed) search before closing the review,
-            // so a stray `/` is one keystroke to undo.
-            KeyCode::Esc if self.active_review().is_some_and(|cr| cr.search.is_some()) => {
-                self.cr_close_search()
-            }
-            KeyCode::Esc => self.close_code_review(),
-            KeyCode::Char('/') => self.cr_start_search(),
-            KeyCode::Char('n') => self.cr_search_step(true),
-            KeyCode::Char('N') => self.cr_search_step(false),
-            KeyCode::Down | KeyCode::Char('j') => self.cr_move(1),
-            KeyCode::Up | KeyCode::Char('k') => self.cr_move(-1),
-            KeyCode::PageDown => self.cr_page(true),
-            KeyCode::PageUp => self.cr_page(false),
-            KeyCode::Home | KeyCode::Char('g') => self.cr_home_end(false),
-            KeyCode::End | KeyCode::Char('G') => self.cr_home_end(true),
-            // tuicr file/hunk jumps: `}`/`{` files, `]`/`[` hunks. Tab/BackTab
-            // mirror the file jump for keyboards where braces are awkward.
-            KeyCode::Tab | KeyCode::Char('}') => self.cr_jump_file(true),
-            KeyCode::BackTab | KeyCode::Char('{') => self.cr_jump_file(false),
-            KeyCode::Char(']') => self.cr_jump_hunk(true),
-            KeyCode::Char('[') => self.cr_jump_hunk(false),
-            // Horizontal scroll of the body (gutter stays pinned). `h`/`l` are
-            // free in the diff pane (they mean "open" only in the files pane).
-            KeyCode::Left | KeyCode::Char('h') => self.cr_scroll_h(-8),
-            KeyCode::Right | KeyCode::Char('l') => self.cr_scroll_h(8),
-            KeyCode::Char('v') => self.cr_toggle_side_by_side(),
-            KeyCode::Char('w') => self.cr_toggle_wrap(),
-            KeyCode::Char('t') => self.cr_open_target_picker(),
-            KeyCode::Char('c') => self.cr_start_comment(false),
-            KeyCode::Char('f') => self.cr_start_comment(true),
-            KeyCode::Char('s') => self.cr_start_summary(),
-            KeyCode::Char('r') => self.cr_toggle_reviewed(false),
-            KeyCode::Char('R') => self.cr_toggle_reviewed(true),
-            KeyCode::Char('y') => self.cr_copy_markdown(),
-            KeyCode::Char('e') => self.cr_send_to_agent(),
-            KeyCode::Char('x') | KeyCode::Delete => self.cr_delete_selected(),
-            KeyCode::Enter => self.cr_enter(),
             _ => {}
         }
         true
     }
 
-    /// Handle keys while the review's **changed-files list** (file-viewer column)
-    /// is focused. Mirrors the file viewer's options over the diff's files: `j`/`k`
-    /// (and arrows) walk file to file with the diff following, `g`/`G` jump to the
-    /// first/last file, `Enter`/`l` drop into the diff at the selected file, and
-    /// `r`/`R` toggle the file/hunk reviewed mark. Returns `true` when consumed;
-    /// focus/quit chords fall through (like [`Self::handle_code_review_key`]) so
-    /// the user can always leave.
-    pub(crate) fn handle_review_files_key(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
-        if self.focus != InputFocus::ReviewFiles {
-            return false;
-        }
-        if self.review_escape_chord(code, mods) {
-            return false;
-        }
-
-        let ctrl = mods.contains(KeyModifiers::CONTROL);
-        if ctrl {
-            // Half-page paging, matching the diff pane's `Ctrl+D`/`Ctrl+U`.
-            match code {
-                KeyCode::Char('d') => self.cr_page(true),
-                KeyCode::Char('u') => self.cr_page(false),
-                _ => {}
-            }
-            return true;
-        }
-        // Swallow any other Ctrl/Alt chord so it can't leak to the PTY or trip a
-        // plain-letter command (the global escape chords already fell through).
-        if mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
-            return true;
-        }
-        match code {
-            KeyCode::Esc => self.close_code_review(),
-            KeyCode::Down | KeyCode::Char('j') => self.cr_jump_file(true),
-            KeyCode::Up | KeyCode::Char('k') => self.cr_jump_file(false),
-            KeyCode::PageDown => self.cr_page(true),
-            KeyCode::PageUp => self.cr_page(false),
-            // First / last *file* (not the trailing summary row, which the diff
-            // pane's `g`/`G` would land on).
-            KeyCode::Home | KeyCode::Char('g') => self.cr_jump_to_file(0),
-            KeyCode::End | KeyCode::Char('G') => {
+    /// Run a `ReviewFiles`-scoped action — the changed-files list in the
+    /// file-viewer column. Always consumes the key (`true`).
+    ///
+    /// Mirrors the file viewer's options over the diff's files: navigation walks
+    /// file to file with the diff following, and `ReviewFilesOpen` is that pane's
+    /// "open" — it drops focus into the diff, which is already scrolled there.
+    pub(crate) fn dispatch_review_files_action(&mut self, action: crate::session::Action) -> bool {
+        use crate::session::Action;
+        match action {
+            Action::ReviewFilesNext => self.cr_jump_file(true),
+            Action::ReviewFilesPrev => self.cr_jump_file(false),
+            Action::ReviewFilesPageDown => self.cr_page(true),
+            Action::ReviewFilesPageUp => self.cr_page(false),
+            // The first / last *file*, not the trailing summary row the diff
+            // pane's own top/bottom actions land on.
+            Action::ReviewFilesTop => self.cr_jump_to_file(0),
+            Action::ReviewFilesBottom => {
                 if let Some(last) = self
                     .active_review()
                     .map(|cr| cr.files.len().saturating_sub(1))
@@ -1685,19 +1641,16 @@ impl App {
                     self.cr_jump_to_file(last);
                 }
             }
-            // Open the selected file: drop focus into the diff, which is already
-            // scrolled to that file (mirrors the file viewer's "open" on a file).
-            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
-                self.focus = InputFocus::CodeReview;
-            }
-            KeyCode::Char('r') => self.cr_toggle_reviewed(false),
-            KeyCode::Char('R') => self.cr_toggle_reviewed(true),
-            // `/` searches the diff: open the find sub-mode and drop into the
-            // diff pane, which the search input owns.
-            KeyCode::Char('/') => {
+            Action::ReviewFilesOpen => self.focus = InputFocus::CodeReview,
+            Action::ReviewFilesToggleFileMark => self.cr_toggle_reviewed(false),
+            Action::ReviewFilesToggleHunkMark => self.cr_toggle_reviewed(true),
+            // The find sub-mode belongs to the diff, which owns the query, so
+            // starting it here moves focus with it.
+            Action::ReviewFilesFind => {
                 self.cr_start_search();
                 self.focus = InputFocus::CodeReview;
             }
+            Action::ReviewFilesClose => self.close_code_review(),
             _ => {}
         }
         true
