@@ -454,7 +454,10 @@ so that the two cases are decided by the same rule rather than by which came fir
 
 A part of the model that is **downstream of a seam the refusal has not settled** SHALL NOT
 be relocated with the rest, and the exclusion MUST be stated. Relocating it would fix its
-home against a seam that does not exist yet.
+home against a seam that does not exist yet. Once that seam **is** settled, the excluded
+part SHALL be relocated by the same rule, in the change that settles the row it was
+downstream of — not deferred to the handover, which would leave the handover holding the
+relocation the hoist exists to keep out of it.
 
 Geometry SHALL NOT cross into the pure-data layer with the model. Where the model and a
 width-dependent fit share a type, the type MAY move while the fit stays, provided the
@@ -503,6 +506,12 @@ unchanged.
 
 - **WHEN** one function of the model is consumed by the very seam the refusal is about
 - **THEN** it stays where it is, and the change states why it was excluded
+
+#### Scenario: The seam the excluded part waited on is settled
+
+- **WHEN** the row that part was downstream of closes
+- **THEN** it is relocated in that same change, rather than being carried into the
+  handover
 
 #### Scenario: The relocation is proposed as a re-export
 
