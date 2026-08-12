@@ -13,6 +13,7 @@ use ratatui::{
 };
 
 use crate::session::plugin_manifest::PaneSlot;
+use crate::session::session_list;
 use crate::session::{KeyBindings, KeyChord, SessionInfo};
 use crate::ui::selection;
 use crate::ui::theme::Theme;
@@ -409,7 +410,7 @@ impl App {
         if stale {
             self.metrics.bump(|p| &mut p.ordered_sessions_rebuilds);
             let infos: Vec<&SessionInfo> = self.sessions.iter().map(|s| &s.info).collect();
-            let order = project_list::compute_session_order(&infos);
+            let order = session_list::compute_session_order(&infos);
             self.cached_session_order = Some((sig, order));
         }
 
@@ -420,7 +421,7 @@ impl App {
         // session list has no local search of its own anymore). Own the query so
         // it doesn't conflict with the `&mut session_list_state` borrow below.
         let global_query: Option<String> = self.global_search_query().map(|q| q.to_string());
-        let global_match_positions: Vec<Option<project_list::SessionMatch>> = match &global_query {
+        let global_match_positions: Vec<Option<session_list::SessionMatch>> = match &global_query {
             Some(q) => self
                 .sessions
                 .iter()
@@ -437,7 +438,7 @@ impl App {
             .as_ref()
             .expect("cache populated above")
             .1;
-        let ordered = project_list::OrderedSessions::from_order(
+        let ordered = session_list::OrderedSessions::from_order(
             &all_sessions,
             order,
             &global_match_positions,
@@ -2315,7 +2316,7 @@ pub(super) fn truncate_str(s: &str, max_len: usize) -> String {
 /// Fuzzy-match a query against a session's fields (name/agent/branch/cwd/status),
 /// returning highlight positions per field — drives live session-list
 /// highlighting from the global-search query.
-pub(crate) fn session_fuzzy(query: &str, info: &SessionInfo) -> Option<project_list::SessionMatch> {
+pub(crate) fn session_fuzzy(query: &str, info: &SessionInfo) -> Option<session_list::SessionMatch> {
     let name = crate::fuzzy::fuzzy_match(query, &info.name).map(|m| m.positions);
     let agent = crate::fuzzy::fuzzy_match(query, &info.agent).map(|m| m.positions);
     let branch = info
@@ -2330,7 +2331,7 @@ pub(crate) fn session_fuzzy(query: &str, info: &SessionInfo) -> Option<project_l
         .map(|m| m.positions);
     let status_str = info.status.to_string();
     let status = crate::fuzzy::fuzzy_match(query, &status_str).map(|m| m.positions);
-    project_list::SessionMatch::from_matches(name, agent, branch, cwd, status)
+    session_list::SessionMatch::from_matches(name, agent, branch, cwd, status)
 }
 
 #[cfg(test)]

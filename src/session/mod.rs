@@ -21,6 +21,7 @@ pub mod plugin_manifest;
 pub mod plugin_mutations;
 pub mod plugin_store;
 pub mod review;
+pub mod session_list;
 pub mod settings;
 #[cfg(feature = "plugins")]
 pub mod spawn_contribution;

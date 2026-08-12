@@ -1350,7 +1350,7 @@ pub struct App {
     /// depends only on the session set's grouping/nesting inputs, so it is
     /// reused across frames until [`Self::session_order_signature`] changes,
     /// skipping the per-frame grouping/sort/nest work. See `render_left_panel`.
-    cached_session_order: Option<(u64, crate::ui::project_list::SessionOrder)>,
+    cached_session_order: Option<(u64, crate::session::session_list::SessionOrder)>,
     /// `THURBOX_PERF_LOG` presence, read once at construction so the hot loop's
     /// timing gate ([`Self::perf_timing_active`]) is a bool check, not an env
     /// lookup per iteration.
@@ -4664,12 +4664,12 @@ impl App {
     }
 
     /// The rendered order of `self.sessions`, from the same
-    /// `ui::project_list::compute_session_order` the rendering widget uses, so
+    /// `session_list::compute_session_order` the pane renders by, so
     /// navigation and reordering operate on the exact order the user sees.
-    fn session_order(&self) -> crate::ui::project_list::SessionOrder {
+    fn session_order(&self) -> crate::session::session_list::SessionOrder {
         let infos: Vec<&crate::session::SessionInfo> =
             self.sessions.iter().map(|s| &s.info).collect();
-        crate::ui::project_list::compute_session_order(&infos)
+        crate::session::session_list::compute_session_order(&infos)
     }
 
     /// Indices into `self.sessions` in the order they are rendered — the order
@@ -4681,7 +4681,7 @@ impl App {
     /// Move the active session one step up or down in the rendered order
     /// (`Shift+J`/`Shift+K` in the session list): root blocks swap within their
     /// repo group, whole groups swap past the group edge, nested children move
-    /// among their siblings (see `ui::project_list::move_in_order`).
+    /// among their siblings (see `session::session_list::move_in_order`).
     ///
     /// On success every session is renumbered densely along the new order and
     /// persisted, so the order survives restarts and reaches other instances
@@ -4692,7 +4692,8 @@ impl App {
             return;
         }
         let ord = self.session_order();
-        let Some(new_order) = crate::ui::project_list::move_in_order(&ord, self.active_index, down)
+        let Some(new_order) =
+            crate::session::session_list::move_in_order(&ord, self.active_index, down)
         else {
             return;
         };
@@ -4714,7 +4715,7 @@ impl App {
         }
         let infos: Vec<&crate::session::SessionInfo> =
             self.sessions.iter().map(|s| &s.info).collect();
-        let new_order = crate::ui::project_list::sort_alphabetically_within_groups(&infos);
+        let new_order = crate::session::session_list::sort_alphabetically_within_groups(&infos);
         for (pos, &idx) in new_order.iter().enumerate() {
             self.sessions[idx].info.display_order = Some(pos as i64);
         }
@@ -5164,7 +5165,7 @@ impl App {
     }
 
     /// Content signature of the inputs that determine the session-list ordering.
-    /// [`crate::ui::project_list::compute_session_order`] is a pure function of
+    /// [`crate::session::session_list::compute_session_order`] is a pure function of
     /// exactly these per-session fields (grouping by `repo_display_names`,
     /// sorting by `display_order`, nesting by `id`/`parent_session_id`) plus the
     /// session count/order — never status — so an unchanged signature means the
@@ -7750,7 +7751,7 @@ impl App {
     /// The session list's rows as the published snapshot carries them.
     ///
     /// Built from the same inputs `view::render_left_panel` draws from, through the
-    /// same `project_list::resolve_rows`, so the published row and the drawn one
+    /// same `session_list::resolve_rows`, so the published row and the drawn one
     /// cannot disagree about which row opens a repo group, which is nested, which
     /// the cursor is on, or which a search dimmed. What it does *not* do is fit any
     /// text to a column: the fit is against a resolved pane width and the plugin's
@@ -7776,7 +7777,7 @@ impl App {
         {
             Some((_, order)) => order,
             None => {
-                computed = crate::ui::project_list::compute_session_order(&all);
+                computed = crate::session::session_list::compute_session_order(&all);
                 &computed
             }
         };
@@ -7784,7 +7785,7 @@ impl App {
         // The same two facts the pane resolves from the global search: a query
         // dims non-matching rows, and its matched offsets emphasise the rest.
         let query = self.global_search_query().map(str::to_string);
-        let matches: Vec<Option<crate::ui::project_list::SessionMatch>> = match &query {
+        let matches: Vec<Option<crate::session::session_list::SessionMatch>> = match &query {
             Some(q) => self
                 .sessions
                 .iter()
@@ -7792,7 +7793,7 @@ impl App {
                 .collect(),
             None => Vec::new(),
         };
-        let ordered = crate::ui::project_list::OrderedSessions::from_order(
+        let ordered = crate::session::session_list::OrderedSessions::from_order(
             &all,
             order,
             &matches,
@@ -7807,15 +7808,16 @@ impl App {
                 | InputFocus::AutomationEditor
                 | InputFocus::AutomationRunHistory
         );
-        let rows = crate::ui::project_list::resolve_rows(&crate::ui::project_list::RowInputs {
-            sessions: &ordered.sessions,
-            active_index: ordered.active_index,
-            show_selection,
-            match_positions: &ordered.match_positions,
-            search_active: query.is_some(),
-            headers: ordered.headers,
-            depths: ordered.depths,
-        });
+        let rows =
+            crate::session::session_list::resolve_rows(&crate::session::session_list::RowInputs {
+                sessions: &ordered.sessions,
+                active_index: ordered.active_index,
+                show_selection,
+                match_positions: &ordered.match_positions,
+                search_active: query.is_some(),
+                headers: ordered.headers,
+                depths: ordered.depths,
+            });
 
         pc::SessionListSnapshot::bounded(rows.into_iter().zip(&ordered.sessions).map(
             |((group, row), info)| pc::SessionRowSnapshot {

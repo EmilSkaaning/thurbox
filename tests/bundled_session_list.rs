@@ -66,12 +66,12 @@ use thurbox::plugin::{discovery, ExecutionBounds, PluginHost};
 use thurbox::session::pane_context::{
     PaneContext, SessionListSnapshot, SessionRowSnapshot, StatusSnapshot,
 };
+use thurbox::session::session_list::{
+    compute_session_order, resolve_rows, OrderedSessions, RowInputs, SessionMatch,
+};
 use thurbox::session::view_tree::ViewNode;
 use thurbox::session::{SessionId, SessionInfo, SessionStatus, WorktreeInfo};
-use thurbox::ui::project_list::{
-    compute_session_order, session_list_tree, OrderedSessions, RowInputs, SessionListItem,
-    SessionMatch,
-};
+use thurbox::ui::project_list::{session_list_tree, SessionListItem};
 
 /// A column wide enough that the geometry step fits nothing, and a height that
 /// windows nothing. Both are checked rather than trusted.
@@ -211,7 +211,7 @@ impl Case {
         // the kernel is what knows which row opens a group and which the cursor is
         // on, so publishing that per row is what stops the plugin having to
         // reconstruct a rule it cannot see the inputs to.
-        let rows = thurbox::ui::project_list::resolve_rows(&inputs)
+        let rows = resolve_rows(&inputs)
             .into_iter()
             .zip(&ordered.sessions)
             .map(|((group, row), info)| SessionRowSnapshot {

@@ -3977,3 +3977,108 @@ still what thurbox draws. The row that this change taught, and the one a future 
 should read first: **giving the kernel a key closes the write, not the surface the key
 opens.** `c` writes a comment the kernel can perform; the box it opens anchors to a row
 of a tree the kernel did not lay out.
+
+## ADR-60: The session list's ordering model leaves the pane that draws it
+
+**Context.** ADR-57 refused this pane's handover on two structural rows. One of them was
+never about drawing:
+
+> `the-module-is-the-kernels-model` — `src/ui/project_list.rs` owns the comparator
+> `Ctrl+J`/`Ctrl+K` navigate by, the reorder, the sort, the snapshot the *plugin* reads,
+> and global search's session matcher.
+
+That is a v1 layering defect that a handover merely happened to trip over.
+`compute_session_order` is documented as the single comparator "shared by the rendering
+widget and keyboard navigation **so the two never drift**"; `move_in_order` and
+`sort_alphabetically_within_groups` are the primitives behind `Shift+J`/`Shift+K`/
+`Shift+S`, which renumber `sessions.display_order` densely and persist it. None of it is
+drawing, and all of it lived in `ui` — so `App`, the coordinator, called *up* into the
+rendering layer for its own model at eight sites, in a crate whose architecture rules let
+`ui` see `app` precisely so that rendering cannot become a dependency of the model.
+
+**Decision.** The model moves to `src/session/session_list.rs`, and it moves **before**
+the handover rather than inside it.
+
+`migration/handover` already required a handover to relocate the model its deleted module
+also held, "in the same change". That rule assumes the handover happens. This one is
+refused on the *other* structural row — the window — which this change does not close, so
+under the rule as written the model would sit in the rendering layer for as long as that
+refusal stands. The rule now carries the exception, on the precedent already beside it:
+a pane's **keyboard** is required to become actions in a change before its handover
+(ADR-59), for the reason that applies verbatim here — a commit that relocates a model and
+moves who draws a pane makes any behavioural difference read equally as either.
+
+To `session` and not to `app`, which is the opposite call from the file viewer's
+(ADR-58), and the *same rule* selecting differently. That rule is: a model performing
+side effects must not go to a layer kept free of them, however well its types fit.
+`FileViewerState` calls `read_dir`, so it went to `app`. Nothing here reads, writes,
+spawns or blocks — `compute_session_order` sorts, `move_in_order` swaps index ranges,
+`resolve_rows` copies fields out of `SessionInfo` — so it goes to the layer that already
+owns `SessionInfo`.
+
+**The cut is geometry.** Everything that is a pure function of the session set moved;
+everything needing a resolved width, a ratatui type or a theme stayed. So `SessionRow`
+crossed while `resolve_items`, `fit_status_text` and `row_used_columns` did not: the row's
+one geometry-bearing field is `None` on every row `resolve_rows` returns and is filled by
+the pane, which is the shape the split already had.
+
+Two things deliberately did **not** move, and naming them is the point of the boundary:
+
+- **`pending_spawn_slot`**, though it is as pure as everything that did.
+  `migration/phase-4` orders the relocation of anything the widget's window feeds *after*
+  the windowing decision, "since what a windowing seam looks like decides where those
+  functions live" — and the placeholder's index is one of the four behaviours the window
+  row enumerates. Purity is not the criterion; being downstream of an undecided seam is.
+- **The width fit**, because `session` may not hold geometry.
+
+Rejected: re-exporting the moved items from `ui::project_list` so no caller changes (the
+re-export *is* the defect — the kernel would still spell its own navigation
+`crate::ui::…` and the module would still be undeletable, which `migration/handover` now
+refuses in as many words); and taking the opportunity to converge the fit onto
+`ellipsize` as the automations pane did (ADR-55), which this pane still owes — that
+changes what the pane draws and belongs in a change whose whole content is the
+convergence, because "no function body was edited" is what makes this one checkable at a
+glance.
+
+**Consequence.** `the-module-is-the-kernels-model` closes, and the row keeps asserting
+*both* halves — the model is in the pure-data layer **and** the coordinator no longer
+names it through `ui` — since a re-export would satisfy the first alone.
+`the-window-is-the-list-widgets` is now the pane's **sole** structural blocker, which the
+gate asserts as an equality rather than a membership. No pane is handed over: the renderer
+exists, `src/app/view.rs` still calls `project_list::render_left_panel`, the bundled
+plugin stays hidden with no `input`, and the teardown gate's row stays blocked.
+
+**The window, measured rather than restated.** ADR-57 recorded that the two rules
+"differ". What a reader could not re-derive from that is the size of the difference, so it
+is recorded here. 40 sessions across four repo groups, pane inner height 30, cursor walked
+down one row at a time: `native` is `ListState::offset()` after the stateful render,
+`shared` is `ui::visible_window` over the flat children a plugin pane declares.
+
+| cursor | native item offset | shared child window |
+|---|---|---|
+| 0 | 0 | 0..30 |
+| 3 | 0 | 1..31 |
+| 5 | 0 | 3..33 |
+| 10 | 0 | 9..39 |
+| 20 | 0 | 14..44 |
+| 28 | 1 | 14..44 |
+| 39 | 12 | 14..44 |
+
+The native pane does not scroll at all for the first 28 of 40 rows — the cursor walks down
+the pane and the list holds still. The shared rule scrolls after the *third* keypress and
+is pinned to the list's tail for the whole second half. Adopting it in the native pane
+would be a visible regression in the pane every user navigates with, and the spec already
+refuses the converse (redefining the shared rule, which every plugin list and three native
+surfaces scroll by, to match one pane's widget).
+
+Two further halves of that row are untouched by whichever scroll rule is chosen, and are
+why it is not merely a policy question:
+
+- **Item granularity.** A repo-group header travels with the row below it, so a two-line
+  item is **one** hitbox and the window can never split a header from its row. A plugin's
+  list emits the header as its own child.
+- **Click index space.** `App::render_plugin_panes` maps a seated pane's hitbox index to a
+  kernel row as `row(index - 1)`, which holds for all four panes handed over because each
+  emits one child per row. This pane's children include headers, so the mapping is wrong
+  by the number of preceding headers and the error grows through the list. A handover
+  today would ship a session list whose clicks select the wrong session.

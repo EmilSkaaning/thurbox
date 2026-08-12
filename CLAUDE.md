@@ -1560,7 +1560,7 @@ children under their parent **within the same repo group** (muted
 `└` tree prefix; a child whose parent renders in another group
 keeps its own position with a `↳` mark instead), and the info panel
 (F2) shows a `Parent:` row. The nesting lives in
-`ui::project_list::compute_session_order` (`SessionOrder::depths`),
+`session::session_list::compute_session_order` (`SessionOrder::depths`),
 so `Ctrl+J`/`Ctrl+K` navigation follows the tree automatically.
 Storage: nullable `sessions.parent_session_id` column (schema v30;
 v29 is reserved by an in-flight branch).
@@ -1575,7 +1575,7 @@ recolor the dot, never move a row. A move swaps two adjacent
 *blocks* (a row plus its nested children, so a parent drags its
 subtree): root rows swap within their repo group, the **whole
 group** swaps past a group edge, and nested children move among
-their siblings only (`ui::project_list::move_in_order`, pure;
+their siblings only (`session::session_list::move_in_order`, pure;
 `App::move_active_session` applies it). On every move all sessions
 are densely renumbered `0..n` and persisted, so the order survives
 restarts and syncs across instances via the existing
@@ -1588,7 +1588,7 @@ shot: group order is preserved (still by lowest `display_order`),
 and parent/child nesting is preserved (children sort among their
 siblings). It reuses the same dense-renumber-and-persist path, so
 the alphabetised order survives restarts just like a manual move
-(pure helper: `ui::project_list::sort_alphabetically_within_groups`;
+(pure helper: `session::session_list::sort_alphabetically_within_groups`;
 `App::sort_sessions_alphabetically` applies it).
 
 ### Inter-session messages (mailbox queue)
@@ -2260,7 +2260,7 @@ frame; the static `icon()` is used in non-animated contexts (info panel).
   exited → `Idle`.
 - **Per-session only.** Status is rendered on the session's own row (and in the
   ` Sessions ` panel border title, one dot per session). Repo-group headers
-  (`ui::project_list::group_header_line`) carry **no** status — a rolled-up
+  (`ui::project_list::group_header_node`) carry **no** status — a rolled-up
   group dot would restate what every member row already shows. Status only
   recolors — it **never** reorders rows (the order cache stays
   status-independent).
@@ -2645,7 +2645,12 @@ backend dependency stays visible at each call site.
   name, backend name, ids, cwd, env), `AgentDef`/`AgentRegistry`,
   `HostDef`/`HostRegistry` (remote SSH hosts).
   Mostly Display/Default impls plus the agent-arg
-  substitution logic.
+  substitution logic — and `session_list.rs`, the session list's
+  ordering model (`compute_session_order`, `move_in_order`,
+  `sort_alphabetically_within_groups`, `SessionMatch`,
+  `resolve_rows`), which lives here rather than in the pane that
+  draws it because keyboard navigation depends on it (ADR-60).
+  It knows no width: the fit stays with the pane.
 - **`ui/`** — Pure rendering functions. `layout.rs` computes
   panel areas (responsive: <80 = terminal only, >=80 = 2-panel,
   >=120 = optional 3-panel) from a **workspace tree** rather than
@@ -2672,13 +2677,10 @@ backend dependency stays visible at each call site.
   clamped so it never escapes the pane), and `ui::overlay::OverlayLayer`
   keeps one pane's declarations in **declaration order** — there is no
   `z-index` — reporting them topmost-first so a click on a floating box
-  is hit-tested before the rows it covers. Widgets: `project_list` (session
-  list with repo/branch display; `compute_session_order` is the
-  single comparator that orders sessions by manual order
-  (`display_order`, never by status) and groups them by repo
-  under headers — shared with `App`'s `Ctrl+J/K` navigation so
-  the two never drift; `move_in_order` is the pure reorder step
-  behind `Shift+J`/`Shift+K`),
+  is hit-tested before the rows it covers. Widgets: `project_list`
+  (the session list's **drawing** only — its ordering model lives in
+  `session::session_list`, because a comparator keyboard navigation
+  depends on is model and `ui` must not be a dependency of it, ADR-60),
   `terminal_view`,
   `status_bar`, `repo_picker_modal` (repo selection with
   worktree toggle). `selection.rs` handles mouse-drag text

@@ -3190,3 +3190,34 @@ The fourth row is the sharpest of the five and the one this change learned: givi
 kernel a key closes the **write** and not the **surface** the key opens. `c` writes a
 comment the kernel can perform; the box it opens is anchored inside content the kernel
 did not lay out.
+
+## 35. The session list's model leaves its renderer (ADR-60)
+
+§32 refused this pane's handover on two structural rows. This closes the one that was
+never about drawing, and it does so **outside** a handover — which is the part worth
+reading, because the spec's default is the opposite.
+
+**What moved.** `src/session/session_list.rs` now holds the grouping keys and labels,
+`SessionOrder` / `compute_session_order` and its nesting, `move_in_order` and its block
+arithmetic, `sort_alphabetically_within_groups`, `OrderedSessions`, `SessionMatch`, the
+resolved `SessionRow`, `RowInputs` / `resolve_rows`, and `agent_status_text`. That is the
+comparator `Ctrl+J`/`Ctrl+K` navigate by, the reorder behind `Shift+J`/`Shift+K`, the sort
+behind `Shift+S`, the snapshot the *plugin* reads, and global search's session matcher.
+
+**What stayed, on a rule rather than by convenience.** `pending_spawn_slot` is downstream
+of the very window seam the remaining row is about, and `migration/phase-4` orders that
+relocation after the seam is settled. `resolve_items` / `fit_status_text` /
+`row_used_columns` need a resolved column width, which `session` may not know.
+
+**How it is known to have changed nothing.** The suite went 2734 → 2734 with no test
+added, none lost, no recorded pane oracle regenerated and no acceptance snapshot moved.
+The only two tests that failed mid-change were the gate's own rows, which is the signal
+the change was aiming for: the tree moved, the behaviour did not, and only the record
+disagreed.
+
+**What is left.** `the-window-is-the-list-widgets`, asserted now as the pane's *sole*
+structural row rather than as one of two. ADR-60 records the measurement — at 40 sessions
+in a 30-row pane the native widget holds its offset until the cursor reaches row 28 while
+the shared rule scrolls after three keypresses, plus the two halves no scroll policy
+settles (a header travelling with its row as one hitbox, and the child-index-to-session
+mapping a seated pane's clicks resolve through).

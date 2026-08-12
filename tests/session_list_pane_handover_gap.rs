@@ -30,7 +30,7 @@
 //! happened".
 //!
 //! **What decides the verdict now** is [`the_verdict_is_derived_from_the_blockers`]'s
-//! two structural rows, and neither is about keys:
+//! one remaining structural row, and it is not about keys:
 //!
 //! * `the-window-is-the-list-widgets` — the native pane hands its nodes to a ratatui
 //!   `List`, and *four* behaviours come off that widget's sticky offset: which rows are
@@ -39,10 +39,17 @@
 //!   hitbox), and where the pending-spawn placeholder is inserted. A seated plugin pane
 //!   windows by the kernel's shared rule over flat children, whose count differs
 //!   because the plugin's index counts those headers. Both keep the cursor visible;
-//!   they do not agree on which other rows are beside it.
-//! * `the-module-is-the-kernels-model` — `src/ui/project_list.rs` owns the comparator
-//!   `Ctrl+J`/`Ctrl+K` navigate by, the reorder, the sort, the snapshot the *plugin*
-//!   reads, and global search's session matcher.
+//!   they do not agree on which other rows are beside it — measured in ADR-60: at 40
+//!   sessions in a 30-row pane the widget does not scroll until the cursor reaches row
+//!   28, while the shared rule scrolls after three keypresses.
+//!
+//! The second structural row, `the-module-is-the-kernels-model`, is **closed**: ADR-60
+//! moved the comparator `Ctrl+J`/`Ctrl+K` navigate by, the reorder, the sort, the
+//! snapshot the *plugin* reads and global search's session matcher out of
+//! `src/ui/project_list.rs` and into `src/session/session_list.rs`, ahead of the
+//! handover rather than inside it. Its row keeps asserting both halves — the model is in
+//! the pure-data layer *and* the coordinator no longer names it through `ui` — because a
+//! re-export would satisfy the first alone and change nothing.
 //!
 //! Two of the rows below were promoted out of `tests/bundled_session_list.rs`'s
 //! enumerated divergences, where they were documented in `///` blocks — which is the
@@ -274,25 +281,50 @@ const BLOCKERS: &[Blocker] = &[
     Blocker {
         id: "the-module-is-the-kernels-model",
         needs: "deleting `src/ui/project_list.rs`, which is what a handover is for",
-        stands: "that module is not only the pane's renderer. It owns \
-                 `compute_session_order` (the comparator `App`'s `Ctrl+J`/`Ctrl+K` navigate by), \
-                 `move_in_order`, `sort_alphabetically_within_groups`, `resolve_rows` — which \
-                 builds the very snapshot the *plugin* reads — and `SessionMatch`, global \
-                 search's session matcher. Deleting it deletes navigation, reordering, sorting \
-                 and search. The file viewer's gate found the same class (ADR-39); this pane's \
-                 case is larger",
+        stands: "**closed** (ADR-60), and closed *before* the handover rather than inside it. \
+                 That module was not only the pane's renderer: it owned `compute_session_order` \
+                 (the comparator `App`'s `Ctrl+J`/`Ctrl+K` navigate by), `move_in_order`, \
+                 `sort_alphabetically_within_groups`, `resolve_rows` — which builds the very \
+                 snapshot the *plugin* reads — and `SessionMatch`, global search's session \
+                 matcher, so deleting it deleted navigation, reordering, sorting and search. \
+                 All five now live in `src/session/session_list.rs`, the pure-data layer that \
+                 already owns `SessionInfo`, and the coordinator names its own model directly. \
+                 `migration/handover` ordinarily wants that relocation *in* the handover; it was \
+                 hoisted because this pane's handover is refused on a row the relocation does not \
+                 close, which would have stranded the model in the rendering layer indefinitely. \
+                 What deliberately did **not** move is `pending_spawn_slot`, which is downstream \
+                 of the very window seam the row below is about, and the width fit, which \
+                 `session` may not hold",
         gap: Gap::Structural,
-        blocked: true,
+        blocked: false,
         probe: |root| {
+            // Both halves, because either alone would be the wrong claim: the model
+            // must live in the pure-data layer, *and* the coordinator must have
+            // stopped reaching into the rendering layer for it. A re-export would
+            // satisfy the first and not the second, and it is what
+            // `migration/handover` refuses.
+            let model = source(root, "src/session/session_list.rs");
+            let relocated = [
+                "pub fn compute_session_order(",
+                "pub fn move_in_order(",
+                "pub fn sort_alphabetically_within_groups(",
+                "pub fn resolve_rows(",
+                "pub struct SessionMatch",
+            ]
+            .iter()
+            .all(|needle| model.contains(needle));
             let app = source(root, "src/app/mod.rs");
-            [
+            let coordinator_left = ![
                 "project_list::compute_session_order",
                 "project_list::move_in_order",
                 "project_list::sort_alphabetically_within_groups",
                 "project_list::resolve_rows",
+                "project_list::SessionMatch",
+                "project_list::OrderedSessions",
             ]
             .iter()
-            .all(|needle| app.contains(needle))
+            .any(|needle| app.contains(needle));
+            !(relocated && coordinator_left)
         },
     },
     Blocker {
@@ -409,9 +441,11 @@ const BLOCKERS: &[Blocker] = &[
         probe: |root| {
             // Both sides, so the row is about a *difference* rather than about either
             // implementation: the kernel's trim is Rust's, and the plugin's is Luau's
-            // ASCII class.
+            // ASCII class. The kernel's half reads the model's module rather than the
+            // pane's, because `agent_status_text` moved there with the rest of the
+            // model (ADR-60) — the difference this row measures did not move with it.
             let kernel_trims_unicode =
-                source(root, "src/ui/project_list.rs").contains(".map(str::trim)");
+                source(root, "src/session/session_list.rs").contains(".map(str::trim)");
             let plugin_trims_ascii = source(root, "src/plugin/bundled/session-list/init.luau")
                 .contains(r#"string.match(activity, "^%s*(.-)%s*$")"#);
             kernel_trims_unicode && plugin_trims_ascii
@@ -660,30 +694,33 @@ fn the_verdict_is_derived_from_the_blockers() {
     );
     assert!(!outstanding(BLOCKERS, Gap::Vocabulary).is_empty());
     let structural = outstanding(BLOCKERS, Gap::Structural);
-    // The two that decide it, and they are **not** the two this gate was written
+    // **One** row decides it now, and it is not one of the four this gate was written
     // around. Those were the keys (`scoped-keys-silenced-by-the-handover`,
-    // `no-active-session-write`), which ADR-51 answered without granting anything;
-    // what is left is the widget the pane windows through and the module that is the
-    // kernel's own navigation (ADR-57).
-    assert!(
-        structural.contains(&"the-window-is-the-list-widgets")
-            && structural.contains(&"the-module-is-the-kernels-model"),
-        "the two rows that decide this verdict must be structural: {structural:?}"
+    // `no-active-session-write`), which ADR-51 answered without granting anything, and
+    // the module that was also the kernel's navigation, which ADR-60 relocated. What is
+    // left is the widget the pane windows through — a seam, not a power.
+    assert_eq!(
+        structural,
+        vec!["the-window-is-the-list-widgets"],
+        "the sole row that decides this verdict must be the window: {structural:?}"
     );
-    // And the three the route retired are not blockers of any kind. Asserted
-    // positively so a regression that reopened one — a plugin handed `input`, a view
-    // write, a session operation on the seam — fails here with the reason attached
-    // rather than merely growing the table.
+    // And the four the route and the relocation retired are not blockers of any kind.
+    // Asserted positively so a regression that reopened one — a plugin handed `input`, a
+    // view write, a session operation on the seam, or the model moving back into the
+    // renderer — fails here with the reason attached rather than merely growing the
+    // table.
     for closed in [
         "scoped-keys-silenced-by-the-handover",
         "no-active-session-write",
         "no-session-record-write",
+        "the-module-is-the-kernels-model",
     ] {
         assert!(
             !structural.contains(&closed),
-            "`{closed}` is closed by ADR-51 *without* a grant; if it is outstanding \
-             again, either the route regressed or a power was granted — and the second \
-             is the one this row exists to catch: {structural:?}"
+            "`{closed}` is closed *without* a grant — three by ADR-51's route, the fourth \
+             by ADR-60's relocation. If it is outstanding again, either the route \
+             regressed, the model moved back into the renderer, or a power was granted — \
+             and the last is the one these rows exist to catch: {structural:?}"
         );
     }
 
@@ -755,9 +792,13 @@ fn the_left_columns_wrap_is_not_a_blocker() {
 ///
 /// The window is first because three of the other rows are **functions** of it — the
 /// border indicators, the click hitboxes and the pending-spawn slot are all read off
-/// `ListState::offset()` — and because `resolve_rows`, which the module row would
-/// relocate, is what feeds both panes. A change that closed the chrome first would have
-/// built it against a window that is about to change.
+/// `ListState::offset()`. A change that closed the chrome first would have built it
+/// against a window that is about to change, which is why ADR-60's relocation left
+/// `pending_spawn_slot` where it is even though it is as pure as everything it moved.
+///
+/// The module row is kept in the list although it is now closed: the ordering it states
+/// is a property of the *table*, and a decider that dropped out of the assertion once it
+/// landed would leave the rule checking half of what it was written to check.
 #[test]
 fn the_window_is_settled_before_what_depends_on_it() {
     let deciders = [
@@ -877,42 +918,72 @@ fn none_of_the_panes_keys_acts_on_a_record() {
     );
 }
 
-/// Deleting the renderer would delete the kernel's own navigation, reorder, sort
-/// and search rules — so the handover is not "stop calling one function".
+/// The kernel's navigation, reorder, sort and search rules are the kernel's, and no
+/// longer sit in the module a handover deletes (ADR-60).
 ///
-/// The file viewer's gate found the same class for `FileViewerState` (ADR-39). This
-/// pane's case is larger, and it is asserted per consumer so a failure says which
-/// rule moved rather than that the module is "still used".
+/// The direction is what changed, not the argument. This gate used to assert that
+/// deleting the renderer would delete all four rules — which was true, and was why the
+/// row was blocked. Now it asserts they are somewhere a deletion cannot reach, per rule,
+/// so a failure says *which* rule drifted back rather than that the module is "still
+/// used". The file viewer's gate found the same class for `FileViewerState` (ADR-39) and
+/// sent it to `app`; this one goes to `session`, because unlike that state machine it
+/// performs no effects.
 #[test]
 fn the_module_is_the_kernels_navigation_not_only_the_panes_paint() {
     let root = repo_root();
+    let model = source(&root, "src/session/session_list.rs");
     let app = source(&root, "src/app/mod.rs");
-    for (rule, what) in [
+    for (item, old, what) in [
         (
+            "pub fn compute_session_order(",
             "project_list::compute_session_order",
             "Ctrl+J/Ctrl+K navigation",
         ),
-        ("project_list::move_in_order", "Shift+J/Shift+K reordering"),
         (
+            "pub fn move_in_order(",
+            "project_list::move_in_order",
+            "Shift+J/Shift+K reordering",
+        ),
+        (
+            "pub fn sort_alphabetically_within_groups(",
             "project_list::sort_alphabetically_within_groups",
             "Shift+S sorting",
         ),
         (
+            "pub fn resolve_rows(",
             "project_list::resolve_rows",
             "the snapshot the plugin itself reads",
         ),
+        (
+            "pub struct SessionMatch",
+            "project_list::SessionMatch",
+            "global search's session matcher",
+        ),
     ] {
         assert!(
-            app.contains(rule),
-            "`App` no longer uses `{rule}` for {what} — if the rule moved out of \
-             `src/ui/project_list.rs`, re-verdict `the-module-is-the-kernels-model`"
+            model.contains(item),
+            "`{item}` should live in `src/session/session_list.rs` — it is what {what} \
+             depends on, and a rendering module holding it is what \
+             `the-module-is-the-kernels-model` recorded"
+        );
+        assert!(
+            !app.contains(old),
+            "`App` names `{old}` again for {what} — the coordinator must not reach into \
+             the rendering layer for its own model, and a re-export is refused for the \
+             same reason (`migration/handover`)"
         );
     }
-    // `SessionMatch` is global search's matcher, and it lives in the pane's module
-    // too — checked separately because it is a type rather than a call.
+    // The pane keeps its geometry, which is the half of the split that is easy to
+    // overshoot: `session` may not know a width.
+    let pane = source(&root, "src/ui/project_list.rs");
     assert!(
-        source(&root, "src/ui/project_list.rs").contains("pub struct SessionMatch"),
-        "global search's session matcher should still live in the pane's module"
+        pane.contains("fn fit_status_text(") && pane.contains("fn resolve_items("),
+        "the width fit belongs to the pane, not to the pure-data layer"
+    );
+    assert!(
+        !model.contains("inner_width"),
+        "the model must not know a pane's width: {}",
+        "src/session/session_list.rs"
     );
 }
 
