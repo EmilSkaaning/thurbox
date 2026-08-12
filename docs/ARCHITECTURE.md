@@ -4223,3 +4223,79 @@ offset back into a VM reopens it.
 unchanged, `build_module_table`'s bindings are unchanged, and nothing a plugin may read,
 write, run or reach moves. The `ui` table is the node vocabulary and is frozen after
 construction.
+
+## ADR-63: The session list's window converges onto the kernel's rule, in the direction of the pane
+
+**Context.** `tests/session_list_pane_handover_gap.rs` refused the session list's handover
+on one structural row, `the-window-is-the-list-widgets`, and after ADR-60 relocated the
+model it was the sole decider. Two problems hid in it.
+
+**Identity** was the first, and ADR-61 closed it: the native pane's list item is *an
+optional repo-group header plus a session row* — one item, one hitbox, one index — while
+the plugin flattened the pair into two children, so a session's index in the tree was not
+its index in the kernel's rows and the drift grew with every group. Windowing in rows made
+the fold expressible.
+
+**Policy** was the second. The kernel's shared rule (`ui::visible_item_window`) opens a
+margin above the cursor and clamps at the list's tail; ratatui's `List` holds its offset
+until the cursor leaves the viewport. Both keep the cursor visible and they disagree about
+which rows sit *beside* it — measured at 40 sessions in a 30-row pane, the widget does not
+scroll until the cursor reaches row 28 while the shared rule scrolls after three
+keypresses. For the pane whose selection decides what the central pane, the info column,
+the file viewer and the code review are all showing, that is a behavioural change.
+
+**Decision.** The **pane** converges onto the kernel's rule, in a change before its
+handover.
+
+`ui::project_list::render_session_section` draws its block and paints its list through
+`ui::plugin_pane::render_tree_rows` — the renderer its reproduction already goes through.
+The window is `visible_item_window` for both, the `▲ N` / `▼ N` indicators and the click
+hitboxes are read off that one paint, and the pending-spawn placeholder is an index into
+the same folded items. `ListState` leaves the pane and `App::session_list_state` is
+deleted with it. Both trees fold a header into the row it heads, so one index names the
+same row in both.
+
+**The direction is the whole argument.** `migration/phase-4` forbids closing this row by
+redefining the kernel's helper to match one pane's widget: that helper is what every
+plugin list and three seated panes scroll by, and a change for one pane would change all
+of them (the hazard ADR-39 recorded from the other side). It says nothing about the pane —
+and the pane is the thing this handover deletes. The precedent is the frame: ADR-53's rule
+that a native pane whose frame differs from the host's is converged onto the **host's**
+frame, in its own change, before the handover. A window is the same kind of thing as a
+frame — a property of how the host draws a pane — so a handover must not be able to change
+one under cover of moving the drawing code.
+
+**What changed for a user, stated rather than discovered.** An overflowing session list now
+opens `min(height/4, 3)` rows above the cursor instead of holding a sticky offset. Moving
+into a long list jumps the window once rather than scrolling row by row from wherever it
+was left. The cursor is visible either way. After this, thurbox has **one** windowing rule
+for every list it draws; the session list was the last pane with its own.
+
+**Rejected alternatives.**
+
+| Alternative | Why not |
+|---|---|
+| Teach `visible_item_window` the widget's sticky offset | It is *stateful* — an offset carried between frames — where the view-tree renderer is a pure function of `(tree, frames, palette)`, and it would have to be reachable from a plugin pane's paint, which holds no mutable kernel state. And it changes four panes to fix one. |
+| Keep the widget and make the plugin match it | A plugin is never told its height, so it cannot window anything. The window is the kernel's by construction (ADR-30); the only question was which kernel rule. |
+| Converge inside the handover | It makes the handover's claim unverifiable: every moved cell would have two candidate causes, and the recorded expectation would move for two reasons at once. |
+| Fold the header only in the plugin | The two would still count different numbers of rows, so the windows could not agree however correct each was. |
+
+**The recording moves, and it is recorded from the native tree.** The eleven
+`tests/snapshots/bundled_session_list__*.snap` files are regenerated with the folded
+shape, from `session_list_tree` — the edge that gives them provenance, establishable only
+while that builder exists (ADR-48's fourth handover condition). The enumerated divergence
+in `tests/bundled_session_list.rs` is replaced by its opposite: at a height where the list
+overflows, both panes draw the same rows and clip the same counts.
+
+**`ui::draw_clipped_indicators`** goes to `src/ui/mod.rs`, beside the windowing rule, for
+that helper's reason — the counts are a function of the window, and a seated plugin pane
+whose frame the host draws is its second consumer the moment the chrome row is closed. It
+takes a `&mut Buffer` because the view-tree painter has only the buffer, and two painters
+of the same glyphs must not diverge on where they land.
+
+**What this does not close.** Three vocabulary rows remain and the gate goes on refusing
+the handover: the pane's border chrome (the one-dot-per-session strip and these very
+indicators, on a frame a plugin does not draw), the pending-spawn placeholder row, and the
+Unicode-aware trim of an agent's activity text. `pending_spawn_slot` deliberately stays in
+the pane — it is downstream of the seam this change settled, and moving it is the
+placeholder row's work.

@@ -30,26 +30,28 @@
 //! happened".
 //!
 //! **What decides the verdict now** is [`the_verdict_is_derived_from_the_blockers`]'s
-//! one remaining structural row, and it is not about keys:
+//! remaining rows, and every one of them is **vocabulary**: nothing structural is left.
 //!
-//! * `the-window-is-the-list-widgets` — the native pane hands its nodes to a ratatui
-//!   `List`, and *four* behaviours come off that widget's sticky offset: which rows are
-//!   on screen, the `^ N` / `v N` indicators on the border, the click hitboxes (a
-//!   repo-group header travels with the row below it, so a two-line item is one
-//!   hitbox), and where the pending-spawn placeholder is inserted. A seated plugin pane
-//!   windows by the kernel's shared rule over flat children, whose count differs
-//!   because the plugin's index counts those headers. Both keep the cursor visible;
-//!   they do not agree on which other rows are beside it — measured in ADR-60: at 40
-//!   sessions in a 30-row pane the widget does not scroll until the cursor reaches row
-//!   28, while the shared rule scrolls after three keypresses.
+//! The last structural row to close was `the-window-is-the-list-widgets`, and it closed
+//! by convergence rather than by a grant. The native pane used to hand its nodes to a
+//! ratatui `List`, and *four* behaviours came off that widget's sticky offset: which
+//! rows are on screen, the `^ N` / `v N` indicators on the border, the click hitboxes,
+//! and where the pending-spawn placeholder is inserted. ADR-61 closed the half about
+//! identity — a header and the row it heads can be **one** child of a list, windowed in
+//! rows — and ADR-63 closed the half about policy, by moving the *pane* onto the
+//! kernel's rule: it paints its tree through the same renderer a plugin pane's goes
+//! through, so both window by `ui::visible_item_window` and the other three behaviours
+//! are read off that one paint. The direction is the whole argument — the shared rule is
+//! what every plugin list and three seated panes scroll by, so it is the pane, which
+//! this handover deletes, that moved.
 //!
-//! The second structural row, `the-module-is-the-kernels-model`, is **closed**: ADR-60
-//! moved the comparator `Ctrl+J`/`Ctrl+K` navigate by, the reorder, the sort, the
-//! snapshot the *plugin* reads and global search's session matcher out of
-//! `src/ui/project_list.rs` and into `src/session/session_list.rs`, ahead of the
-//! handover rather than inside it. Its row keeps asserting both halves — the model is in
-//! the pure-data layer *and* the coordinator no longer names it through `ui` — because a
-//! re-export would satisfy the first alone and change nothing.
+//! `the-module-is-the-kernels-model` is likewise **closed**: ADR-60 moved the comparator
+//! `Ctrl+J`/`Ctrl+K` navigate by, the reorder, the sort, the snapshot the *plugin* reads
+//! and global search's session matcher out of `src/ui/project_list.rs` and into
+//! `src/session/session_list.rs`, ahead of the handover rather than inside it. Its row
+//! keeps asserting both halves — the model is in the pure-data layer *and* the
+//! coordinator no longer names it through `ui` — because a re-export would satisfy the
+//! first alone and change nothing.
 //!
 //! Two of the rows below were promoted out of `tests/bundled_session_list.rs`'s
 //! enumerated divergences, where they were documented in `///` blocks — which is the
@@ -240,56 +242,45 @@ const BLOCKERS: &[Blocker] = &[
                 indicators on the block border, the click hitboxes (a repo-group header travels \
                 with the row below it, so a two-line item is **one** hitbox), and the index the \
                 pending-spawn placeholder is inserted at",
-        stands: "`render_session_section` hands its nodes to a ratatui `List` with a `ListState`, \
-                 and reads `list_state.offset()` back **after** the stateful render for all three \
-                 of the above. **Half of this row closed with ADR-61, and the half that closed is \
-                 the one about identity**: the kernel's shared rule now windows a list in *rows*, \
-                 from each child's rendered height (`ui::visible_item_window`), so a pane may \
-                 express a repo-group header and its session as **one** child — one index, one \
-                 hitbox, one row that scrolls whole — which is what a flattened tree could not \
-                 say and what made the plugin's index drift from the kernel's by a margin that \
-                 grew down the list. What is left is the **policy**: the shared rule keeps the \
-                 cursor near the middle with a margin, the widget holds its offset until the \
-                 cursor leaves the viewport, and both keep the cursor visible \
-                 (`the_two_panes_window_a_long_list_by_different_rules`). So a handover would \
-                 still change which *other* sessions are beside the cursor whenever the list \
-                 overflows, in the pane whose selection decides what the central pane, the info \
-                 column, the file viewer and the code review are all showing. Not closable by \
-                 teaching the shared rule the widget's sticky offset — that helper is what every \
-                 plugin list and three native panes scroll by, so a change for this pane changes \
-                 all of them (the hazard ADR-39 recorded from the other side), and the widget's \
-                 rule is *stateful* where the view-tree renderer is a pure function of (tree, \
-                 frames, palette). The port's own file calls this Phase 6 work; this row is what \
-                 that work is",
+        stands: "**closed** (ADR-63), by converging the *pane* onto the kernel's rule rather \
+                 than the rule onto the pane — the direction `migration/phase-4` leaves open, \
+                 since the helper is shared by every plugin list and three seated panes while \
+                 this pane is the one scheduled for deletion. Half of it had already closed with \
+                 ADR-61, and that was the half about **identity**: windowing in *rows* let a pane \
+                 express a repo-group header and its session as **one** child. Both trees now \
+                 fold that way, so one index names the same row in both. What ADR-63 closed is \
+                 the **policy**: `render_session_section` paints its list through \
+                 `ui::plugin_pane::render_tree_rows`, so the window is \
+                 `ui::visible_item_window` for both panes, the `^ N` / `v N` indicators and the \
+                 click hitboxes are read off that paint, and the pending-spawn placeholder is an \
+                 index into the same folded items. The `ListState` is gone from the pane and from \
+                 `App`. What changed for a user is stated rather than discovered: an overflowing \
+                 list now opens a margin above the cursor instead of holding a sticky offset — \
+                 the rule every other list thurbox draws already scrolled by \
+                 (`the_two_panes_window_a_long_list_by_one_rule`)",
         gap: Gap::Structural,
-        blocked: true,
+        blocked: false,
         probe: |root| {
-            // Four halves, one per behaviour derived from the offset, because a probe
-            // reading only the window would report a wiring detail where there are four
-            // consumers. Plus the plugin side, so "the two windows differ" is derived
-            // rather than assumed.
+            // Five halves, because any one alone would be the wrong claim: the widget
+            // must be gone, each of the three behaviours that hung off its offset must
+            // come off the paint instead, and both panes must reach the *same* helper —
+            // asserted positively so "the pane converged" can never come to mean "the
+            // shared rule was rewritten for it".
             let pane = source(root, "src/ui/project_list.rs");
-            let widget_owns_the_window =
-                pane.contains("render_stateful_widget") && pane.contains("ListState");
-            let indicators_come_off_it = pane.contains("render_scroll_indicators_variable");
-            let hitboxes_come_off_it = pane.contains("skip(list_state.offset())");
-            let placeholder_comes_off_it = pane.contains("items.insert(slot.index");
-            // And a plugin pane's window is the kernel's shared helper over the tree's
-            // own children, which is a different rule from the widget's sticky offset.
-            //
-            // Named `visible_item_window` rather than `visible_window` since ADR-61,
-            // and the needle had to be tightened rather than the verdict flipped —
-            // the fourth time in this family of gates. The old needle went on matching
-            // by accident, because a *test* in that file still calls the uniform form,
-            // so the probe would have kept answering for a call the renderer no longer
-            // makes.
-            let plugin_window_is_the_shared_rule =
+            let widget_is_gone =
+                !pane.contains("render_stateful_widget") && !pane.contains("ListState");
+            let painter_draws_the_list = pane.contains("plugin_pane::render_tree_rows(");
+            let indicators_come_off_the_paint = pane.contains("painted.clipped_above");
+            let hitboxes_come_off_the_paint = pane.contains("let item = hit.index - 1;");
+            let placeholder_is_an_item = pane.contains("children.insert(slot.index");
+            let one_window_rule =
                 source(root, "src/ui/plugin_pane.rs").contains("super::visible_item_window(");
-            widget_owns_the_window
-                && indicators_come_off_it
-                && hitboxes_come_off_it
-                && placeholder_comes_off_it
-                && plugin_window_is_the_shared_rule
+            !(widget_is_gone
+                && painter_draws_the_list
+                && indicators_come_off_the_paint
+                && hitboxes_come_off_the_paint
+                && placeholder_is_an_item
+                && one_window_rule)
         },
     },
     Blocker {
@@ -714,9 +705,9 @@ fn the_verdict_is_derived_from_the_blockers() {
     );
     // The ordering the table implies, asserted rather than described. The cheapest
     // kind is **no longer** outstanding: this pane's only wiring row was the render
-    // trigger, closed by ADR-49. So what is left of the verdict is vocabulary and
-    // the kind no amount of vocabulary reaches — which is the honest summary of why
-    // this pane still cannot go.
+    // trigger, closed by ADR-49. So what is left of the verdict is vocabulary alone
+    // — which is the honest summary of why this pane still cannot go, and of how
+    // far it is from going.
     assert!(
         outstanding(BLOCKERS, Gap::Wiring).is_empty(),
         "the render trigger was this pane's last wiring gap; a new one means the \
@@ -725,26 +716,27 @@ fn the_verdict_is_derived_from_the_blockers() {
     );
     assert!(!outstanding(BLOCKERS, Gap::Vocabulary).is_empty());
     let structural = outstanding(BLOCKERS, Gap::Structural);
-    // **One** row decides it now, and it is not one of the four this gate was written
-    // around. Those were the keys (`scoped-keys-silenced-by-the-handover`,
-    // `no-active-session-write`), which ADR-51 answered without granting anything, and
-    // the module that was also the kernel's navigation, which ADR-60 relocated. What is
-    // left is the widget the pane windows through — a seam, not a power.
-    assert_eq!(
-        structural,
-        vec!["the-window-is-the-list-widgets"],
-        "the sole row that decides this verdict must be the window: {structural:?}"
+    // **Nothing structural is left.** Every row this gate was written around has
+    // closed, and none by a grant: the keys (`scoped-keys-silenced-by-the-handover`,
+    // `no-active-session-write`, `no-session-record-write`) by ADR-51's route, the
+    // module that was also the kernel's navigation by ADR-60's relocation, and the
+    // widget the pane windowed through by ADR-63's convergence. So what refuses this
+    // handover now is vocabulary alone — which is the same shape the file viewer's
+    // verdict had on the change before its own handover.
+    assert!(
+        structural.is_empty(),
+        "no structural row should be left: {structural:?}"
     );
-    // And the four the route and the relocation retired are not blockers of any kind.
     // Asserted positively so a regression that reopened one — a plugin handed `input`, a
-    // view write, a session operation on the seam, or the model moving back into the
-    // renderer — fails here with the reason attached rather than merely growing the
-    // table.
+    // view write, a session operation on the seam, the model moving back into the
+    // renderer, or the pane growing its own window again — fails here with the reason
+    // attached rather than merely growing the table.
     for closed in [
         "scoped-keys-silenced-by-the-handover",
         "no-active-session-write",
         "no-session-record-write",
         "the-module-is-the-kernels-model",
+        "the-window-is-the-list-widgets",
     ] {
         assert!(
             !structural.contains(&closed),
@@ -827,9 +819,15 @@ fn the_left_columns_wrap_is_not_a_blocker() {
 /// against a window that is about to change, which is why ADR-60's relocation left
 /// `pending_spawn_slot` where it is even though it is as pure as everything it moved.
 ///
-/// The module row is kept in the list although it is now closed: the ordering it states
-/// is a property of the *table*, and a decider that dropped out of the assertion once it
-/// landed would leave the rule checking half of what it was written to check.
+/// Both deciders are kept in the list although both are now closed: the ordering they
+/// state is a property of the *table*, and a decider that dropped out of the assertion
+/// once it landed would leave the rule checking half of what it was written to check.
+///
+/// The half that **did** drop is the one requiring the dependents to be outstanding.
+/// It was there so the ordering claim could not pass vacuously over a settled table;
+/// with the window closed (ADR-63) the two dependents are the next work rather than a
+/// hypothetical, and asserting that they are still open would make this test fail on the
+/// change that closes them — for the ordering being satisfied, which is backwards.
 #[test]
 fn the_window_is_settled_before_what_depends_on_it() {
     let deciders = [
@@ -849,11 +847,12 @@ fn the_window_is_settled_before_what_depends_on_it() {
             );
         }
     }
-    // And the two dependents are still outstanding, or the ordering claim is vacuous.
-    for dependent in dependents {
+    // And both deciders are closed, which is what makes the dependents workable at all.
+    for decider in deciders {
         assert!(
-            BLOCKERS.iter().any(|b| b.id == dependent && b.blocked),
-            "`{dependent}` should still be outstanding"
+            BLOCKERS.iter().any(|b| b.id == decider && !b.blocked),
+            "`{decider}` decides where the chrome and the placeholder read their offset \
+             from; if it is open again, so are they"
         );
     }
 }

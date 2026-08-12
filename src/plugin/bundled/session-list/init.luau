@@ -38,6 +38,11 @@
 -- indicators — and the placeholder row for a session still being created. The
 -- first three are a pane's frame, which is the host's; the last is a row for a
 -- record that does not exist yet, inserted at an index the kernel computes.
+--
+-- A repo-group header is **not** a row of the list: it is emitted inside the same
+-- child as the session it heads (a `ui.column` of the two), so it scrolls with
+-- that row, a click anywhere on the pair selects that session, and the host's
+-- window counts one row where a reader sees one.
 
 local thurbox = require("@thurbox")
 local ui = thurbox.ui
@@ -307,15 +312,18 @@ return {
         end
 
         local children: { ViewNode } = {}
-        -- The row the cursor is on, as an index into `children` — which the rows
-        -- alone do not give, since a group's first row is preceded by a header.
+        -- The row the cursor is on, as an index into `children`. A group's first
+        -- row carries its header *inside* the same child, so the two arrays run
+        -- one for one — the header scrolls with the row it heads, a click on it
+        -- selects that row, and the host counts one row where a reader sees one.
         local selected: number? = nil
         for _, row in ipairs(rows) do
             local group = row.group
+            local node = rowNode(row)
             if group then
-                table.insert(children, headerNode(group))
+                node = ui.column({ headerNode(group), node })
             end
-            table.insert(children, rowNode(row))
+            table.insert(children, node)
             if row.selected then
                 selected = #children
             end

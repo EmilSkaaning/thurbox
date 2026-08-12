@@ -2,14 +2,15 @@
 source: tests/bundled_session_list.rs
 expression: "view_tree_record::tree(&native)"
 ---
-list cursor=1 scrollbar=false
-  line
-    text "── thurbox " muted
-    fill '─' muted
-  line
-    text " ○ " bold selected
-    text "resting" bold selected
-    fill ' ' bold selected
+list cursor=0 scrollbar=false
+  column
+    line
+      text "── thurbox " muted
+      fill '─' muted
+    line
+      text " ○ " bold selected
+      text "resting" bold selected
+      fill ' ' bold selected
   line
     motion cycle key="spinner" keyed_by_id=true fps=8 repeat=true
       text " ⠋ " status_working

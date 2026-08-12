@@ -1263,8 +1263,6 @@ pub struct App {
     selected_text_cache: Option<String>,
     /// Persistent clipboard handle to avoid "dropped too quickly" warnings on Linux.
     clipboard: Option<arboard::Clipboard>,
-    /// Persistent list state for the session section (preserves scroll offset).
-    pub(crate) session_list_state: ratatui::widgets::ListState,
     /// Automations-pane UI state (cached list, selection, run history, editor).
     pub(crate) automation_ui: automation_state::AutomationUiState,
     /// Tasks-panel UI state (cached list, selection, editor, links).
@@ -1578,7 +1576,6 @@ impl App {
             mouse_hover: None,
             selected_text_cache: None,
             clipboard: arboard::Clipboard::new().ok(),
-            session_list_state: ratatui::widgets::ListState::default(),
             automation_ui: automation_state::AutomationUiState::default(),
             task_ui: task_state::TaskUiState::default(),
             global_search: search::GlobalSearchState::default(),

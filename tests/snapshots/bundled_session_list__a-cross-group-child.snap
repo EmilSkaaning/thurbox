@@ -2,18 +2,20 @@
 source: tests/bundled_session_list.rs
 expression: "view_tree_record::tree(&native)"
 ---
-list cursor=3 scrollbar=false
-  line
-    text "── infra " muted
-    fill '─' muted
-  line
-    text " ○ " status_idle
-    text "parent-elsewhere"
-  line
-    text "── webapp " muted
-    fill '─' muted
-  line
-    text " ○ " bold selected
-    text "↳ " bold selected
-    text "child-here" bold selected
-    fill ' ' bold selected
+list cursor=1 scrollbar=false
+  column
+    line
+      text "── infra " muted
+      fill '─' muted
+    line
+      text " ○ " status_idle
+      text "parent-elsewhere"
+  column
+    line
+      text "── webapp " muted
+      fill '─' muted
+    line
+      text " ○ " bold selected
+      text "↳ " bold selected
+      text "child-here" bold selected
+      fill ' ' bold selected

@@ -2,7 +2,7 @@ use ratatui::{
     layout::Rect,
     style::Style,
     text::{Line, Span},
-    widgets::{List, ListItem, ListState, Paragraph},
+    widgets::Paragraph,
     Frame,
 };
 // Only the retained pre-port oracle (`legacy_session_line` and friends) still
@@ -85,8 +85,6 @@ pub struct LeftPanelState<'a> {
     pub show_selection: bool,
     /// Focus level for the session list.
     pub session_focus: FocusLevel,
-    /// Persistent list state for the session section.
-    pub session_list_state: &'a mut ListState,
     /// Per-session fuzzy match positions (parallel to sessions slice).
     pub session_match_positions: &'a [Option<SessionMatch>],
     /// Whether a (global) search is active — non-matching rows are dimmed.
@@ -114,7 +112,7 @@ pub struct LeftPanelState<'a> {
 pub fn render_left_panel(
     frame: &mut Frame,
     area: Rect,
-    state: &mut LeftPanelState<'_>,
+    state: &LeftPanelState<'_>,
 ) -> Vec<super::RowHitbox> {
     // The session list fills the whole left panel — search lives in the global
     // `Ctrl+/` strip now, so there's no in-list search bar.
@@ -125,7 +123,6 @@ pub fn render_left_panel(
         state.active_session,
         state.show_selection,
         state.session_focus,
-        state.session_list_state,
         state.session_match_positions,
         state.session_search_active,
         state.headers,
@@ -133,73 +130,6 @@ pub fn render_left_panel(
         state.spinner_frame,
         state.pending_spawn,
     )
-}
-
-/// Overlay scroll indicators ("^" N" / "v N") on the block borders when items
-/// are clipped above or below, using per-item heights to compute the visible
-/// range. Renders right-aligned on the top/bottom border lines, consuming no
-/// content space.
-fn render_scroll_indicators_variable(
-    frame: &mut Frame,
-    block_area: Rect,
-    list_state: &ListState,
-    heights: &[u16],
-) {
-    let offset = list_state.offset().min(heights.len());
-    let inner_height = block_area.height.saturating_sub(2);
-    let visible_count = visible_count_from_heights(heights, offset, inner_height);
-
-    let items_above = offset;
-    let items_below = heights.len().saturating_sub(offset + visible_count);
-
-    draw_scroll_indicators(frame, block_area, items_above, items_below);
-}
-
-/// Count how many items starting at `offset` fit entirely within `inner_height`.
-fn visible_count_from_heights(heights: &[u16], offset: usize, inner_height: u16) -> usize {
-    let mut consumed: u16 = 0;
-    let mut count = 0usize;
-    for &h in heights.iter().skip(offset) {
-        let next = consumed.saturating_add(h);
-        if next > inner_height {
-            break;
-        }
-        consumed = next;
-        count += 1;
-    }
-    count
-}
-
-fn draw_scroll_indicators(
-    frame: &mut Frame,
-    block_area: Rect,
-    items_above: usize,
-    items_below: usize,
-) {
-    let indicator_style = Style::default().fg(Theme::text_muted());
-
-    if items_above > 0 {
-        let text = format!("\u{25b2} {items_above} ");
-        let text_len = text.chars().count() as u16;
-        let x = block_area
-            .x
-            .saturating_add(block_area.width.saturating_sub(text_len + 1));
-        let area = Rect::new(x, block_area.y, text_len, 1);
-        frame.render_widget(Paragraph::new(text).style(indicator_style), area);
-    }
-
-    if items_below > 0 {
-        let text = format!("\u{25bc} {items_below} ");
-        let text_len = text.chars().count() as u16;
-        let x = block_area
-            .x
-            .saturating_add(block_area.width.saturating_sub(text_len + 1));
-        let y = block_area
-            .y
-            .saturating_add(block_area.height.saturating_sub(1));
-        let area = Rect::new(x, y, text_len, 1);
-        frame.render_widget(Paragraph::new(text).style(indicator_style), area);
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -210,7 +140,6 @@ fn render_session_section(
     active_index: usize,
     show_selection: bool,
     level: FocusLevel,
-    list_state: &mut ListState,
     match_positions: &[Option<SessionMatch>],
     search_active: bool,
     headers: &[Option<String>],
@@ -242,10 +171,10 @@ fn render_session_section(
     // Available width inside the block (subtract 2 for borders)
     let inner_width = area.width.saturating_sub(2) as usize;
 
-    // Rows as view-tree nodes, then painted through the same inline walk a plugin
-    // pane's line goes through — so a `Fill`'s residue lands in the same column
-    // here and in the bundled plugin that reproduces this pane. The nodes are held
-    // for the whole function because the spans borrow them.
+    // Rows as view-tree nodes, painted through the same renderer a plugin pane's
+    // tree goes through — so the window, the row rects and every cell inside a row
+    // are resolved once, here and in the bundled plugin that reproduces this pane
+    // (ADR-63).
     let items_data = resolve_items(
         &RowInputs {
             sessions,
@@ -261,41 +190,10 @@ fn render_session_section(
     let palette = super::theme::current();
     let frames = spinner_frames(spinner_frame);
 
-    // One entry per widget item: a group header travels with the row below it, so
-    // clicking the header selects that group's first session.
-    let mut item_nodes: Vec<Vec<ViewNode>> = Vec::with_capacity(sessions.len());
-    let mut pending_header: Option<ViewNode> = None;
-    for item in &items_data {
-        match item {
-            SessionListItem::Header(label) => pending_header = Some(group_header_node(label)),
-            SessionListItem::Session(_) => {
-                let mut nodes = Vec::new();
-                nodes.extend(pending_header.take());
-                nodes.push(session_item_node(item));
-                item_nodes.push(nodes);
-            }
-        }
-    }
-
-    let mut item_heights: Vec<u16> = item_nodes.iter().map(|n| n.len() as u16).collect();
-    let mut items: Vec<ListItem> = item_nodes
-        .iter()
-        .map(|nodes| {
-            ListItem::new(
-                nodes
-                    .iter()
-                    .map(|node| {
-                        Line::from(super::plugin_pane::line_spans(
-                            node,
-                            inner_width as u16,
-                            &palette,
-                            &frames,
-                        ))
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect();
+    // One list child per item: a group header travels with the row below it, so
+    // it scrolls with that row, clicking it selects that group's first session,
+    // and the two panes count the same number of rows.
+    let mut children = session_list_items(&items_data);
 
     // The session being created, slotted into the repo group it will land in
     // (see `pending_spawn_slot`) so it appears where it will actually live
@@ -304,111 +202,97 @@ fn render_session_section(
     // indices stay a valid range over `sessions`.
     let pending_row = pending_spawn.map(|pending| {
         let slot = pending_spawn_slot(sessions, headers, &pending.repo_display_names);
-        let mut lines = Vec::new();
+        let row = pending_spawn_node(pending, inner_width, spinner);
         // A group with no rows yet brings its own header, so the placeholder is
         // filed under a label instead of floating loose at the end.
-        let header_node = slot.header.as_deref().map(group_header_node);
-        if let Some(node) = header_node.as_ref() {
-            lines.push(Line::from(
-                super::plugin_pane::line_spans(node, inner_width as u16, &palette, &frames)
-                    .into_iter()
-                    .map(|s| Span::styled(s.content.into_owned(), s.style))
-                    .collect::<Vec<_>>(),
-            ));
-        }
-        lines.push(pending_spawn_line(pending, inner_width, spinner));
-        item_heights.insert(slot.index, lines.len() as u16);
-        items.insert(slot.index, ListItem::new(lines));
+        let node = match slot.header.as_deref() {
+            Some(label) => ViewNode::Column(vec![group_header_node(label), row]),
+            None => row,
+        };
+        children.insert(slot.index, node);
         slot.index
     });
 
-    // The active-row selection background is painted by the row's own nodes (a
-    // trailing fill, full width), *not* by the List's `highlight_style` —
-    // because `highlight_style` patches the whole item area, which for a row
-    // that carries a prepended repo-group header would bleed the background up
-    // onto that header. Painting it in the row keeps the highlight to the
-    // session line only; the header stays muted regardless of selection.
-    let list = List::new(items).block(block);
-
-    // `active_index` indexes `sessions`; the widget's items may carry an extra
-    // placeholder row, which shifts every item at or after it down by one.
+    // `active_index` indexes `sessions`; the items may carry an extra placeholder
+    // row, which shifts every item at or after it down by one.
     let selected_item = active_index + usize::from(pending_row.is_some_and(|p| p <= active_index));
-    list_state.select(show_selection.then_some(selected_item));
-    frame.render_stateful_widget(list, area, list_state);
+    // The active-row selection background is painted by the row's own nodes (a
+    // trailing fill, full width) rather than by patching the item's whole rect —
+    // which for a row carrying a prepended repo-group header would bleed the
+    // background up onto that header. The header stays muted regardless.
+    let tree = ViewNode::List {
+        children,
+        selected: show_selection.then_some(selected_item),
+        scrollbar: false,
+    };
 
-    render_scroll_indicators_variable(frame, area, list_state, &item_heights);
-
-    // Hitboxes for the rows actually on screen, computed *after* the stateful
-    // render so `list_state.offset()` is the offset ratatui really used. A
-    // 2-line item (group header + session row) gets one hitbox spanning both
-    // lines, so clicking a group header selects that group's first session.
-    let inner = Rect::new(
-        area.x + 1,
-        area.y + 1,
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let painted =
+        super::plugin_pane::render_tree_rows(&tree, inner, &palette, &frames, frame.buffer_mut());
+    // Indicators and hitboxes both come off the paint, so neither can describe a
+    // window other than the one on screen.
+    super::draw_clipped_indicators(
+        frame.buffer_mut(),
+        area,
+        painted.clipped_above,
+        painted.clipped_below,
     );
-    let bottom = inner.y + inner.height;
-    let mut hitboxes = Vec::new();
-    let mut y = inner.y;
-    for (i, &h) in item_heights.iter().enumerate().skip(list_state.offset()) {
-        if y >= bottom || h == 0 {
-            break;
-        }
-        let height = h.min(bottom - y);
-        // Map the row back to its session index: the placeholder occupies a row
-        // but is not a session, so rows after it are shifted by one. It gets no
-        // hitbox itself — clicking a session that doesn't exist yet has nothing
-        // to select — and selection indices stay a valid range over `sessions`.
-        let session_index = match pending_row {
-            Some(p) if i == p => None,
-            Some(p) if i > p => Some(i - 1),
-            _ => Some(i),
-        };
-        if let Some(index) = session_index.filter(|&i| i < sessions.len()) {
-            hitboxes.push(super::RowHitbox {
-                rect: Rect::new(inner.x, y, inner.width, height),
+
+    painted
+        .rows
+        .into_iter()
+        .filter_map(|hit| {
+            // The painter numbers rows from one, in list space. Map each back to
+            // its session index: the placeholder occupies a row but is not a
+            // session, so rows after it are shifted by one. It gets no hitbox
+            // itself — clicking a session that doesn't exist yet has nothing to
+            // select — and selection indices stay a valid range over `sessions`.
+            let item = hit.index - 1;
+            let index = match pending_row {
+                Some(p) if item == p => None,
+                Some(p) if item > p => Some(item - 1),
+                _ => Some(item),
+            }?;
+            (index < sessions.len()).then_some(super::RowHitbox {
+                rect: hit.rect,
                 index,
-            });
-        }
-        y += h;
-    }
-    hitboxes
+            })
+        })
+        .collect()
 }
 
 /// The placeholder row for a session still being created: a spinner, the name
 /// we know it by so far, and the phase it's blocked on. Muted throughout — it is
 /// not selectable, and shouldn't read as a live session.
-fn pending_spawn_line(
+///
+/// The spinner is the frame the caller resolved rather than a declared motion:
+/// this row is not a session, so it has no identity for a motion lease to key on
+/// and the pane rebuilds it each paint anyway.
+fn pending_spawn_node(
     pending: &crate::app::PendingSpawn,
     inner_width: usize,
     spinner: &str,
-) -> Line<'static> {
+) -> ViewNode {
     let phase = pending.phase.short_label();
     // A spinner only while something is actually running; waiting on the user at
     // a modal gets a static glyph (distinct from the ○/● of a live session).
-    let (glyph, glyph_color) = if pending.phase.is_working() {
-        (spinner, Theme::status_working())
+    let (glyph, glyph_token) = if pending.phase.is_working() {
+        (spinner, StyleToken::StatusWorking)
     } else {
-        ("◌", Theme::text_muted())
+        ("\u{25cc}", StyleToken::Muted)
     };
-    let mut spans = vec![
-        Span::styled(format!(" {glyph} "), Style::default().fg(glyph_color)),
-        Span::styled(
-            pending.label.clone(),
-            Style::default().fg(Theme::text_secondary()),
-        ),
+    let mut runs = vec![
+        ViewNode::token(format!(" {glyph} "), glyph_token),
+        ViewNode::token(pending.label.clone(), StyleToken::Secondary),
     ];
     // Drop the phase text rather than overflow a narrow panel; the spinner and
     // the badge in the status row still carry the "in progress" signal.
     let used = 3 + pending.label.chars().count();
     if inner_width > used + phase.chars().count() + 2 {
-        spans.push(Span::styled(
-            format!("  {phase}"),
-            Style::default().fg(Theme::text_muted()),
-        ));
+        runs.push(ViewNode::token(format!("  {phase}"), StyleToken::Muted));
     }
-    Line::from(spans)
+    ViewNode::Line(runs)
 }
 
 /// Render the centered "no sessions yet" placeholder inside the given block.
@@ -522,23 +406,45 @@ fn fit_status_text(text: &str, used_before: usize, inner_width: usize) -> Option
 /// exactly.
 ///
 /// The cursor is declared on the list so the *kernel* windows it, which is how a
-/// pane that is never told its height scrolls (ADR-30). The native pane hands its
-/// nodes to a ratatui list instead and keeps its own offset — see
-/// `render_session_section` — so the two window by different rules, which is
-/// the one divergence the port records.
+/// pane that is never told its height scrolls (ADR-30). Since ADR-63 the native
+/// pane paints this same tree through the same renderer, so the two window by one
+/// rule rather than two.
 pub fn session_list_tree(items: &[SessionListItem]) -> ViewNode {
+    let children = session_list_items(items);
+    // The cursor's index counts **items**, which is why the fold above has to
+    // happen before this: a header is part of the row it heads, not a row of its
+    // own.
     let selected = items
         .iter()
+        .filter(|item| matches!(item, SessionListItem::Session(_)))
         .position(|item| matches!(item, SessionListItem::Session(row) if row.selected));
-    ViewNode::selectable_list(items.iter().map(session_item_node).collect(), selected)
+    ViewNode::selectable_list(children, selected)
 }
 
-/// One item's node: a group header, or a session row.
-pub fn session_item_node(item: &SessionListItem) -> ViewNode {
-    match item {
-        SessionListItem::Header(label) => group_header_node(label),
-        SessionListItem::Session(row) => session_row_node(row),
+/// The list's children: one per session row, with a repo-group header folded into
+/// the row it heads.
+///
+/// A header is not a row of the list. It scrolls with its group's first session,
+/// a click on it selects that session, and the window counts it as part of that
+/// one item — which is what makes an index mean the same row in this pane and in
+/// the plugin reproducing it. Expressible since ADR-61, which taught the kernel's
+/// windowing rule to measure an item in rows.
+fn session_list_items(items: &[SessionListItem]) -> Vec<ViewNode> {
+    let mut children = Vec::with_capacity(items.len());
+    let mut pending_header: Option<ViewNode> = None;
+    for item in items {
+        match item {
+            SessionListItem::Header(label) => pending_header = Some(group_header_node(label)),
+            SessionListItem::Session(row) => {
+                let node = session_row_node(row);
+                children.push(match pending_header.take() {
+                    Some(header) => ViewNode::Column(vec![header, node]),
+                    None => node,
+                });
+            }
+        }
     }
+    children
 }
 
 /// A full-width repo-group header: `── label ──────────`.
@@ -961,7 +867,6 @@ mod tests {
         let n2 = info("n2");
         let backend = ratatui::backend::TestBackend::new(30, 12);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        let mut list_state = ListState::default();
         let mut hitboxes = Vec::new();
         terminal
             .draw(|f| {
@@ -971,12 +876,11 @@ mod tests {
                 hitboxes = render_left_panel(
                     f,
                     Rect::new(0, 0, 30, 12),
-                    &mut LeftPanelState {
+                    &LeftPanelState {
                         sessions: &ordered.sessions,
                         active_session: ordered.active_index,
                         show_selection: true,
                         session_focus: FocusLevel::Focused,
-                        session_list_state: &mut list_state,
                         session_match_positions: &ordered.match_positions,
                         session_search_active: false,
                         headers: ordered.headers,
@@ -992,6 +896,93 @@ mod tests {
         assert_eq!(hitboxes[0].index, 0);
         assert_eq!(hitboxes[1].rect, Rect::new(1, 3, 28, 1));
         assert_eq!(hitboxes[1].index, 1);
+    }
+
+    /// Render the pane at `w x h` with `n` single-group sessions, the cursor on
+    /// `active`, and hand back the painted cells plus the hitboxes.
+    fn draw_pane(
+        infos: &[SessionInfo],
+        active: usize,
+        w: u16,
+        h: u16,
+    ) -> (ratatui::buffer::Buffer, Vec<super::super::RowHitbox>) {
+        let backend = ratatui::backend::TestBackend::new(w, h);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut hitboxes = Vec::new();
+        terminal
+            .draw(|f| {
+                let sessions: Vec<&SessionInfo> = infos.iter().collect();
+                let order = compute_session_order(&sessions);
+                let no_matches = vec![None; sessions.len()];
+                let ordered = OrderedSessions::from_order(&sessions, &order, &no_matches, active);
+                hitboxes = render_left_panel(
+                    f,
+                    Rect::new(0, 0, w, h),
+                    &LeftPanelState {
+                        sessions: &ordered.sessions,
+                        active_session: ordered.active_index,
+                        show_selection: true,
+                        session_focus: FocusLevel::Focused,
+                        session_match_positions: &ordered.match_positions,
+                        session_search_active: false,
+                        headers: ordered.headers,
+                        depths: ordered.depths,
+                        spinner_frame: 0,
+                        pending_spawn: None,
+                    },
+                );
+            })
+            .unwrap();
+        (terminal.backend().buffer().clone(), hitboxes)
+    }
+
+    fn row_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
+    }
+
+    /// The clipped-row indicators are the window's, and the window is the kernel's
+    /// shared rule — so what the border reports is what `visible_item_window`
+    /// left off screen, counted in **items** (a header travels with its row).
+    #[test]
+    fn the_border_reports_the_window_the_shared_rule_chose() {
+        // Twelve sessions in one group, so item 0 is two lines and the rest one:
+        // thirteen lines into six rows of content.
+        let infos: Vec<SessionInfo> = (0..12).map(|i| info(&format!("s{i}"))).collect();
+        let (buf, hitboxes) = draw_pane(&infos, 11, 30, 8);
+
+        let heights = |i: usize| usize::from(i == 0) + 1;
+        let (start, end) = super::super::visible_item_window(12, heights, 11, 6);
+        assert!(start > 0 && end == 12, "the fixture must overflow above");
+
+        assert!(
+            row_text(&buf, 0).contains(&format!("\u{25b2} {start} ")),
+            "top border should report the items above: {:?}",
+            row_text(&buf, 0)
+        );
+        assert!(
+            !row_text(&buf, 7).contains('\u{25bc}'),
+            "nothing is clipped below when the window reaches the tail: {:?}",
+            row_text(&buf, 7)
+        );
+        // And the hitboxes describe the same slice, in session space.
+        assert_eq!(hitboxes.first().map(|h| h.index), Some(start));
+        assert_eq!(hitboxes.last().map(|h| h.index), Some(11));
+    }
+
+    /// The cursor is always on screen, whichever end of a long list it is at —
+    /// the property the convergence must not lose.
+    #[test]
+    fn the_cursor_is_on_screen_at_either_end() {
+        let infos: Vec<SessionInfo> = (0..20).map(|i| info(&format!("s{i}"))).collect();
+        for active in [0usize, 9, 19] {
+            let (_, hitboxes) = draw_pane(&infos, active, 30, 8);
+            assert!(
+                hitboxes.iter().any(|h| h.index == active),
+                "cursor {active} was windowed off screen: {hitboxes:?}"
+            );
+        }
     }
 
     // --- line builder ---
@@ -1708,44 +1699,5 @@ mod tests {
             },
             "the very first session labels its own group"
         );
-    }
-
-    // --- visible_count_from_heights ---
-
-    #[test]
-    fn visible_count_fits_all_items_when_tall_enough() {
-        let heights = [3u16, 1, 1, 3];
-        assert_eq!(visible_count_from_heights(&heights, 0, 100), 4);
-    }
-
-    #[test]
-    fn visible_count_stops_when_next_item_would_overflow() {
-        // 3 + 1 + 1 = 5, next 3 would push to 8 > 6 → stop.
-        let heights = [3u16, 1, 1, 3];
-        assert_eq!(visible_count_from_heights(&heights, 0, 6), 3);
-    }
-
-    #[test]
-    fn visible_count_honors_offset() {
-        let heights = [3u16, 1, 1, 3];
-        // Skip first item, budget 4 → fits 1 + 1 + 2? only 1+1=2 then 3 overflows (2+3=5>4) → 2.
-        assert_eq!(visible_count_from_heights(&heights, 1, 4), 2);
-    }
-
-    #[test]
-    fn visible_count_zero_when_first_item_overflows() {
-        let heights = [5u16, 1];
-        assert_eq!(visible_count_from_heights(&heights, 0, 3), 0);
-    }
-
-    #[test]
-    fn visible_count_empty_heights() {
-        assert_eq!(visible_count_from_heights(&[], 0, 10), 0);
-    }
-
-    #[test]
-    fn visible_count_offset_past_end() {
-        let heights = [1u16, 1];
-        assert_eq!(visible_count_from_heights(&heights, 5, 10), 0);
     }
 }

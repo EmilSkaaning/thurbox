@@ -418,8 +418,7 @@ impl App {
 
         // While the global-search strip is open, highlight the session list from
         // the global query (live). Otherwise there are no match positions (the
-        // session list has no local search of its own anymore). Own the query so
-        // it doesn't conflict with the `&mut session_list_state` borrow below.
+        // session list has no local search of its own anymore).
         let global_query: Option<String> = self.global_search_query().map(|q| q.to_string());
         let global_match_positions: Vec<Option<session_list::SessionMatch>> = match &global_query {
             Some(q) => self
@@ -469,12 +468,11 @@ impl App {
         let rows = project_list::render_left_panel(
             frame,
             left_area,
-            &mut project_list::LeftPanelState {
+            &project_list::LeftPanelState {
                 sessions: &ordered.sessions,
                 active_session: ordered.active_index,
                 show_selection,
                 session_focus: list_focus,
-                session_list_state: &mut self.session_list_state,
                 session_match_positions: &ordered.match_positions,
                 session_search_active,
                 headers: ordered.headers,
@@ -730,13 +728,16 @@ impl App {
             .cloned()
             .unwrap_or_default();
         match pane.tree() {
-            Some(tree) => crate::ui::plugin_pane::render_tree_rows(
-                tree,
-                inner,
-                &palette,
-                &frames,
-                frame.buffer_mut(),
-            ),
+            Some(tree) => {
+                crate::ui::plugin_pane::render_tree_rows(
+                    tree,
+                    inner,
+                    &palette,
+                    &frames,
+                    frame.buffer_mut(),
+                )
+                .rows
+            }
             None => {
                 // Never rendered: say which, rather than showing an empty box the
                 // user cannot tell from a working-but-quiet plugin.

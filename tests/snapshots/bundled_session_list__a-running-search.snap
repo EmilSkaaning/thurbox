@@ -2,16 +2,17 @@
 source: tests/bundled_session_list.rs
 expression: "view_tree_record::tree(&native)"
 ---
-list cursor=3 scrollbar=false
-  line
-    text "── thurbox " muted
-    fill '─' muted
-  line
-    text " ○ " status_idle
-    text "h" accent bold underline
-    text "ost "
-    text "t" accent bold underline
-    text "ests"
+list cursor=2 scrollbar=false
+  column
+    line
+      text "── thurbox " muted
+      fill '─' muted
+    line
+      text " ○ " status_idle
+      text "h" accent bold underline
+      text "ost "
+      text "t" accent bold underline
+      text "ests"
   line
     motion cycle key="spinner" keyed_by_id=true fps=8 repeat=true
       text " ⠋ " muted

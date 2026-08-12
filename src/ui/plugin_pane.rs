@@ -586,7 +586,29 @@ fn render_stacked(
 #[derive(Default)]
 struct RowSink {
     rows: Vec<RowHitbox>,
+    clipped_above: usize,
+    clipped_below: usize,
     claimed: bool,
+}
+
+/// What painting a pane's tree produced: its clickable rows, and how much of its
+/// outermost list the window left off screen.
+///
+/// The counts come out of the **paint** rather than being recomputed afterwards,
+/// for the reason the hitboxes do: the kernel windows a list that names its
+/// cursor, and a second walk would have to reproduce that arithmetic — which is
+/// exactly the second implementation that let a pane and its reproduction
+/// disagree about which rows are on screen. Both are zero for a tree with no
+/// list, and for a list that fits.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PaneRows {
+    /// One hitbox per drawn row of the outermost list, carrying that row's
+    /// **1-based index in the whole list**.
+    pub rows: Vec<RowHitbox>,
+    /// Rows of that list the window left above the drawn slice.
+    pub clipped_above: usize,
+    /// Rows of that list the window left below it.
+    pub clipped_below: usize,
 }
 
 /// Draw a view tree into `area`.
@@ -606,7 +628,8 @@ pub fn render_tree(
 }
 
 /// Draw a view tree and report its clickable rows: one hitbox per row of the
-/// **outermost** list, carrying that row's **1-based index in the whole list**.
+/// **outermost** list, carrying that row's **1-based index in the whole list** —
+/// plus how many rows of that list the window left off screen either side.
 ///
 /// Derived from what was painted rather than recomputed afterwards: the kernel
 /// windows a list that names its cursor (ADR-30), so a second walk would have to
@@ -622,10 +645,15 @@ pub fn render_tree_rows(
     palette: &ThemePalette,
     frames: &FrameTable,
     buf: &mut ratatui::buffer::Buffer,
-) -> Vec<RowHitbox> {
+) -> PaneRows {
     let mut sink = Some(RowSink::default());
     paint(node, area, palette, frames, buf, &mut sink);
-    sink.map(|s| s.rows).unwrap_or_default()
+    sink.map(|s| PaneRows {
+        rows: s.rows,
+        clipped_above: s.clipped_above,
+        clipped_below: s.clipped_below,
+    })
+    .unwrap_or_default()
 }
 
 /// The painter both entry points share; `rows` is `Some` only when the caller
@@ -797,6 +825,13 @@ fn paint(
                     // never become the pane's rows by being the first one with
                     // children in it.
                     sink.claimed = true;
+                    // The window, reported as the two counts a reader of the
+                    // border wants: rows they cannot see above, and below.
+                    // Counted from what the stack actually laid out rather than
+                    // from `end`, so a slice the pane ran out of room for is
+                    // reported as clipped rather than as drawn.
+                    sink.clipped_above = start;
+                    sink.clipped_below = children.len().saturating_sub(start + drawn.len());
                     sink.rows = drawn
                         .iter()
                         .enumerate()
@@ -1681,7 +1716,7 @@ mod tests {
     fn row_hits(node: &ViewNode, w: u16, h: u16) -> Vec<RowHitbox> {
         let rect = area(w, h);
         let mut buf = Buffer::empty(rect);
-        render_tree_rows(node, rect, &palette(), &FrameTable::default(), &mut buf)
+        render_tree_rows(node, rect, &palette(), &FrameTable::default(), &mut buf).rows
     }
 
     #[test]
@@ -1699,6 +1734,50 @@ mod tests {
         assert_eq!(hits[1].index, 2);
         assert_eq!(hits[1].rect.y, 1);
         assert_eq!(hits[2].index, 3);
+    }
+
+    /// The paint reports what the window left off screen, so a caller drawing the
+    /// pane's frame can put `\u{25b2} N` / `\u{25bc} N` on it without resolving the
+    /// window a second time — which is what let a native pane and its reproduction
+    /// disagree about which rows were on screen (ADR-63).
+    #[test]
+    fn a_windowed_list_reports_what_it_clipped() {
+        let rect = area(20, 4);
+        let painted = |selected: usize| {
+            let list = ViewNode::selectable_list(
+                (0..10).map(|i| ViewNode::text(format!("r{i}"))).collect(),
+                Some(selected),
+            );
+            let mut buf = Buffer::empty(rect);
+            render_tree_rows(&list, rect, &palette(), &FrameTable::default(), &mut buf)
+        };
+
+        let top = painted(0);
+        assert_eq!((top.clipped_above, top.clipped_below), (0, 6));
+        let bottom = painted(9);
+        assert_eq!((bottom.clipped_above, bottom.clipped_below), (6, 0));
+        // The two always account for the whole list alongside what was drawn.
+        assert_eq!(
+            bottom.clipped_above + bottom.rows.len() + bottom.clipped_below,
+            10
+        );
+    }
+
+    /// A list that fits clips nothing, and a tree with no list has no window to
+    /// report — so a pane drawing neither gets no indicators rather than zeroes
+    /// that mean something else.
+    #[test]
+    fn a_list_that_fits_and_a_tree_with_none_clip_nothing() {
+        let rect = area(20, 6);
+        for tree in [
+            ViewNode::selectable_list(vec![ViewNode::text("only")], Some(0)),
+            ViewNode::text("no list here"),
+        ] {
+            let mut buf = Buffer::empty(rect);
+            let painted =
+                render_tree_rows(&tree, rect, &palette(), &FrameTable::default(), &mut buf);
+            assert_eq!((painted.clipped_above, painted.clipped_below), (0, 0));
+        }
     }
 
     /// A row taller than one line owns every line it drew, so a click anywhere in

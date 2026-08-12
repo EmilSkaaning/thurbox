@@ -563,8 +563,14 @@ fn the_compared_tree_is_a_whole_pane() {
         }
         other => panic!("expected a list, got {}", other.kind_name()),
     };
-    // Two sessions plus the group header that opens their group.
-    assert_eq!(children.len(), 3, "{tree:#?}");
+    // Two sessions: two rows, with the group header folded into the first of
+    // them rather than standing as a row of its own (ADR-63).
+    assert_eq!(children.len(), 2, "{tree:#?}");
+    assert_eq!(
+        children[0].kind_name(),
+        "column",
+        "a group's first row carries its header inside the same child: {tree:#?}"
+    );
 
     let mut kinds = Vec::new();
     fn walk(node: &ViewNode, out: &mut Vec<&'static str>) {
@@ -576,8 +582,12 @@ fn the_compared_tree_is_a_whole_pane() {
         assert!(kinds.contains(&expected), "no {expected} in {tree:#?}");
     }
     // Enough runs that a single text node could not have carried the row, which is
-    // why a row is a `line` at all.
-    let runs: usize = children.iter().map(|r| r.children().len()).sum();
+    // why a row is a `line` at all. Counted over lines rather than over the list's
+    // children, since a child may now be a column of two lines.
+    let runs: usize = kinds
+        .iter()
+        .filter(|k| **k == "text" || **k == "fill")
+        .count();
     assert!(runs >= 10, "{tree:#?}");
 }
 
@@ -671,20 +681,25 @@ fn the_empty_pane_is_the_one_place_the_plugin_differs() {
     assert_eq!(session_list_tree(&[]), ViewNode::list(Vec::new()));
 }
 
-/// **Enumerated divergence 2: which rows are on screen.** The native pane hands
-/// its nodes to a ratatui list, which keeps the cursor visible with its own sticky
-/// offset and can draw a two-line item; the plugin declares the cursor's row and
-/// the *kernel* windows the list (ADR-30). Both keep the cursor visible; they do
-/// not agree on which other rows are beside it, and the plugin's index counts the
-/// group headers the native pane folds into the row below.
+/// **The divergence that closed: which rows are on screen.** The native pane used
+/// to hand its nodes to a ratatui list, which kept the cursor visible with its own
+/// sticky offset over items it folded a header into; the plugin declared the
+/// cursor's row over flat children and the *kernel* windowed the list (ADR-30).
+/// Both kept the cursor visible and neither agreed on which other rows were beside
+/// it, nor on how many rows there were.
 ///
-/// Closing it would mean moving the native pane off its list widget, which is what its
-/// scroll offsets, its border indicators, its click hitboxes and the pending-spawn
-/// placeholder's position are all derived from — Phase 6 work, not a port's. It is
-/// `the-window-is-the-list-widgets` in the handover gate, which is where that work is
-/// enumerated, and it is one of the two rows deciding that verdict (ADR-57).
+/// ADR-63 converged the **pane** onto the kernel's rule: it paints the same tree
+/// through the same renderer, folds a header into the row it heads exactly as the
+/// plugin now does, and reads its window off the paint. So this case asserts the
+/// opposite of what it used to — at a height where the list overflows, both panes
+/// draw the same rows and clip the same counts.
+///
+/// Kept as a case of its own rather than folded into the equality above, because
+/// the equality runs at a size where nothing windows
+/// (`the_comparison_size_adjusts_nothing`): an equal tree is not by itself a claim
+/// about scrolling, and this is the one that is.
 #[test]
-fn the_two_panes_window_a_long_list_by_different_rules() {
+fn the_two_panes_window_a_long_list_by_one_rule() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
     let host = host();
     let rows: Vec<Row> = (0..8)
@@ -699,32 +714,46 @@ fn the_two_panes_window_a_long_list_by_different_rules() {
     let case = case("tall", rows, 7);
     thurbox::session::pane_context::publish(case.context(WIDE));
 
-    let (children, selected) = match render(&host) {
+    let plugin = render(&host);
+    let native = case.native_tree(WIDE);
+    let (children, selected) = match &plugin {
         ViewNode::List {
             children, selected, ..
-        } => (children.len(), selected),
+        } => (children.len(), *selected),
         other => panic!("expected a list, got {}", other.kind_name()),
     };
-    // Eight rows plus the one group header, and the cursor's row is declared as a
-    // child index that counts that header.
-    assert_eq!(children, 9);
+    // Eight sessions in one group: eight rows, the header folded into the first,
+    // and the cursor's row is the last of them.
+    assert_eq!(children, 8);
+    assert_eq!(selected, Some(7));
     assert_eq!(
-        selected,
-        Some(8),
-        "the cursor's row is the last child, header included"
+        plugin, native,
+        "the trees must agree before the windows can"
     );
 
-    // The native pane's list carries the same nine lines, as eight items — the
-    // header travels with the row below it, which is what its hitboxes are built
-    // from.
-    let items = case.resolve(WIDE).items;
-    assert_eq!(items.len(), 9);
-    assert_eq!(
-        items
-            .iter()
-            .filter(|i| matches!(i, SessionListItem::Header(_)))
-            .count(),
-        1
+    // And the window: at nine rows of room the nine lines (a header plus eight
+    // rows) do not fit, so both panes clip — by the same rule, to the same slice.
+    let painted = |tree: &ViewNode| {
+        let rect = ratatui::layout::Rect::new(0, 0, WIDE as u16, 7);
+        let mut buf = ratatui::buffer::Buffer::empty(rect);
+        thurbox::ui::plugin_pane::render_tree_rows(
+            tree,
+            rect,
+            &thurbox::session::theme_config::ThemePreset::Default.palette(),
+            &thurbox::session::motion::FrameTable::default(),
+            &mut buf,
+        )
+    };
+    let from_plugin = painted(&plugin);
+    let from_native = painted(&native);
+    assert_eq!(from_plugin, from_native);
+    assert!(
+        from_plugin.clipped_above > 0,
+        "the fixture must actually overflow, or this asserts nothing: {from_plugin:?}"
+    );
+    assert!(
+        from_plugin.rows.iter().any(|r| r.index == 8),
+        "both must keep the cursor's row on screen: {from_plugin:?}"
     );
 }
 
@@ -812,10 +841,11 @@ fn the_host_surface_needed_no_new_node() {
         node.children().iter().for_each(|c| walk(c, out));
     }
     walk(&tree, &mut kinds);
-    // The whole pane is four node kinds, every one of which predates this change.
+    // The whole pane is five node kinds, every one of which predates this change
+    // — `column` included, which is how a header rides with the row it heads.
     assert_eq!(
         kinds.into_iter().collect::<Vec<_>>(),
-        vec!["fill", "line", "list", "text"],
+        vec!["column", "fill", "line", "list", "text"],
         "a new node kind here means the catalogue was widened for this pane, \
          which is the opposite of the result this test records"
     );

@@ -2,14 +2,15 @@
 source: tests/bundled_session_list.rs
 expression: "view_tree_record::tree(&native)"
 ---
-list cursor=3 scrollbar=false
-  line
-    text "── thurbox " muted
-    fill '─' muted
-  line
-    text " ○ " status_idle
-    text "⇅ " accent
-    text "remote-only"
+list cursor=2 scrollbar=false
+  column
+    line
+      text "── thurbox " muted
+      fill '─' muted
+    line
+      text " ○ " status_idle
+      text "⇅ " accent
+      text "remote-only"
   line
     text " ○ " status_idle
     text "⑂ " branch

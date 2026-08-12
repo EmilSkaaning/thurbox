@@ -163,6 +163,52 @@ pub(crate) fn visible_item_window(
     }
 }
 
+/// Overlay `▲ N` / `▼ N` on a block's top and bottom border rows, right-aligned
+/// one column in from the edge, when a list inside it clipped rows away.
+///
+/// The counts are **items**, not lines: a row that stacks a header above a
+/// session is one clipped row, which is what a reader counting the rows they
+/// cannot see means. Painted on the border rather than inside it so the
+/// indicator costs no content row.
+///
+/// Beside [`visible_item_window`] in the layer's vocabulary for that helper's
+/// reason: the counts are a function of the window, and the window is resolved
+/// in one place. A seated plugin pane's frame is drawn by the host, so the same
+/// painter serves a pane whose renderer is a plugin.
+///
+/// A buffer rather than a `Frame`, because the view-tree painter has only the
+/// buffer and the two must not diverge on where the glyphs land.
+pub(crate) fn draw_clipped_indicators(
+    buf: &mut ratatui::buffer::Buffer,
+    block_area: Rect,
+    above: usize,
+    below: usize,
+) {
+    use ratatui::widgets::Widget as _;
+
+    let style = Style::default().fg(Theme::text_muted());
+    let mut draw = |text: String, y: u16| {
+        let width = text.chars().count() as u16;
+        let x = block_area
+            .x
+            .saturating_add(block_area.width.saturating_sub(width + 1));
+        Paragraph::new(text)
+            .style(style)
+            .render(Rect::new(x, y, width, 1), buf);
+    };
+    if above > 0 {
+        draw(format!("\u{25b2} {above} "), block_area.y);
+    }
+    if below > 0 {
+        draw(
+            format!("\u{25bc} {below} "),
+            block_area
+                .y
+                .saturating_add(block_area.height.saturating_sub(1)),
+        );
+    }
+}
+
 /// Build one `RowHitbox` per single-line entry of a vertically packed list that
 /// has been windowed to the visible range `start..end` — the common shape for
 /// the tasks/automations panes. The first visible entry (`start`) is drawn at

@@ -3323,3 +3323,55 @@ the view tree entirely when there are no sessions, and the bundled plugin still 
 left-aligned rows — adopting the node moves a recording, which is the handover's to move.
 `the_empty_pane_is_the_one_place_the_plugin_differs` is kept for exactly that distinction,
 and now fails if one pane adopts the node and the other does not.
+
+## 38. The other half of the window row: the pane converges, not the rule (ADR-63)
+
+§36 closed the half of `the-window-is-the-list-widgets` that was about **identity** — a
+plugin could not say "these two lines are one row", and after ADR-61 it can. §37 was about
+a different pane. This section closes the half that was about **policy**, which was the
+session list's last structural blocker.
+
+**The disagreement.** The kernel's shared rule opens a margin above the cursor and clamps
+at the list's tail; ratatui's `List` holds its offset until the cursor leaves the
+viewport. At 40 sessions in a 30-row pane the widget does not scroll until the cursor
+reaches row 28, while the shared rule scrolls after three keypresses. Both keep the cursor
+visible. Neither agrees about which rows sit beside it — in the pane whose selection
+decides what the central pane, the info column, the file viewer and the code review are
+all showing.
+
+**The direction the refusal left open.** `migration/phase-4` forbids closing this by
+redefining the kernel's helper, because that helper is what every plugin list and three
+seated panes scroll by. It says nothing about the pane — and the pane is what the handover
+deletes. So the pane moved: `render_session_section` paints its list through
+`ui::plugin_pane::render_tree_rows`, the window is `visible_item_window` for both
+occupants, and the three behaviours that used to hang off `ListState::offset()` are read
+off that one paint.
+
+| Was derived from the widget's offset | Is derived from the paint |
+|---|---|
+| which rows are painted | the painter's own slice |
+| `▲ N` / `▼ N` on the border | the counts `render_tree_rows` now reports |
+| click hitboxes | the rects `render_stacked` returned, one per item |
+| the placeholder's index | an index into the same folded items the window counts |
+
+**Why in its own change.** The frame rule (ADR-53, `migration/handover`) already says a
+native pane whose frame differs from the host's converges onto the host's frame *before*
+its handover, so the handover can claim that which code draws a pane changed and nothing
+else did. A window is the same kind of property. Converging inside the handover would give
+every moved cell two candidate causes.
+
+**What a user sees.** An overflowing session list opens a margin above the cursor instead
+of holding a sticky offset. After this, thurbox has one windowing rule for every list it
+draws; the session list was the last pane with its own.
+
+**What moved in the recordings.** Eleven `bundled_session_list__*.snap` files, all
+regenerated from the **native** tree — the provenance edge that only exists while
+`session_list_tree` does (ADR-48). The enumerated divergence in the port becomes its
+opposite: `the_two_panes_window_a_long_list_by_one_rule` asserts equal trees, an equal
+drawn slice and equal clipped counts at a height where the list overflows.
+
+**What is left.** Three rows, every one **vocabulary**, and `the_verdict_is_derived_from_the_blockers`
+now asserts that nothing structural remains: `no-pane-chrome` (the one-dot-per-session
+strip and the clipped-row indicators, on a frame a plugin does not draw), `no-pending-spawn-row`
+(the placeholder for a session still being created, and the slot it lands in), and
+`non-ascii-whitespace-is-the-kernels-trim`.
