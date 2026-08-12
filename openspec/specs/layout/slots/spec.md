@@ -92,6 +92,14 @@ kernel flag would break: a `bool` kept after its renderer was deleted can still 
 "something occupies this" when nothing does, and the layout would place a column no
 one paints.
 
+A seat MAY have a **second kernel occupant** — a transient kernel surface that takes the
+seat for as long as it is present, such as a review's changed-files list occupying the
+file viewer's column for as long as a review is open. Where one exists, the seat's carve
+condition SHALL be the disjunction "a pane claims it **or** the transient surface is
+present", so the column is placed for either occupant with the geometry it has always
+had. The transient surface's presence MUST NOT change the seat's size or position: it is
+the same seat with a different painter, exactly as a handover is.
+
 #### Scenario: Only the kernel's pane wants the seat
 
 - **WHEN** the kernel's own pane for a seat is on and no plugin pane claims it
@@ -119,6 +127,20 @@ one paints.
 - **WHEN** a plugin pane claims the seat of a pane that sits inside a column
 - **THEN** it is drawn in that pane's position in the column, not appended after the
   column's other occupants
+
+#### Scenario: A transient kernel surface wants a seat no pane claims
+
+- **WHEN** a seat's transient kernel occupant is present and no plugin pane claims the
+  seat
+- **THEN** the seat is placed with its usual geometry, so the transient surface is drawn
+  where that column has always been
+
+#### Scenario: A transient kernel surface and a claim want the seat at once
+
+- **WHEN** a seat's transient kernel occupant is present and a plugin pane also claims
+  the seat
+- **THEN** the seat is placed exactly once, with the same geometry, and which of the two
+  is painted is decided by the precedence rule rather than by the layout
 
 ### Requirement: The lower-left band's height is a row count, not an occupant
 
