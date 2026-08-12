@@ -33,11 +33,14 @@
 --    `ui.fill`, whose width the host resolves, and the list scrolls because the
 --    last line hands the cursor's row back.
 --
--- What this pane deliberately does *not* draw is the native pane's chrome — its
+-- What this pane deliberately does *not* draw is the native pane's chrome: its
 -- bordered block, the one-dot-per-session strip on that border, and the clipped-row
--- indicators — and the placeholder row for a session still being created. The
--- first three are a pane's frame, which is the host's; the last is a row for a
--- record that does not exist yet, inserted at an index the kernel computes.
+-- indicators. All three are a pane's frame, which is the host's.
+--
+-- It *does* draw the placeholder row for a session still being created — the only
+-- thing on screen saying a slow spawn is in flight. That row arrives in the
+-- published list, at the position the real row will occupy, because where it goes
+-- depends on which repos the session will span and this pane is not told them.
 --
 -- A repo-group header is **not** a row of the list: it is emitted inside the same
 -- child as the session it heads (a `ui.column` of the two), so it scrolls with
@@ -75,6 +78,17 @@ local SPINNER_FPS = 8
 -- Keys the spinner's phase. Identity is per pane, so this string coordinates with
 -- nothing outside this file.
 local SPINNER_ID = "spinner"
+
+-- Keys the placeholder row's spinner. A second key rather than `SPINNER_ID`
+-- shared, because the two nodes have different signatures and sharing a key would
+-- make one's phase depend on which of them was pushed last. There is at most one
+-- spawn in flight, so one key is enough for it.
+local PENDING_ID = "pending"
+
+-- The glyph for a spawn that is waiting on the *user* rather than on a job — a
+-- turning spinner there would be a lie, and it must not read as either ○ or ● of a
+-- live session.
+local PENDING_IDLE_GLYPH = "◌"
 
 -- A session whose agent runs on another machine, and one on its own worktree.
 -- Each carries the single trailing space that keeps it off the name.
@@ -259,6 +273,31 @@ local function headerNode(label: string): ViewNode
     })
 end
 
+-- The row for a session that does not exist yet: a spinner, whatever names it so
+-- far, and the phase it is on. Muted throughout — it is not selectable and must not
+-- read as a live session.
+--
+-- The spinner is declared, exactly as a working row's is: there is no call by which
+-- this plugin could ask for a frame, and a frozen glyph on the interface's only
+-- progress surface for a slow spawn would be worse than none.
+local function pendingNode(row: SessionRow, phase: string): ViewNode
+    local runs: { ViewNode } = {}
+    if row.status.name == "working" then
+        local frames: { ViewNode } = {}
+        for _, frame in ipairs(SPINNER_FRAMES) do
+            table.insert(frames, ui.text(" " .. frame .. " ", "status_working"))
+        end
+        table.insert(runs, ui.cycle(PENDING_ID, frames, SPINNER_FPS))
+    else
+        table.insert(runs, ui.text(" " .. PENDING_IDLE_GLYPH .. " ", "muted"))
+    end
+    table.insert(runs, ui.text(row.name, "secondary"))
+    -- Thurbox drops the phase rather than overflowing a narrow column, which needs
+    -- a width this pane is never told — so when it is absent there is nothing here.
+    table.insert(runs, ui.text(SEPARATOR .. phase, "muted"))
+    return ui.line(runs)
+end
+
 local function rowNode(row: SessionRow): ViewNode
     local runs: { ViewNode } = { statusGlyph(row) }
 
@@ -322,7 +361,10 @@ return {
         local selected: number? = nil
         for _, row in ipairs(rows) do
             local group = row.group
-            local node = rowNode(row)
+            -- A phase label is what marks a spawn in flight; a real session's row
+            -- never carries one, so this is the whole branch.
+            local phase = row.pendingPhase
+            local node = if phase then pendingNode(row, phase) else rowNode(row)
             if group then
                 node = ui.column({ headerNode(group), node })
             end

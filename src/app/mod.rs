@@ -7773,7 +7773,10 @@ impl App {
         use crate::session::pane_context as pc;
 
         let all: Vec<&SessionInfo> = self.sessions.iter().map(|s| &s.info).collect();
-        if all.is_empty() {
+        // A first session being created has no rows to order but is not an empty
+        // list: its placeholder is the only thing on screen saying so, which is the
+        // state a fresh install spends its first slow `worktree add` in.
+        if all.is_empty() && self.pending_spawn.is_none() {
             return pc::SessionListSnapshot::default();
         }
 
@@ -7821,8 +7824,12 @@ impl App {
                 | InputFocus::AutomationEditor
                 | InputFocus::AutomationRunHistory
         );
-        let rows =
-            crate::session::session_list::resolve_rows(&crate::session::session_list::RowInputs {
+        // The placeholder for a session still being created rides in the same
+        // sequence, at the slot the model resolves — so a pane draws the interface's
+        // only progress surface for a non-blocking spawn, in the group the session
+        // will land in, without being told which repos that is (ADR-68).
+        let rendered = crate::session::session_list::resolve_rows_with_pending(
+            &crate::session::session_list::RowInputs {
                 sessions: &ordered.sessions,
                 active_index: ordered.active_index,
                 show_selection,
@@ -7830,26 +7837,62 @@ impl App {
                 search_active: query.is_some(),
                 headers: ordered.headers,
                 depths: ordered.depths,
-            });
-
-        pc::SessionListSnapshot::bounded(rows.into_iter().zip(&ordered.sessions).map(
-            |((group, row), info)| pc::SessionRowSnapshot {
-                name: row.name,
-                status: pc::StatusSnapshot::of(row.status),
-                group,
-                depth: row.depth,
-                cross_group_child: row.cross_group_child,
-                remote: row.remote,
-                worktree: row.worktree,
-                selected: row.selected,
-                dimmed: row.dimmed,
-                match_positions: row.name_matches,
-                // Both texts, unresolved: which of them a row shows is the pane's
-                // rule, and it has the status name it needs to apply it.
-                activity: info.agent_activity.clone(),
-                notification: info.notification.clone(),
             },
-        ))
+            self.pending_spawn
+                .as_ref()
+                .map(|p| p.repo_display_names.as_slice()),
+        );
+
+        pc::SessionListSnapshot::bounded(rendered.into_iter().filter_map(|entry| {
+            match entry {
+                crate::session::session_list::RenderedRow::Session { header, row, index } => {
+                    let info = ordered.sessions.get(index)?;
+                    Some(pc::SessionRowSnapshot {
+                        name: row.name,
+                        status: pc::StatusSnapshot::of(row.status),
+                        group: header,
+                        depth: row.depth,
+                        cross_group_child: row.cross_group_child,
+                        remote: row.remote,
+                        worktree: row.worktree,
+                        selected: row.selected,
+                        dimmed: row.dimmed,
+                        match_positions: row.name_matches,
+                        // Both texts, unresolved: which of them a row shows is the
+                        // pane's rule, and it has the status name it needs to apply
+                        // it.
+                        activity: info.agent_activity.clone(),
+                        notification: info.notification.clone(),
+                        pending_phase: None,
+                    })
+                }
+                crate::session::session_list::RenderedRow::Pending { header } => {
+                    let pending = self.pending_spawn.as_ref()?;
+                    Some(pc::SessionRowSnapshot {
+                        name: pending.label.clone(),
+                        // The kernel's own answer to "is something happening" — a
+                        // spinner turning while the wizard waits on the user would
+                        // be a lie, and there is no agent to ask.
+                        status: pc::StatusSnapshot::of(if pending.phase.is_working() {
+                            SessionStatus::Working
+                        } else {
+                            SessionStatus::Idle
+                        }),
+                        group: header,
+                        depth: 0,
+                        cross_group_child: false,
+                        remote: false,
+                        worktree: false,
+                        selected: false,
+                        dimmed: false,
+                        match_positions: Vec::new(),
+                        activity: None,
+                        notification: None,
+                        pending_phase: Some(pending.phase.short_label().to_string()),
+                    })
+                }
+            }
+        }))
     }
 
     /// The open review's diff lines as the published snapshot carries them.

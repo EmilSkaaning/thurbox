@@ -490,6 +490,9 @@ fn build_session_row(lua: &Lua, row: &SessionRowSnapshot) -> mlua::Result<Table>
     // all) is the pane's rule, not the kernel's.
     set_opt(&t, "activity", row.activity.clone())?;
     set_opt(&t, "notification", row.notification.clone())?;
+    // Absent on every session's row, which is what lets a pane write
+    // `if row.pendingPhase then` and draw a placeholder there instead (ADR-68).
+    set_opt(&t, "pendingPhase", row.pending_phase.clone())?;
     Ok(t)
 }
 
@@ -822,6 +825,7 @@ mod tests {
             match_positions: Vec::new(),
             activity: None,
             notification: None,
+            pending_phase: None,
         }
     }
 
@@ -906,7 +910,7 @@ mod tests {
             assert!(!row.get::<bool>(flag).unwrap(), "{flag}");
         }
         // An absent value is an absent key, which is the other half of the rule.
-        for absent in ["group", "activity", "notification"] {
+        for absent in ["group", "activity", "notification", "pendingPhase"] {
             assert!(row.get::<mlua::Value>(absent).unwrap().is_nil(), "{absent}");
         }
         // And an empty match list is still a table, so `ipairs` needs no guard.
@@ -918,6 +922,42 @@ mod tests {
         let lua = Lua::new();
         let table = session_list_table(&lua, &PaneContext::default()).unwrap();
         assert_eq!(table.get::<Table>("rows").unwrap().raw_len(), 0);
+    }
+
+    /// A spawn in flight crosses as a row like any other, carrying the one fact
+    /// that tells a pane it is not a session (ADR-68). Its presence is the flag, so
+    /// the row needs no boolean beside it.
+    #[test]
+    fn a_spawn_in_flight_crosses_as_a_row_with_its_phase() {
+        let lua = Lua::new();
+        let ctx = session_list_context(vec![
+            session_row("live", SessionStatus::Idle),
+            SessionRowSnapshot {
+                group: Some("infra".to_string()),
+                pending_phase: Some("creating\u{2026}".to_string()),
+                ..session_row("feat/x", SessionStatus::Working)
+            },
+        ]);
+        let rows: Table = session_list_table(&lua, &ctx).unwrap().get("rows").unwrap();
+
+        let live: Table = rows.get(1).unwrap();
+        assert!(
+            live.get::<mlua::Value>("pendingPhase").unwrap().is_nil(),
+            "a real session's row must carry no phase, or the branch is ambiguous"
+        );
+
+        let pending: Table = rows.get(2).unwrap();
+        assert_eq!(
+            pending.get::<String>("pendingPhase").unwrap(),
+            "creating\u{2026}"
+        );
+        // Its group crosses like any first-of-group row, so a pane draws the header
+        // above it without knowing which repos the spawn will span.
+        assert_eq!(pending.get::<String>("group").unwrap(), "infra");
+        // And the status is the *kernel's* answer to "is something happening", which
+        // is what decides between a spinner and a static glyph.
+        let status: Table = pending.get("status").unwrap();
+        assert_eq!(status.get::<String>("name").unwrap(), "working");
     }
 
     // ── the open file tree ──

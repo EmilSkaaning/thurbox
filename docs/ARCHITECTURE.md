@@ -4528,3 +4528,71 @@ seam.
 
 **What is left.** One row: `no-pending-spawn-row`, the placeholder a spawning session
 renders as, inside the repo group it will land in.
+
+## ADR-68: The row for a session that does not exist yet is published, not derived
+
+**Context.** ADR-P12 made the whole new-session flow non-blocking: the `git fetch`, the
+`git worktree add`, the backend ready-up and the spawn all run on workers, which on a large
+repo is tens of seconds. The **only** thing on screen saying the session is coming is a
+placeholder row in the session list, inside the repo group it will land in. A
+`status_message` was tried and rejected — those expire after five seconds, so a long
+`worktree add` went silent partway through and the app looked idle.
+
+`tests/session_list_pane_handover_gap.rs` held it as the pane's last row,
+`no-pending-spawn-row`: nothing in the published row said "this is a spawn in flight", and
+the slot was `ui::project_list::pending_spawn_slot` over `App::pending_spawn`. A handover
+that lost the row would restore the exact defect ADR-P12 removed.
+
+**Decision.** `SessionRowSnapshot.pending_phase: Option<String>` — the compact phase label,
+`None` on every session's row — and the placeholder rides **in the published list**, at the
+position the model resolves.
+
+**Its presence is the flag.** A boolean beside an optional phase would admit two states that
+cannot happen (a pending row with no phase, a phase on a real session) and leave a pane to
+decide which it trusts. `SpawnPhase::short_label` is total, so the option carries the flag
+exactly. Whether the spawn is *running* rides on the status the row already has: the kernel
+publishes `Working` while a job churns and `Idle` while the wizard waits at a modal, which is
+its own answer to "is something happening" rather than an agent's — there is no agent yet,
+and it is the only thing the glyph distinguishes.
+
+**The slot moves to the model**, beside `compute_session_order`, whose answer it mirrors: the
+placeholder lands where the *real* row will, which is that comparator's definition. ADR-60
+explicitly excluded it while the windowing seam it fed was open; ADR-63 settled that seam, so
+`migration/handover` now says an excluded part is relocated in the change that closes the row
+it waited on, rather than being carried into the handover.
+
+**One traversal places it.** `resolve_rows_with_pending` is what the pane, the publication and
+the oracle all read. Three independent insertions could put the placeholder in three different
+groups with nothing to catch the disagreement — and the placement is the whole difficulty of
+the row, since a pane is never told which repos the spawn will span.
+
+**Its spinner becomes declared motion**, keyed `pending`. The native pane resolved a frame by
+hand, on the recorded grounds that the row "has no identity for a motion lease to key on and
+the pane rebuilds it each paint anyway". Both halves are answerable: identity is per **pane**
+and there is at most one spawn in flight, and an identical re-push keeps its epoch — which is
+the rule a working session's glyph already relies on. The decisive half is that a plugin
+cannot be handed a frame (ADR-P2a), so a placeholder drawn by a plugin either declares motion
+or does not move, and a frozen spinner on this flow's only progress surface is the defect
+ADR-P12 exists to prevent. The node is only the glyph, so walking `Branches → Worktree →
+Spawning` keeps one lease and one phase; a pause at a modal drops the lease, because a
+non-working phase is a static `◌` — correctly, since a spinner turning while the app waits on
+the user would be a lie.
+
+**Why not.**
+
+| Alternative | Why not |
+|---|---|
+| Reuse `activity` for the phase | Documented as what the session's *agent* emitted, and a spawn has no agent. A pane could not then tell a phase label from a real activity title, which is what decides the glyph *and* the row's shape. |
+| A section of its own (`PaneContext.pending_spawn` with an index) | Every consumer would merge two lists in the same order to draw one, and a plugin merging them differently would file the placeholder under the wrong group with nothing to catch it. The section is defined as "every row the session list renders, in the order it renders them", and this is a row the session list renders. |
+| Make the placeholder selectable | It has no `SessionId`. It occupies a list child, shifts the cursor's index, and can never *be* the cursor. |
+| Leave the fit to the plugin via `ellipsize` | The phase is *dropped* rather than truncated below the threshold, which needs a width. It stays the pane's and dies with the module; a plugin's copy hard-clips at the pane edge instead, which is stated rather than discovered. |
+
+**What did not change.** No capability — the row went into the `sessions` section a pane
+already reads, and the rule is worth stating for the third time on this pane: **a section
+grows, a grant does not.** The native pane is still what thurbox draws, and the click
+arithmetic a handed-over pane needs (a published row index is not a render-order index once a
+placeholder sits among them) stays in its hitbox filter, because nothing clicks a reproduction
+that declares no keyboard.
+
+**What is left.** Nothing. Every row of the session list's handover gate is closed, and the
+gate's own verdict is inverted to say so.

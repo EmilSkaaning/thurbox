@@ -67,7 +67,8 @@ use thurbox::session::pane_context::{
     PaneContext, SessionListSnapshot, SessionRowSnapshot, StatusSnapshot,
 };
 use thurbox::session::session_list::{
-    compute_session_order, resolve_rows, OrderedSessions, RowInputs, SessionMatch,
+    compute_session_order, resolve_rows_with_pending, OrderedSessions, RenderedRow, RowInputs,
+    SessionMatch,
 };
 use thurbox::session::view_tree::ViewNode;
 use thurbox::session::{SessionId, SessionInfo, SessionStatus, WorktreeInfo};
@@ -76,6 +77,11 @@ use thurbox::ui::project_list::{session_list_tree, SessionListItem};
 /// A column wide enough that the geometry step fits nothing, and a height that
 /// windows nothing. Both are checked rather than trusted.
 const WIDE: usize = 80;
+
+/// The phase a pending case's spawn is on. One label for every such case: the
+/// phase's *text* is not what these cases are about, and a fixture that varied it
+/// would vary two recordings for one reason.
+const PENDING_PHASE: &str = "creating\u{2026}";
 
 /// The recorder that turns a view tree into the checked-in expectation, shared
 /// with the other panes that record one (see its module note for why this is
@@ -130,6 +136,9 @@ struct Case {
     show_selection: bool,
     /// Whether a search is running (which is what dims a non-matching row).
     searching: bool,
+    /// A spawn in flight: its label, the repo it will land in, and whether a
+    /// background job is running (as opposed to the wizard waiting at a modal).
+    pending: Option<(&'static str, &'static str, bool)>,
 }
 
 fn case(name: &'static str, rows: Vec<Row>, active: usize) -> Case {
@@ -139,6 +148,7 @@ fn case(name: &'static str, rows: Vec<Row>, active: usize) -> Case {
         active,
         show_selection: true,
         searching: false,
+        pending: None,
     }
 }
 
@@ -206,32 +216,75 @@ impl Case {
             depths: ordered.depths,
         };
 
-        // The published rows come from the *same* `resolve_rows` the pane's
-        // geometry step builds on, mirroring `App::build_session_list_snapshot`:
-        // the kernel is what knows which row opens a group and which the cursor is
-        // on, so publishing that per row is what stops the plugin having to
-        // reconstruct a rule it cannot see the inputs to.
-        let rows = resolve_rows(&inputs)
+        // The published rows come from the *same* `resolve_rows_with_pending` the
+        // pane's geometry step builds on, mirroring
+        // `App::build_session_list_snapshot`: the kernel is what knows which row
+        // opens a group, which the cursor is on, and where a spawn in flight lands,
+        // so publishing that per row is what stops the plugin having to reconstruct
+        // a rule it cannot see the inputs to.
+        let pending_repos: Option<Vec<String>> =
+            self.pending.map(|(_, repo, _)| vec![repo.to_string()]);
+        let rows = resolve_rows_with_pending(&inputs, pending_repos.as_deref())
             .into_iter()
-            .zip(&ordered.sessions)
-            .map(|((group, row), info)| SessionRowSnapshot {
-                name: row.name,
-                status: StatusSnapshot::of(row.status),
-                group,
-                depth: row.depth,
-                cross_group_child: row.cross_group_child,
-                remote: row.remote,
-                worktree: row.worktree,
-                selected: row.selected,
-                dimmed: row.dimmed,
-                match_positions: row.name_matches,
-                activity: info.agent_activity.clone(),
-                notification: info.notification.clone(),
+            .filter_map(|entry| match entry {
+                RenderedRow::Session { header, row, index } => {
+                    let info = ordered.sessions.get(index)?;
+                    Some(SessionRowSnapshot {
+                        name: row.name,
+                        status: StatusSnapshot::of(row.status),
+                        group: header,
+                        depth: row.depth,
+                        cross_group_child: row.cross_group_child,
+                        remote: row.remote,
+                        worktree: row.worktree,
+                        selected: row.selected,
+                        dimmed: row.dimmed,
+                        match_positions: row.name_matches,
+                        activity: info.agent_activity.clone(),
+                        notification: info.notification.clone(),
+                        pending_phase: None,
+                    })
+                }
+                RenderedRow::Pending { header } => {
+                    let (label, _, working) = self.pending?;
+                    Some(SessionRowSnapshot {
+                        name: label.to_string(),
+                        status: StatusSnapshot::of(if working {
+                            SessionStatus::Working
+                        } else {
+                            SessionStatus::Idle
+                        }),
+                        group: header,
+                        depth: 0,
+                        cross_group_child: false,
+                        remote: false,
+                        worktree: false,
+                        selected: false,
+                        dimmed: false,
+                        match_positions: Vec::new(),
+                        activity: None,
+                        notification: None,
+                        pending_phase: Some(PENDING_PHASE.to_string()),
+                    })
+                }
             })
             .collect();
 
         Resolved {
-            items: thurbox::ui::project_list::resolve_items(&inputs, inner_width),
+            items: thurbox::ui::project_list::resolve_items(
+                &inputs,
+                self.pending
+                    .zip(pending_repos.as_deref())
+                    .map(
+                        |((label, _, working), repos)| thurbox::ui::project_list::PendingInputs {
+                            label,
+                            phase: PENDING_PHASE,
+                            working,
+                            repo_display_names: repos,
+                        },
+                    ),
+                inner_width,
+            ),
             snapshot: SessionListSnapshot { rows },
         }
     }
@@ -445,6 +498,25 @@ fn cases() -> Vec<Case> {
                 ..row("orphan", SessionStatus::Idle, "")
             }],
             ..case("a session with no repo", Vec::new(), 0)
+        },
+        // A spawn in flight, landing in a group that already has rows: the
+        // placeholder goes at that group's *end* — where the real row will appear —
+        // rather than below every other group, and reuses the existing header.
+        Case {
+            pending: Some(("feat/x", "thurbox", true)),
+            rows: vec![
+                row("first", SessionStatus::Idle, "thurbox"),
+                row("elsewhere", SessionStatus::Idle, "website"),
+            ],
+            ..case("a spawn joining a group", Vec::new(), 0)
+        },
+        // A spawn for a repo with no rows yet: last in the list, bringing its own
+        // header — and waiting on the *user*, so its glyph is static rather than a
+        // spinner.
+        Case {
+            pending: Some(("infra", "infra", false)),
+            rows: vec![row("first", SessionStatus::Idle, "thurbox")],
+            ..case("a spawn opening its own group", Vec::new(), 0)
         },
     ]
 }

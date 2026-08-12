@@ -1,0 +1,34 @@
+---
+source: tests/bundled_session_list.rs
+expression: "view_tree_record::tree(&native)"
+---
+list cursor=0 scrollbar=false
+  column
+    line
+      text "── thurbox " muted
+      fill '─' muted
+    line
+      text " ○ " bold selected
+      text "first" bold selected
+      fill ' ' bold selected
+  line
+    motion cycle key="pending" keyed_by_id=true fps=8 repeat=true
+      text " ⠋ " status_working
+      text " ⠙ " status_working
+      text " ⠹ " status_working
+      text " ⠸ " status_working
+      text " ⠼ " status_working
+      text " ⠴ " status_working
+      text " ⠦ " status_working
+      text " ⠧ " status_working
+      text " ⠇ " status_working
+      text " ⠏ " status_working
+    text "feat/x" secondary
+    text "  creating…" muted
+  column
+    line
+      text "── website " muted
+      fill '─' muted
+    line
+      text " ○ " status_idle
+      text "elsewhere"

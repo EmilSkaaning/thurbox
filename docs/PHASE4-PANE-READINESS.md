@@ -3533,3 +3533,41 @@ let a pane that is nobody's reproduction request thurbox's session summary on it
 **What is left on this pane.** One row: `no-pending-spawn-row` — the placeholder a spawning
 session renders as, inside the repo group it will land in, at an index
 `ui::project_list::pending_spawn_slot` computes over `App::pending_spawn`.
+
+## 43. The last row: the placeholder for a session that does not exist yet (ADR-68)
+
+One row was left on the session list, and it was the one that mattered most for its size.
+ADR-P12 made the new-session flow non-blocking, and the placeholder row is the **only**
+thing on screen saying a spawn that can run for tens of seconds is in flight — a
+`status_message` was tried and expires after five seconds, which is how a long
+`worktree add` came to look like an idle app.
+
+**The row is published, and its presence is the flag.** `pending_phase` carries the compact
+phase label and is absent on every session's row, so a pane writes one branch and cannot
+reach an impossible state. Whether the spawn is *running* rides on the status the row already
+has — the kernel's own answer to "is something happening", not an agent's, since there is no
+agent yet.
+
+**The placement is the difficulty, and it stays the kernel's.** The placeholder goes at the
+*end of the repo group it will join*, bringing its own header when that group has no rows
+yet, because that is where the real row will appear. A pane is never told which repos the
+spawn will span, so it could not derive that — and `resolve_rows_with_pending` is now the one
+traversal the pane, the publication and the oracle all read, so the answer cannot be resolved
+three ways.
+
+**The slot left the renderer**, beside the comparator whose answer it mirrors. ADR-60
+excluded it while the windowing seam it fed was open; ADR-63 settled that seam, so the
+relocation lands here rather than inside the handover — and `migration/handover` now says so
+as a rule instead of leaving it to the next author.
+
+**Its spinner became declared motion.** The native pane resolved a frame by hand because the
+row "has no identity for a motion lease to key on"; identity is per pane and there is at most
+one spawn in flight, so `pending` suffices. What settles it is that a plugin cannot be handed
+a frame — so a placeholder drawn by a plugin either declares motion or does not move.
+
+**No capability was added**, for the third time on this pane: the row went into the
+`sessions` section a pane already reads.
+
+**What is left on this pane.** Nothing. Every row of
+`tests/session_list_pane_handover_gap.rs` is closed, and that gate's verdict is inverted to
+record it: the session list is portable, and the handover is the next change.

@@ -15,66 +15,16 @@ use super::theme::Theme;
 use super::{focus_block, FocusLevel};
 use crate::session::motion::{FrameTable, Motion, DEFAULT_FPS};
 use crate::session::view_tree::{StyleToken, TextStyle, ViewNode};
-// The pane's *model* — the order, the reorder, the sort, the match positions and the
-// width-free row — lives in the kernel's pure-data layer, because keyboard navigation
-// depends on it and rendering must not be a dependency of the model (ADR-60). What is
-// left in this module is the drawing, plus the two things that need a width.
+// The pane's *model* — the order, the reorder, the sort, the match positions, the
+// width-free rows and the placeholder's slot — lives in the kernel's pure-data layer,
+// because keyboard navigation depends on it and rendering must not be a dependency of the
+// model (ADR-60/68). What is left in this module is the drawing, plus the fits that need a
+// width.
 use crate::session::session_list::{
-    agent_status_text, group_key, repo_set_display, repo_set_key, resolve_rows, RowInputs,
-    SessionMatch, SessionRow,
+    agent_status_text, resolve_rows_with_pending, PendingRow, RenderedRow, RowInputs, SessionMatch,
+    SessionRow,
 };
 use crate::session::{SessionInfo, SessionStatus};
-
-/// Where a still-being-created session's placeholder row belongs, and whether it
-/// needs to bring its own repo header along.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingSpawnSlot {
-    /// Index into the rendered rows to insert *before*; `rows` (the length) puts
-    /// it last.
-    pub index: usize,
-    /// The group header to draw above the placeholder — `Some` only when the
-    /// session opens a repo group that has no rows yet, so an existing group's
-    /// header is never duplicated.
-    pub header: Option<String>,
-}
-
-/// Place a pending session's placeholder row under the header of the repo group
-/// it will join, rather than trailing the whole list.
-///
-/// It lands at the **end of its group** — the same place the real row will
-/// appear, since a brand-new session has no `display_order` and so sorts after
-/// its ordered siblings (see `session_list::compute_session_order`). A group that doesn't
-/// exist yet is appended last with its own header, which is exactly where
-/// `compute_session_order` will put it once the session lands (a group's order
-/// key is its lowest member `display_order`, and an unordered one is `i64::MAX`).
-///
-/// `repo_names` is the pending session's repo display names; `sessions`/`headers`
-/// are the already-ordered rows.
-pub fn pending_spawn_slot(
-    sessions: &[&SessionInfo],
-    headers: &[Option<String>],
-    repo_names: &[String],
-) -> PendingSpawnSlot {
-    let key = repo_set_key(repo_names);
-    // Scan for the group's last row: group membership is contiguous in the
-    // rendered order, so the run ends at the next header (or the list's end).
-    let start = sessions.iter().position(|info| group_key(info) == key);
-    match start {
-        Some(start) => {
-            let end = (start + 1..sessions.len())
-                .find(|&i| headers.get(i).is_some_and(Option::is_some))
-                .unwrap_or(sessions.len());
-            PendingSpawnSlot {
-                index: end,
-                header: None,
-            }
-        }
-        None => PendingSpawnSlot {
-            index: sessions.len(),
-            header: Some(repo_set_display(repo_names)),
-        },
-    }
-}
 
 pub struct LeftPanelState<'a> {
     pub sessions: &'a [&'a SessionInfo],
@@ -174,7 +124,9 @@ fn render_session_section(
     // Rows as view-tree nodes, painted through the same renderer a plugin pane's
     // tree goes through — so the window, the row rects and every cell inside a row
     // are resolved once, here and in the bundled plugin that reproduces this pane
-    // (ADR-63).
+    // (ADR-63). The placeholder for a session still being created is one of the
+    // resolved items, slotted into the repo group it will land in, so the tree this
+    // pane paints is the whole pane (ADR-68).
     let items_data = resolve_items(
         &RowInputs {
             sessions,
@@ -185,46 +137,24 @@ fn render_session_section(
             headers,
             depths,
         },
+        pending_spawn.map(|pending| PendingInputs {
+            label: &pending.label,
+            phase: pending.phase.short_label(),
+            working: pending.phase.is_working(),
+            repo_display_names: &pending.repo_display_names,
+        }),
         inner_width,
     );
     let palette = super::theme::current();
     let frames = spinner_frames(spinner_frame);
 
-    // One list child per item: a group header travels with the row below it, so
-    // it scrolls with that row, clicking it selects that group's first session,
-    // and the two panes count the same number of rows.
-    let mut children = session_list_items(&items_data);
-
-    // The session being created, slotted into the repo group it will land in
-    // (see `pending_spawn_slot`) so it appears where it will actually live
-    // rather than below every other group. It carries no `SessionInfo`, so it
-    // gets no hitbox below and can never be selected — the list's selection
-    // indices stay a valid range over `sessions`.
-    let pending_row = pending_spawn.map(|pending| {
-        let slot = pending_spawn_slot(sessions, headers, &pending.repo_display_names);
-        let row = pending_spawn_node(pending, inner_width, spinner);
-        // A group with no rows yet brings its own header, so the placeholder is
-        // filed under a label instead of floating loose at the end.
-        let node = match slot.header.as_deref() {
-            Some(label) => ViewNode::Column(vec![group_header_node(label), row]),
-            None => row,
-        };
-        children.insert(slot.index, node);
-        slot.index
-    });
-
-    // `active_index` indexes `sessions`; the items may carry an extra placeholder
-    // row, which shifts every item at or after it down by one.
-    let selected_item = active_index + usize::from(pending_row.is_some_and(|p| p <= active_index));
-    // The active-row selection background is painted by the row's own nodes (a
-    // trailing fill, full width) rather than by patching the item's whole rect —
-    // which for a row carrying a prepended repo-group header would bleed the
-    // background up onto that header. The header stays muted regardless.
-    let tree = ViewNode::List {
-        children,
-        selected: show_selection.then_some(selected_item),
-        scrollbar: false,
-    };
+    // The placeholder occupies a list child but is not a session, so every item at
+    // or after it is shifted by one for both the cursor and the hitboxes below.
+    let pending_row = items_data
+        .iter()
+        .filter(|item| !matches!(item, SessionListItem::Header(_)))
+        .position(|item| matches!(item, SessionListItem::Pending(_)));
+    let tree = session_list_tree(&items_data);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -263,33 +193,38 @@ fn render_session_section(
 }
 
 /// The placeholder row for a session still being created: a spinner, the name
-/// we know it by so far, and the phase it's blocked on. Muted throughout — it is
-/// not selectable, and shouldn't read as a live session.
+/// we know it by so far, and the phase it's on. Muted throughout — it is not
+/// selectable, and shouldn't read as a live session.
 ///
-/// The spinner is the frame the caller resolved rather than a declared motion:
-/// this row is not a session, so it has no identity for a motion lease to key on
-/// and the pane rebuilds it each paint anyway.
-fn pending_spawn_node(
-    pending: &crate::app::PendingSpawn,
-    inner_width: usize,
-    spinner: &str,
-) -> ViewNode {
-    let phase = pending.phase.short_label();
+/// The spinner is **declared motion**, like a working session's glyph, so the
+/// kernel drives it from its own clock. A plugin cannot be handed a frame
+/// (ADR-P2a), so a declaration is the only way this row animates once the pane a
+/// plugin draws is the one on screen — and a frozen spinner on the interface's
+/// only progress surface is the defect ADR-P12 exists to prevent. The key only
+/// has to be unique inside one pane and there is at most one spawn in flight,
+/// which is what the earlier "no identity to key on" objection missed.
+fn pending_spawn_node(row: &PendingRow) -> ViewNode {
     // A spinner only while something is actually running; waiting on the user at
     // a modal gets a static glyph (distinct from the ○/● of a live session).
-    let (glyph, glyph_token) = if pending.phase.is_working() {
-        (spinner, StyleToken::StatusWorking)
+    let glyph = if row.working {
+        let style = token_style(StyleToken::StatusWorking);
+        let frames = super::SPINNER_FRAMES
+            .iter()
+            .map(|f| ViewNode::styled(format!(" {f} "), style))
+            .collect();
+        ViewNode::Motion {
+            key: PENDING_MOTION_KEY.to_string(),
+            keyed_by_id: true,
+            motion: Motion::cycle(frames, DEFAULT_FPS, true),
+        }
     } else {
-        ("\u{25cc}", StyleToken::Muted)
+        ViewNode::token(" \u{25cc} ", StyleToken::Muted)
     };
     let mut runs = vec![
-        ViewNode::token(format!(" {glyph} "), glyph_token),
-        ViewNode::token(pending.label.clone(), StyleToken::Secondary),
+        glyph,
+        ViewNode::token(row.label.clone(), StyleToken::Secondary),
     ];
-    // Drop the phase text rather than overflow a narrow panel; the spinner and
-    // the badge in the status row still carry the "in progress" signal.
-    let used = 3 + pending.label.chars().count();
-    if inner_width > used + phase.chars().count() + 2 {
+    if let Some(phase) = row.phase.as_deref() {
         runs.push(ViewNode::token(format!("  {phase}"), StyleToken::Muted));
     }
     ViewNode::Line(runs)
@@ -313,7 +248,8 @@ fn render_empty_sessions(frame: &mut Frame, area: Rect, block: ratatui::widgets:
     frame.render_widget(text, area);
 }
 
-/// One item of the rendered list: a repo-group header, or a session row.
+/// One item of the rendered list: a repo-group header, a session row, or the
+/// placeholder for a session still being created.
 ///
 /// A flat sequence rather than a header owning its rows, because that is the
 /// shape both consumers want — the native pane prepends a header to the item
@@ -324,6 +260,8 @@ pub enum SessionListItem {
     Header(String),
     /// A session.
     Session(SessionRow),
+    /// A spawn in flight, at the position its real row will occupy.
+    Pending(PendingRow),
 }
 
 /// Separator between the session name and the inline agent status.
@@ -345,23 +283,95 @@ const WORKTREE_MARK: &str = "\u{2442} ";
 /// plugin has to know.
 pub const SPINNER_MOTION_KEY: &str = "spinner";
 
+/// Identity of the pending-spawn placeholder's spinner within the pane.
+///
+/// A second key rather than [`SPINNER_MOTION_KEY`] shared: identity is
+/// `(pane, key, signature)` and these two nodes have different signatures, so
+/// sharing a key would make an epoch depend on which of them rendered last.
+/// There is at most one spawn in flight, so one key suffices for it.
+pub const PENDING_MOTION_KEY: &str = "pending";
+
+/// What the geometry step needs to know about a spawn in flight.
+///
+/// Borrowed strings and a resolved phase label rather than `App::PendingSpawn`,
+/// so the fit below reads the same shape the publication hands a plugin.
+pub struct PendingInputs<'a> {
+    /// Whatever names the session so far.
+    pub label: &'a str,
+    /// The compact phase label, unfitted.
+    pub phase: &'a str,
+    /// A background job is running, as opposed to the wizard waiting at a modal.
+    pub working: bool,
+    /// Repo display names the session will span — what places its row.
+    pub repo_display_names: &'a [String],
+}
+
 /// Resolve the pane's rows for a column `inner_width` wide.
 ///
-/// The **geometry** step: on top of [`resolve_rows`] it decides how much of the
-/// agent's reported text fits after the name, and whether it fits at all. A plugin
-/// never learns its pane's width, so this stays the kernel's —
-/// [`session_list_tree`] below is the part a plugin reproduces.
-pub fn resolve_items(inputs: &RowInputs<'_>, inner_width: usize) -> Vec<SessionListItem> {
-    let mut items = Vec::with_capacity(inputs.sessions.len());
-    for ((header, row), info) in resolve_rows(inputs).into_iter().zip(inputs.sessions) {
+/// The **geometry** step: on top of [`resolve_rows_with_pending`] it decides how
+/// much of the agent's reported text fits after the name, whether it fits at all,
+/// and whether a pending row's phase label fits beside it. A plugin never learns
+/// its pane's width, so this stays the kernel's — [`session_list_tree`] below is
+/// the part a plugin reproduces.
+///
+/// The pending placeholder comes out of the *model*, in the sequence the
+/// publication reads too, rather than being spliced into the finished tree: the
+/// recording that outlives this module has to be able to contain it, and its
+/// position must not be resolved twice (ADR-68).
+pub fn resolve_items(
+    inputs: &RowInputs<'_>,
+    pending: Option<PendingInputs<'_>>,
+    inner_width: usize,
+) -> Vec<SessionListItem> {
+    let rendered =
+        resolve_rows_with_pending(inputs, pending.as_ref().map(|p| p.repo_display_names));
+    let mut items = Vec::with_capacity(rendered.len() + 1);
+    for entry in rendered {
+        let (header, item) = match entry {
+            RenderedRow::Session { header, row, index } => {
+                let status_text = inputs
+                    .sessions
+                    .get(index)
+                    .and_then(|info| agent_status_text(info))
+                    .and_then(|text| fit_status_text(&text, row_used_columns(&row), inner_width));
+                (
+                    header,
+                    SessionListItem::Session(SessionRow { status_text, ..row }),
+                )
+            }
+            RenderedRow::Pending { header } => {
+                // `Pending` is only produced when a spawn was passed, so the
+                // unwrap-shaped `else` cannot describe a reachable state.
+                let Some(pending) = pending.as_ref() else {
+                    continue;
+                };
+                (
+                    header,
+                    SessionListItem::Pending(PendingRow {
+                        label: pending.label.to_string(),
+                        phase: fit_phase_text(pending.phase, pending.label, inner_width),
+                        working: pending.working,
+                    }),
+                )
+            }
+        };
         if let Some(label) = header {
             items.push(SessionListItem::Header(label));
         }
-        let status_text = agent_status_text(info)
-            .and_then(|text| fit_status_text(&text, row_used_columns(&row), inner_width));
-        items.push(SessionListItem::Session(SessionRow { status_text, ..row }));
+        items.push(item);
     }
     items
+}
+
+/// Fit the phase label after the placeholder's name, or drop it.
+///
+/// Dropped rather than truncated: the spinner and the status badge outside the
+/// pane still carry the "in progress" signal, so a two-column stub of `creating…`
+/// is worth less than the name it would push out. The same call the agent's
+/// reported text makes, and it dies with this module for the same reason.
+fn fit_phase_text(phase: &str, label: &str, inner_width: usize) -> Option<String> {
+    let used = STATUS_GLYPH_COLUMNS + label.chars().count();
+    (inner_width > used + phase.chars().count() + 2).then(|| phase.to_string())
 }
 
 /// Columns the row's runs occupy before the agent's text, counted in **chars**.
@@ -414,9 +424,11 @@ pub fn session_list_tree(items: &[SessionListItem]) -> ViewNode {
     // The cursor's index counts **items**, which is why the fold above has to
     // happen before this: a header is part of the row it heads, not a row of its
     // own.
+    // A placeholder is a child too, so it counts here — but it can never *be* the
+    // cursor's row, since there is no session to select.
     let selected = items
         .iter()
-        .filter(|item| matches!(item, SessionListItem::Session(_)))
+        .filter(|item| !matches!(item, SessionListItem::Header(_)))
         .position(|item| matches!(item, SessionListItem::Session(row) if row.selected));
     ViewNode::selectable_list(children, selected)
 }
@@ -433,16 +445,18 @@ fn session_list_items(items: &[SessionListItem]) -> Vec<ViewNode> {
     let mut children = Vec::with_capacity(items.len());
     let mut pending_header: Option<ViewNode> = None;
     for item in items {
-        match item {
-            SessionListItem::Header(label) => pending_header = Some(group_header_node(label)),
-            SessionListItem::Session(row) => {
-                let node = session_row_node(row);
-                children.push(match pending_header.take() {
-                    Some(header) => ViewNode::Column(vec![header, node]),
-                    None => node,
-                });
+        let node = match item {
+            SessionListItem::Header(label) => {
+                pending_header = Some(group_header_node(label));
+                continue;
             }
-        }
+            SessionListItem::Session(row) => session_row_node(row),
+            SessionListItem::Pending(row) => pending_spawn_node(row),
+        };
+        children.push(match pending_header.take() {
+            Some(header) => ViewNode::Column(vec![header, node]),
+            None => node,
+        });
     }
     children
 }
@@ -656,10 +670,12 @@ fn status_text_style(row: &SessionRow) -> TextStyle {
 /// animation without any path back to a VM.
 fn spinner_frames(spinner_frame: usize) -> FrameTable {
     let mut frames = FrameTable::default();
-    frames.set(
-        SPINNER_MOTION_KEY,
-        spinner_frame % super::SPINNER_FRAMES.len(),
-    );
+    let index = spinner_frame % super::SPINNER_FRAMES.len();
+    frames.set(SPINNER_MOTION_KEY, index);
+    // The placeholder's spinner turns in step with the rows', because both are the
+    // same animation of the same clock — a plugin's copy gets two leases and two
+    // epochs instead, which is the one place its frame may differ from this pane's.
+    frames.set(PENDING_MOTION_KEY, index);
     frames
 }
 
@@ -785,7 +801,7 @@ mod tests {
     use super::*;
     // The model these drawing tests build their fixtures from now lives beside the
     // model itself; the pane's own tests still need it to produce a rendered order.
-    use crate::session::session_list::{compute_session_order, OrderedSessions, NO_REPO_GROUP};
+    use crate::session::session_list::{compute_session_order, OrderedSessions};
     use crate::session::SessionStatus;
 
     // --- build_highlighted_spans ---
@@ -851,6 +867,148 @@ mod tests {
         assert_eq!(spans[2].content, "oo-");
         assert_eq!(spans[3].content, "b");
         assert_eq!(spans[4].content, "ar");
+    }
+
+    // --- the pending-spawn placeholder ---
+
+    /// Resolve the items for `sessions` with a spawn landing in `repo`.
+    fn items_with_pending(
+        sessions: &[SessionInfo],
+        repo: &str,
+        working: bool,
+        inner_width: usize,
+    ) -> Vec<SessionListItem> {
+        let refs: Vec<&SessionInfo> = sessions.iter().collect();
+        let order = compute_session_order(&refs);
+        let no_matches = vec![None; refs.len()];
+        let ordered = OrderedSessions::from_order(&refs, &order, &no_matches, 0);
+        let repos = vec![repo.to_string()];
+        resolve_items(
+            &RowInputs {
+                sessions: &ordered.sessions,
+                active_index: ordered.active_index,
+                show_selection: true,
+                match_positions: &ordered.match_positions,
+                search_active: false,
+                headers: ordered.headers,
+                depths: ordered.depths,
+            },
+            Some(PendingInputs {
+                label: "feat/x",
+                phase: "creating\u{2026}",
+                working,
+                repo_display_names: &repos,
+            }),
+            inner_width,
+        )
+    }
+
+    /// A label for each item, so a sequence assertion reads as the pane does.
+    fn item_labels(items: &[SessionListItem]) -> Vec<String> {
+        items
+            .iter()
+            .map(|item| match item {
+                SessionListItem::Header(label) => format!("header {label}"),
+                SessionListItem::Session(row) => format!("session {}", row.name),
+                SessionListItem::Pending(row) => format!("pending {}", row.label),
+            })
+            .collect()
+    }
+
+    fn info_in(name: &str, repo: &str, order: i64) -> SessionInfo {
+        let mut s = SessionInfo::new(name.to_string());
+        s.repo_display_names = vec![repo.to_string()];
+        s.display_order = Some(order);
+        s
+    }
+
+    #[test]
+    fn pending_item_lands_at_the_end_of_its_group() {
+        let sessions = vec![info_in("a", "thurbox", 0), info_in("b", "website", 1)];
+        assert_eq!(
+            item_labels(&items_with_pending(&sessions, "thurbox", true, 40)),
+            vec![
+                "header thurbox",
+                "session a",
+                "pending feat/x",
+                "header website",
+                "session b",
+            ],
+            "the placeholder goes where the real row will, not below every group"
+        );
+    }
+
+    #[test]
+    fn pending_item_for_a_new_group_brings_its_own_header() {
+        let sessions = vec![info_in("a", "thurbox", 0)];
+        assert_eq!(
+            item_labels(&items_with_pending(&sessions, "infra", true, 40)),
+            vec![
+                "header thurbox",
+                "session a",
+                "header infra",
+                "pending feat/x"
+            ],
+        );
+    }
+
+    /// The placeholder is a child of the list, so it shifts the cursor's index —
+    /// and can never be the cursor itself.
+    #[test]
+    fn pending_item_shifts_the_cursor_but_is_never_it() {
+        // The spawn joins `website`, whose row is *after* the cursor's, so the
+        // cursor keeps index 0; joining `thurbox` would push `a` down instead.
+        let sessions = vec![info_in("a", "thurbox", 0), info_in("b", "website", 1)];
+        let tree = session_list_tree(&items_with_pending(&sessions, "website", true, 40));
+        let ViewNode::List {
+            children, selected, ..
+        } = &tree
+        else {
+            panic!("expected a list");
+        };
+        assert_eq!(children.len(), 3, "two sessions and the placeholder");
+        assert_eq!(*selected, Some(0));
+    }
+
+    /// The phase label is dropped rather than overflowing a narrow column — the
+    /// same rule the agent's reported text follows.
+    #[test]
+    fn pending_item_drops_its_phase_in_a_narrow_column() {
+        let sessions = vec![info_in("a", "thurbox", 0)];
+        let wide = items_with_pending(&sessions, "thurbox", true, 40);
+        let narrow = items_with_pending(&sessions, "thurbox", true, 12);
+        let phase = |items: &[SessionListItem]| {
+            items
+                .iter()
+                .find_map(|item| match item {
+                    SessionListItem::Pending(row) => Some(row.phase.clone()),
+                    _ => None,
+                })
+                .expect("a placeholder")
+        };
+        assert_eq!(phase(&wide).as_deref(), Some("creating\u{2026}"));
+        assert_eq!(phase(&narrow), None);
+    }
+
+    /// A spawn waiting at a wizard modal gets a static glyph, not a spinner: a
+    /// turning spinner while the app waits on the *user* would be a lie.
+    #[test]
+    fn a_pending_item_not_working_declares_no_motion() {
+        let sessions = vec![info_in("a", "thurbox", 0)];
+        let has_motion = |working: bool| {
+            let tree = session_list_tree(&items_with_pending(&sessions, "infra", working, 40));
+            fn walk(node: &ViewNode, keys: &mut Vec<String>) {
+                if let ViewNode::Motion { key, .. } = node {
+                    keys.push(key.clone());
+                }
+                node.children().iter().for_each(|c| walk(c, keys));
+            }
+            let mut keys = Vec::new();
+            walk(&tree, &mut keys);
+            keys.contains(&PENDING_MOTION_KEY.to_string())
+        };
+        assert!(has_motion(true), "a running phase animates");
+        assert!(!has_motion(false), "a phase waiting on the user does not");
     }
 
     // --- OrderedSessions ---
@@ -1584,120 +1742,5 @@ mod tests {
         let text = line_text(&session_line(&s, None, false, false, 0, false, 30));
         assert!(!text.contains("activity"));
         assert!(text.trim_end().ends_with("a-rather-long-session-name"));
-    }
-
-    // --- compute_session_order (grouping + manual order) ---
-
-    fn info_repo(name: &str, repo: &str, status: SessionStatus) -> SessionInfo {
-        info_repos(name, &[repo], status)
-    }
-
-    fn info_repos(name: &str, repos: &[&str], status: SessionStatus) -> SessionInfo {
-        let mut s = SessionInfo::new(name.to_string());
-        s.status = status;
-        s.repo_display_names = repos.iter().map(|r| r.to_string()).collect();
-        s
-    }
-
-    /// Build the ordered rows the renderer sees, then place a pending session.
-    fn slot_for(sessions: &[&SessionInfo], repo_names: &[&str]) -> PendingSpawnSlot {
-        let order = compute_session_order(sessions);
-        let ordered: Vec<&SessionInfo> = order.order.iter().map(|&i| sessions[i]).collect();
-        let names: Vec<String> = repo_names.iter().map(|s| s.to_string()).collect();
-        pending_spawn_slot(&ordered, &order.headers, &names)
-    }
-
-    #[test]
-    fn pending_row_lands_at_the_end_of_its_own_repo_group() {
-        // Ordered: infra(c) | webapp(a, b). A session being created for infra
-        // belongs under the infra header, not below webapp.
-        let a = info_repo("a", "webapp", SessionStatus::Working);
-        let b = info_repo("b", "webapp", SessionStatus::Working);
-        let c = info_repo("c", "infra", SessionStatus::Blocked);
-        let sessions = vec![&a, &b, &c];
-
-        assert_eq!(
-            slot_for(&sessions, &["infra"]),
-            PendingSpawnSlot {
-                index: 1,
-                header: None
-            },
-            "slots after infra's last row, reusing the existing header"
-        );
-        assert_eq!(
-            slot_for(&sessions, &["webapp"]),
-            PendingSpawnSlot {
-                index: 3,
-                header: None
-            },
-            "the last group's pending row still goes last"
-        );
-    }
-
-    #[test]
-    fn pending_row_for_a_new_repo_brings_its_own_header() {
-        let a = info_repo("a", "webapp", SessionStatus::Working);
-        let sessions = vec![&a];
-
-        assert_eq!(
-            slot_for(&sessions, &["infra"]),
-            PendingSpawnSlot {
-                index: 1,
-                header: Some("infra".to_string())
-            },
-            "a group with no rows yet is appended, labelled"
-        );
-    }
-
-    /// A pending multi-repo session forms its own group, exactly as the real
-    /// session will — it must not be filed under either constituent repo.
-    #[test]
-    fn pending_multi_repo_row_groups_by_its_repo_set() {
-        let a = info_repo("a", "webapp", SessionStatus::Working);
-        let both = info_repos("both", &["webapp", "infra"], SessionStatus::Working);
-        let sessions = vec![&a, &both];
-
-        // Order is webapp(a) | webapp + infra(both).
-        assert_eq!(
-            slot_for(&sessions, &["webapp", "infra"]),
-            PendingSpawnSlot {
-                index: 2,
-                header: None
-            },
-            "joins the existing multi-repo group"
-        );
-        // Repo-set equality is order-insensitive, matching `group_key`.
-        assert_eq!(
-            slot_for(&sessions, &["infra", "webapp"]).header,
-            None,
-            "the same set in another order is the same group"
-        );
-        assert_eq!(
-            slot_for(&sessions, &["infra"]),
-            PendingSpawnSlot {
-                index: 2,
-                header: Some("infra".to_string())
-            },
-            "a lone infra session is its own group, not the webapp+infra one"
-        );
-    }
-
-    #[test]
-    fn pending_row_with_no_repo_joins_the_no_repo_group() {
-        let a = info_repo("a", "webapp", SessionStatus::Working);
-        let n = info("no-repo");
-        let sessions = vec![&a, &n];
-
-        let slot = slot_for(&sessions, &[]);
-        assert_eq!(slot.header, None, "reuses the existing (no repo) header");
-        let empty: Vec<&SessionInfo> = Vec::new();
-        assert_eq!(
-            pending_spawn_slot(&empty, &[], &[]),
-            PendingSpawnSlot {
-                index: 0,
-                header: Some(NO_REPO_GROUP.to_string())
-            },
-            "the very first session labels its own group"
-        );
     }
 }

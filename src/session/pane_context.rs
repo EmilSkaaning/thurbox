@@ -778,6 +778,23 @@ pub struct SessionRowSnapshot {
     pub activity: Option<String>,
     /// The latest attention notification the session's agent emitted.
     pub notification: Option<String>,
+    /// Set when this row is a session that **does not exist yet** — a spawn in
+    /// flight — carrying the compact label of the phase it is on; `None` on every
+    /// real session's row (ADR-68).
+    ///
+    /// Its presence *is* the flag, rather than a boolean beside it: the phase label
+    /// is always available for a spawn and never meaningful for a session, so two
+    /// fields would admit two states that cannot happen and leave a pane to decide
+    /// which it trusts.
+    ///
+    /// Such a row's [`Self::status`] is the **kernel's** answer to "is something
+    /// happening" (`Working` while a job churns, `Idle` while the wizard waits at a
+    /// modal), not an agent's — there is no agent yet. It is the only thing a
+    /// placeholder's glyph distinguishes, and it is why the row needs no second
+    /// boolean for it.
+    ///
+    /// It is never [`Self::selected`]: there is no session to select.
+    pub pending_phase: Option<String>,
 }
 
 /// The session list a pane draws, in the order the pane renders it.
@@ -1029,6 +1046,7 @@ mod tests {
             match_positions: Vec::new(),
             activity: None,
             notification: None,
+            pending_phase: None,
         };
         let over = SessionListSnapshot::bounded((0..MAX_SESSION_ROWS + 25).map(|_| row()));
         assert_eq!(
@@ -1084,6 +1102,7 @@ mod tests {
             match_positions: Vec::new(),
             activity: None,
             notification: None,
+            pending_phase: None,
         }]);
 
         let mut sampled = base.clone();

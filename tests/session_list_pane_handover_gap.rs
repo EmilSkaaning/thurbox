@@ -29,8 +29,13 @@
 //! what keeps "the widening was unnecessary" distinguishable from "the widening
 //! happened".
 //!
-//! **What decides the verdict now** is [`the_verdict_is_derived_from_the_blockers`]'s
-//! remaining rows, and every one of them is **vocabulary**: nothing structural is left.
+//! **The verdict is now yes**, and nothing was granted to get there. Every row has
+//! closed — the three about the keys on ADR-51's route, the model by ADR-60's
+//! relocation, the window by ADR-63's convergence, the centred line by ADR-62, the trim
+//! by ADR-64, the frame by ADR-67 and the placeholder by ADR-68 — while `Capability`
+//! gained no variant and the module bindings a plugin sees are the ones it saw when this
+//! gate was written. So this file's remaining job is the *opposite* of the one it was
+//! written for: it holds the handover to that record, and fails if a row reopens.
 //!
 //! The last structural row to close was `the-window-is-the-list-widgets`, and it closed
 //! by convergence rather than by a grant. The native pane used to hand its nodes to a
@@ -65,9 +70,9 @@
 //! Three things this gate is deliberately not:
 //!
 //! - it is **not** the teardown gate, which answers whether
-//!   `src/ui/project_list.rs` may be deleted — already no, and no either way. One
-//!   table answering two questions produces failures that do not say which
-//!   question moved;
+//!   `src/ui/project_list.rs` may be deleted — still no, because that gate's condition
+//!   is that the interface no longer draws the native pane, which it does. One table
+//!   answering two questions produces failures that do not say which question moved;
 //! - it is **not** a claim that the pane's rendering is inexpressible. The plugin
 //!   builds the native pane's view tree, spinner included, and since
 //!   `left-column-pane-oracles` that claim is recorded rather than differential
@@ -272,7 +277,10 @@ const BLOCKERS: &[Blocker] = &[
             let painter_draws_the_list = pane.contains("plugin_pane::render_tree_rows(");
             let indicators_come_off_the_paint = pane.contains("painted.clipped_above");
             let hitboxes_come_off_the_paint = pane.contains("let item = hit.index - 1;");
-            let placeholder_is_an_item = pane.contains("children.insert(slot.index");
+            // The placeholder is one of the list's items rather than a node spliced
+            // into the children afterwards. It became an item of the *model* with
+            // ADR-68, so the spelling moved from the insertion to the variant.
+            let placeholder_is_an_item = pane.contains("SessionListItem::Pending(");
             let one_window_rule =
                 source(root, "src/ui/plugin_pane.rs").contains("super::visible_item_window(");
             !(widget_is_gone
@@ -447,23 +455,39 @@ const BLOCKERS: &[Blocker] = &[
         needs: "the placeholder row a spawning session renders as, inside the repo group it will \
                 land in — the whole non-blocking new-session flow's only progress surface \
                 (ADR-P12)",
-        stands: "the published session row carries a name, a status, a group, a depth and four \
-                 flags; nothing says a row is a spawn in flight, and the slot it lands in is \
-                 `ui::project_list::pending_spawn_slot` over `App::pending_spawn`. A publication \
-                 the kernel could make, so it is filed as vocabulary rather than as a wall",
+        stands: "**closed** (ADR-68), and closed by publishing the row rather than by teaching a \
+                 pane the placement. `SessionRowSnapshot.pending_phase` is the compact phase \
+                 label, `None` on every session's row — its presence is the flag, since the label \
+                 is always available for a spawn and never meaningful for a session. The slot left \
+                 the renderer for `session::session_list`, beside the comparator whose answer it \
+                 mirrors, and `resolve_rows_with_pending` is the **one** traversal the pane, the \
+                 publication and the oracle all read, so the placeholder's group cannot be \
+                 resolved three ways. Its spinner became declared motion, because a plugin cannot \
+                 be handed a frame and a frozen glyph on this flow's only progress surface is the \
+                 defect ADR-P12 exists to prevent. Two recorded cases pin it — a spawn joining a \
+                 group, and one opening its own. **No capability was added**: the row went into \
+                 the `sessions` section a pane already reads",
         gap: Gap::Vocabulary,
-        blocked: true,
+        blocked: false,
         probe: |root| {
+            // Four halves, because any one alone would be the wrong claim: the row
+            // must be published, the slot must have left the renderer, one traversal
+            // must place it, and the plugin must actually draw it — so "closed"
+            // cannot come to mean "a field exists that nothing reads".
             let row = block(
                 root,
                 "src/session/pane_context.rs",
                 "pub struct SessionRowSnapshot",
             )
             .to_lowercase();
-            let publishes_no_pending = !row.contains("pending") && !row.contains("placeholder");
-            let native_owns_the_slot =
-                source(root, "src/ui/project_list.rs").contains("pub fn pending_spawn_slot");
-            publishes_no_pending && native_owns_the_slot
+            let publishes_pending = row.contains("pending_phase");
+            let model = source(root, "src/session/session_list.rs");
+            let model_owns_the_slot = model.contains("pub fn pending_spawn_slot")
+                && !source(root, "src/ui/project_list.rs").contains("pub fn pending_spawn_slot");
+            let one_traversal = model.contains("pub fn resolve_rows_with_pending(");
+            let plugin_draws_it = source(root, "src/plugin/bundled/session-list/init.luau")
+                .contains("row.pendingPhase");
+            !(publishes_pending && model_owns_the_slot && one_traversal && plugin_draws_it)
         },
     },
     Blocker {
@@ -727,67 +751,84 @@ fn recorded_blockers_match_the_tree() {
 }
 
 /// The verdict follows from the rows, so both answers are checkable — today's, and
-/// a table where everything landed.
+/// a table where a row is still open.
+///
+/// **Today's answer is yes.** Every row this gate was written around has closed, so
+/// what it now records is that the pane is portable and the handover is the next
+/// change — not that it is refused. The assertion is inverted rather than deleted
+/// because the derivation is what this test is: a table that grew a row again, for
+/// any reason, must fail here rather than let a handover proceed against it.
 #[test]
 fn the_verdict_is_derived_from_the_blockers() {
     assert!(
-        !handover_is_possible(BLOCKERS),
-        "every requirement is recorded met — the session list is portable, so hand it over \
-         deliberately (and retire this gate) rather than leaving it passing vacuously"
+        handover_is_possible(BLOCKERS),
+        "a requirement is recorded missing again — the handover is refused until it \
+         closes, and the row says what it needs: {:?}",
+        BLOCKERS
+            .iter()
+            .filter(|b| b.blocked)
+            .map(|b| b.id)
+            .collect::<Vec<_>>()
     );
-    // The ordering the table implies, asserted rather than described. The cheapest
-    // kind is **no longer** outstanding: this pane's only wiring row was the render
-    // trigger, closed by ADR-49. So what is left of the verdict is vocabulary alone
-    // — which is the honest summary of why this pane still cannot go, and of how
-    // far it is from going.
-    assert!(
-        outstanding(BLOCKERS, Gap::Wiring).is_empty(),
-        "the render trigger was this pane's last wiring gap; a new one means the \
-         table grew a row that should be named here: {:?}",
-        outstanding(BLOCKERS, Gap::Wiring)
-    );
-    assert!(!outstanding(BLOCKERS, Gap::Vocabulary).is_empty());
-    let structural = outstanding(BLOCKERS, Gap::Structural);
-    // **Nothing structural is left.** Every row this gate was written around has
-    // closed, and none by a grant: the keys (`scoped-keys-silenced-by-the-handover`,
-    // `no-active-session-write`, `no-session-record-write`) by ADR-51's route, the
-    // module that was also the kernel's navigation by ADR-60's relocation, and the
-    // widget the pane windowed through by ADR-63's convergence. So what refuses this
-    // handover now is vocabulary alone — which is the same shape the file viewer's
-    // verdict had on the change before its own handover.
-    assert!(
-        structural.is_empty(),
-        "no structural row should be left: {structural:?}"
-    );
-    // Asserted positively so a regression that reopened one — a plugin handed `input`, a
+    // Nothing of any kind is outstanding, which is the same statement three ways —
+    // kept per kind because each names the mechanism that closed it, and a
+    // regression in one is a different problem from a regression in another.
+    for (gap, was) in [
+        (Gap::Wiring, "the render trigger, closed by ADR-49"),
+        (
+            Gap::Vocabulary,
+            "the centred line (ADR-62), the trim (ADR-64), the border chrome (ADR-67) \
+             and the pending row (ADR-68)",
+        ),
+        (
+            Gap::Structural,
+            "the keys (ADR-51's route), the model (ADR-60's relocation) and the window \
+             (ADR-63's convergence)",
+        ),
+    ] {
+        let open = outstanding(BLOCKERS, gap);
+        assert!(
+            open.is_empty(),
+            "this pane's {gap:?} rows were {was}; a new one means the table grew a row \
+             that should be named here: {open:?}"
+        );
+    }
+    // Asserted per row, so a regression that reopened one — a plugin handed `input`, a
     // view write, a session operation on the seam, the model moving back into the
-    // renderer, or the pane growing its own window again — fails here with the reason
-    // attached rather than merely growing the table.
-    for closed in [
+    // renderer, the pane growing its own window again, or a manifest field for the
+    // frame — fails here with the reason attached rather than merely emptying the table.
+    //
+    // **Not one of them closed by a grant**, which is the finding this gate exists to
+    // keep: `Capability` gained no variant across any of the six, and the module
+    // bindings a plugin sees are the ones it saw when this gate was written.
+    for id in [
         "scoped-keys-silenced-by-the-handover",
         "no-active-session-write",
         "no-session-record-write",
         "the-module-is-the-kernels-model",
         "the-window-is-the-list-widgets",
+        "no-pane-chrome",
+        "no-pending-spawn-row",
     ] {
         assert!(
-            !structural.contains(&closed),
-            "`{closed}` is closed *without* a grant — three by ADR-51's route, the fourth \
-             by ADR-60's relocation. If it is outstanding again, either the route \
-             regressed, the model moved back into the renderer, or a power was granted — \
-             and the last is the one these rows exist to catch: {structural:?}"
+            BLOCKERS.iter().any(|b| b.id == id && !b.blocked),
+            "`{id}` should be closed; if it is outstanding again, either a route \
+             regressed or a power was granted — and the last is the one these rows \
+             exist to catch"
         );
     }
 
-    // The other direction: a table where every row landed permits the handover.
-    let all_met: Vec<Blocker> = BLOCKERS
+    // The other direction: one open row refuses the handover, so the derivation is
+    // not a constant.
+    let one_open: Vec<Blocker> = BLOCKERS
         .iter()
-        .map(|b| Blocker {
-            blocked: false,
+        .enumerate()
+        .map(|(i, b)| Blocker {
+            blocked: i == 0,
             ..*b
         })
         .collect();
-    assert!(handover_is_possible(&all_met));
+    assert!(!handover_is_possible(&one_open));
 }
 
 /// **The left column's circular wrap is not one of this pane's blockers**, and that

@@ -521,6 +521,15 @@ export type ReviewDiff = {
 -- `TaskEntry.matchPositions` are. `activity` and `notification` are what the
 -- agent last reported, **unresolved**: which of the two a row shows — and whether
 -- it shows one at all — is your pane's rule. Nothing here is fitted to a column.
+--
+-- `pendingPhase` is present only on the row for a session that **does not exist
+-- yet** — a spawn in flight, which can run for tens of seconds on a large repo —
+-- and carries the short label of the phase it is on. Its presence is the flag: a
+-- real session's row never has one. Such a row sits where the real one will
+-- appear, brings a `group` when it opens a group with no rows yet, and is never
+-- `selected`, because there is no session to select. Its `status` is thurbox's own
+-- answer to "is something happening" (`working` while a job runs, `idle` while a
+-- wizard waits on the user) rather than an agent's — there is no agent yet.
 export type SessionRow = {
     name: string,
     status: SessionStatusInfo,
@@ -534,6 +543,7 @@ export type SessionRow = {
     matchPositions: { number },
     activity: string?,
     notification: string?,
+    pendingPhase: string?,
 }
 
 -- The session list, in the order the pane renders it.
