@@ -6,7 +6,6 @@ pub mod branch_selector_modal;
 pub mod code_review;
 pub mod confirm_delete_modal;
 pub mod confirm_restore_modal;
-pub mod file_viewer;
 pub mod global_search;
 pub mod highlight;
 pub mod host_picker_modal;
@@ -23,6 +22,10 @@ pub mod project_list;
 pub mod repo_picker_modal;
 pub mod restore_sessions_modal;
 pub mod scrollbar;
+// Seat chrome for a pane a *plugin* draws: without the host there is no file-viewer
+// pane, so nothing reserves the band and nothing paints it (ADR-58).
+#[cfg(feature = "plugins")]
+pub mod search_bar;
 pub mod selection;
 pub mod session_name_modal;
 pub mod settings_modal;
@@ -55,6 +58,29 @@ use theme::Theme;
 pub struct RowHitbox {
     pub rect: Rect,
     pub index: usize,
+}
+
+/// Compute the `start..end` slice of a `total`-row list that keeps `selected`
+/// visible within a `height`-row viewport (with a small margin).
+///
+/// The layer's shared windowing rule, and the reason a native pane and the plugin
+/// reproducing it paint the same frame rather than merely building the same tree
+/// (ADR-30): the list node names the row its cursor is on and the renderer resolves
+/// the slice through here. Four surfaces in `ui` scroll by it — the plugin-pane
+/// renderer, the selector rows, the run history and the theme picker's own variant —
+/// which is why it lives in the layer's vocabulary rather than in one of them. It was
+/// the file viewer's until that pane was handed over (ADR-58), and none of its callers
+/// is a file viewer now.
+pub(crate) fn visible_window(total: usize, selected: usize, height: usize) -> (usize, usize) {
+    if total <= height {
+        return (0, total);
+    }
+    // Center-ish: keep selected in view with a small margin.
+    let margin = (height / 4).min(3);
+    let start = selected.saturating_sub(margin);
+    let start = start.min(total.saturating_sub(height));
+    let end = (start + height).min(total);
+    (start, end)
 }
 
 /// Build one `RowHitbox` per single-line entry of a vertically packed list that
@@ -100,7 +126,7 @@ pub fn render_selector_rows(
     }
     let selected = selected.min(total - 1);
     let (rows_area, track) = scrollbar::reserve_track(area, total, height);
-    let (start, end) = file_viewer::visible_window(total, selected, height);
+    let (start, end) = visible_window(total, selected, height);
     let visible: Vec<Line<'_>> = lines.into_iter().skip(start).take(end - start).collect();
     frame.render_widget(Paragraph::new(visible), rows_area);
     let hitboxes = windowed_row_hitboxes(rows_area, start, end);
@@ -1086,6 +1112,18 @@ mod tests {
         assert_eq!(format_countdown(3_600), "in 1h");
         assert_eq!(format_countdown(5_400), "in 1h 30m");
         assert_eq!(format_countdown(7_200), "in 2h");
+    }
+
+    #[test]
+    fn visible_window_fits_all_when_shorter_than_height() {
+        assert_eq!(visible_window(5, 0, 10), (0, 5));
+    }
+
+    #[test]
+    fn visible_window_scrolls_when_overflow() {
+        let (s, e) = visible_window(100, 50, 10);
+        assert!(s <= 50 && e > 50);
+        assert_eq!(e - s, 10);
     }
 
     #[test]

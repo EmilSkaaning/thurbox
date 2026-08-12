@@ -142,7 +142,26 @@ rows. Two of the port's enumerated divergences were promoted into the gate in th
 change, because a divergence recorded only in a test's doc comment expires the same way a
 document does.
 
-**Three panes are handed over.** The automations pane went third (ADR-56, PHASE4 §31)
+**Four panes are handed over.** The **file viewer** went fourth (ADR-58, PHASE4 §33), and
+its gate is the one that expected to need a **capability** and needed none. Two of its
+seven keys reach outside the process — expanding a directory reads the filesystem, opening
+a file launches `$EDITOR` — and the brief asked for the minimum widening of `files` that
+would let a plugin do them. The answer was that no widening is needed, because the kernel
+keeps the keys: `files` still publishes a basename per row and nothing else, and the three
+structural rows that named those powers survive as a table in ADR-58 rather than being
+deleted with their tests, so "the grant was unnecessary" cannot come to read as "the grant
+happened". Three things it had to decide: the **seat** (`file-viewer` →
+`RegionId::FileViewer`), the **module** (which was the pane's model *and* the home of
+`visible_window` — the model to `app`, not `session`, because it reads directories; the
+window to `ui`'s shared vocabulary), and the **column's second occupant**. That last is the
+first seat where ADR-46's "a visible plugin pane takes its seat" is the wrong rule: a code
+review's changed-files list is force-shown into the same column, so the seat is
+**preempted** — the kernel's list wins while a review is open, the pane keeps its stored
+visibility, and closing the review brings it back with no keystroke. One behaviour was
+lost and named: a plugin pane records no scrollbar drag target, so the track is an
+indicator (the wheel still scrolls the column).
+
+The automations pane went third (ADR-56, PHASE4 §31)
 and is the first that was **always on screen**: it seeds visible, binds no toggle action
 (the band never had one), and its band therefore arrives a moment after the first frame —
 the spike's predicted pop-in, accepted because carving from the feature flag would leave a
@@ -160,9 +179,9 @@ ten of its scoped actions firing — against kernel state, still rebindable in F
 the plugin never handed a key. Three things that handover had to decide: the **seat**
 (named, reversing part of ADR-46 — a position within a column is part of the pane), the
 **hint row** (kernel **seat chrome**, because those chords are rebindable and no
-published state carries a keymap — the mechanism the file viewer's search bar will
-need), and the **flag** (`show_tasks_panel` deleted, with the three focus questions it
-was quietly answering kept). Its recordings did not move.
+published state carries a keymap — the mechanism the file viewer's search bar was later
+widened from, ADR-58), and the **flag** (`show_tasks_panel` deleted, with the three focus
+questions it was quietly answering kept). Its recordings did not move.
 
 **The info panel was the first** (ADR-50, PHASE4 §25).
 `src/ui/info_panel.rs` is deleted, its row is the gate's first `ready`, and
@@ -177,17 +196,18 @@ and it surfaced two latent bugs that no *reproduction* could have: a pane visibi
 change never resized the sessions, and an input-less pane was swallowing clicks in
 front of drag-select.
 
-**A pane's row is ready only on handover, not on existence.** The four remaining panes
-show why the distinction is load-bearing rather than pedantic: three of them have a plugin
-that reproduces the pane (the file viewer exactly, the code review in the part it declares,
-the session list in its rows), while the native renderer is still what the interface draws.
-Deleting `src/ui/file_viewer.rs` today would remove the pane every user is looking at. So
+**A pane's row is ready only on handover, not on existence.** The three remaining panes
+show why the distinction is load-bearing rather than pedantic: two of them have a plugin
+that reproduces the pane (the code review in the part it declares, the session list in its
+rows), while the native renderer is still what the interface draws. Deleting
+`src/ui/project_list.rs` today would remove the pane every user is looking at. So
 `tests/teardown_gate.rs`'s pane probe is a four-way conjunction, and
 `a_reproduced_pane_is_not_a_replaced_one` pins that reasoning so it cannot be
-"simplified" back to a directory check — with the **file viewer** as its worked example
+"simplified" back to a directory check — with the **session list** as its worked example
 now (the info panel until ADR-50, the tasks pane until ADR-53, the automations pane until
-ADR-56), guarded by a test that fails if that pane is handed over without moving the
-example, because the repair that passes is to flip the assertions.
+ADR-56, the file viewer until ADR-58), guarded by a test that fails if that pane is handed
+over without moving the example, because the repair that passes is to flip the
+assertions.
 
 Two of the gate's own rules had to be **scoped to blocked rows** for the same reason,
 and it is worth naming as a class: a handover inverts the direction they read the tree
@@ -325,51 +345,57 @@ that gates Stage C and `2.0.0`, not the handovers.
    probe's fourth condition, so a pane reproduced without a recording fails the
    gate before any handover is attempted.
 
-   One of the seven carries an extra step of its own. `src/ui/file_viewer.rs` is
-   the only pane module that is its pane's **model**: `FileViewerState` lives
-   there, `App` owns one, the published `files` section is derived from it, and
-   the module also owns `visible_window` — the rule every *plugin* list is
-   scrolled by and four other native panes window with. That pane's handover
-   therefore begins by lifting its model out of `ui`, which PHASE4 §16 records and
-   deliberately does not do in advance of a destination. A milder version of the
-   same shape sat in the info panel's module, which also declared `SystemMetrics` —
-   an *input* the metrics collector fills and `App` owns. Its handover moved the type
-   to `src/app/metrics_state.rs`, beside the value's owner, which is the precedent for
-   the file viewer's harder version: a relocation to the owner, not to `session`,
-   whose `pane_context::SystemSnapshot` is already that module's spelling of the same
-   numbers.
+   One of the seven carried an extra step of its own, and has now taken it.
+   `src/ui/file_viewer.rs` was the only pane module that was its pane's **model**:
+   `FileViewerState` lived there, `App` owned one, the published `files` section is
+   derived from it, and the module also owned `visible_window` — the rule every
+   *plugin* list is scrolled by and four other native panes window with. PHASE4 §16
+   recorded the lift and deliberately did not do it in advance of a destination;
+   ADR-58 did it as the handover's fourth decision, sending the model to
+   `src/app/file_viewer.rs` (**not** `session`, which is kept free of the directory
+   reads that model performs) and the window helper to `ui`'s shared vocabulary. The
+   precedent it followed is the milder version in the info panel's module, which also
+   declared `SystemMetrics` — an *input* the metrics collector fills and `App` owns —
+   moved to `src/app/metrics_state.rs`, beside the value's owner.
 
-   **Three of the seven are done** (the info panel ADR-50, the tasks pane ADR-53, the
-   automations pane ADR-56). The automations pane's own gate
+   **Four of the seven are done** (the info panel ADR-50, the tasks pane ADR-53, the
+   automations pane ADR-56, the file viewer ADR-58). The automations pane's own gate
    (`tests/automations_pane_handover_gap.rs`, 10 rows) is **retired**, and how it went is
    the most useful thing in this list: five of its six outstanding rows stopped being
    requirements when the pane took ADR-51's route, and none of the powers they named was
    granted — so ADR-56 preserves the table rather than deleting it, because those rows are
-   still the answer for a pane that wants keys of its *own*.
+   still the answer for a pane that wants keys of its *own*. The file viewer's gate
+   (`tests/file_viewer_pane_input_gap.rs`, 8 rows) is retired on the same terms and for a
+   sharper reason: it was written to find the smallest **capability** that would let a
+   plugin read a directory and launch an editor, and the handover granted neither.
 
    The remaining refusals are enforced rather than described: the **session list**
-   (`tests/session_list_pane_handover_gap.rs`, 9 rows), the **file viewer**
-   (`tests/file_viewer_pane_input_gap.rs`, 6 rows, ADR-54) and the **code review**
-   (`tests/code_review_pane_handover_gap.rs`, ADR-45). Each row is re-derived from the
+   (`tests/session_list_pane_handover_gap.rs`, 11 rows, ADR-57) and the **code review**
+   (`tests/code_review_pane_handover_gap.rs`, ADR-45) — whose second-seat row ADR-58
+   **re-verdicted** rather than closed: the file-viewer column is a named seat now, and
+   the review's own changed-files list is what preempts it, so a plugin-drawn review
+   would need a seat its other half takes away. Each row is re-derived from the
    source and tagged structural / vocabulary / wiring, and each gate derives its verdict
    from its rows — so a requirement that closes for an unrelated reason fails the gate
    instead of expiring silently.
 
-**Three panes are down and the left column has one left.** None of the three unblocked
+**Four panes are down and the right column is a plugin's.** None of the four unblocked
 another: what remains is per-pane — three drawing rows and a module that is the kernel's
-navigation model (the session list), a module that is also the pane's model plus an
-unwritten seat-precedence rule (the file viewer), a surface the port reproduces only in
-part (the code review) — and the extension system still waits on six capabilities that do
-not exist. Nothing else on this list is unblocked by deleting something first.
+navigation model (the session list), and a surface the port reproduces only in part (the
+code review) — and the extension system still waits on six capabilities that do not exist.
+Nothing else on this list is unblocked by deleting something first.
 
-What the three *did* establish is that a pane's keyboard costs no grant (ADR-51, applied
-twice), that a handover's evidence is its recording (ADR-42/48, held three times with the
-`.snap` files unmoved), and that a handover may make a plugin's reach **smaller** rather
-than larger (ADR-56). The remaining four are not blocked on any of those.
+What the four *did* establish is that a pane's keyboard costs no grant (ADR-51, applied
+three times), that a handover's evidence is its recording (ADR-42/48, held four times with
+the `.snap` files unmoved), that a handover may make a plugin's reach **smaller** rather
+than larger (ADR-56), and that a seat may have a **second kernel occupant** that preempts
+the pane holding it (ADR-58). The remaining three are not blocked on any of those.
 
-Two of the four are blocked on the **same class** of thing, which is worth taking as one
-piece rather than as two pane problems: `src/ui/project_list.rs` and
-`src/ui/file_viewer.rs` are each simultaneously a pane's renderer and the kernel's model
-(navigation/reorder/sort/search in the first, the file tree's state machine plus
-`visible_window` in the second). ADR-54 and ADR-57 both refuse the relocation for the same
-reason — its destination is decided by a rule that is not written yet.
+The class of blocker the last two handovers shared has **halved**. `src/ui/project_list.rs`
+and `src/ui/file_viewer.rs` were each simultaneously a pane's renderer and the kernel's
+model, and ADR-54 and ADR-57 both refused the relocation for the same reason — no
+destination rule was written. ADR-58 wrote one and applied it: the model goes to the layer
+that owns the value (`app`), never to the pure-data layer if it performs effects, and a
+shared helper goes to its layer's own vocabulary. The session list's row now stands alone,
+and it stands on the harder half of its pair — the ratatui `List` window, which four
+behaviours are derived from.

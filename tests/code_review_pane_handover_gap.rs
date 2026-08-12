@@ -149,15 +149,20 @@ const BLOCKERS: &[Blocker] = &[
         needs: "the review's **second** pane: the changed-files list in the file-viewer column, \
                 with its own focus, its own navigation keys (`j`/`k`, `g`/`G`, `Enter`, `r`/`R`, \
                 `/`) and a diff that follows its selection",
-        stands: "`App::layout_for` forces the file-viewer column present for as long as a review \
-                 is open, and `InputFocus::ReviewFiles` is a focus ring stop of its own. The \
-                 workspace tree seats this list as `RegionId::FileViewer` and a plugin pane as \
-                 `RegionId::Plugin(n)` — a *separate* region. ADR-46 gave a plugin four seats and \
-                 this is not one of them: no slot names `RegionId::FileViewer`, deliberately, \
-                 because that column's occupant is the native list a review forces present. So \
-                 handing over the diff alone would leave the interface drawing a native \
-                 changed-files list beside a plugin diff, and handing over both still needs a \
-                 second seat this pane's column does not offer",
+        stands: "**re-verdicted by ADR-58, and the reason got stronger.** This row used to \
+                 stand on `PaneSlot` naming no seat for that column. It names one now — \
+                 `file-viewer` → `RegionId::FileViewer` — and the seat is *taken*, by the pane \
+                 that draws thurbox's file tree. What the file viewer's handover had to decide \
+                 is exactly this column's problem: two occupants, one seat. It decided \
+                 **preemption** — `App::seat_preempted` gives the seat to this list for as long \
+                 as a review is open, and the plugin pane holding it is not painted. That is a \
+                 rule about a *kernel* surface: `App::layout_for` still forces the column \
+                 present, `App::render_review_files` still draws this list into it, and \
+                 `InputFocus::ReviewFiles` is still a focus ring stop of its own. So a \
+                 plugin-drawn review would have to claim a seat whose preemptor is its own \
+                 other half — and one plugin pane preempting another is a precedence no \
+                 manifest can express and no host can arbitrate between two independently \
+                 written manifests. Structural, and more so than before",
         gap: Gap::Structural,
         blocked: true,
         probe: |root| {
@@ -165,10 +170,9 @@ const BLOCKERS: &[Blocker] = &[
                 .contains("self.active_review().is_some()");
             let own_focus = source(root, "src/app/view.rs").contains("render_files_list(");
             let is_a_focus = source(root, "src/app/key_handlers.rs").contains("ReviewFiles");
-            // The seats themselves: this list is the file-viewer region, a plugin
-            // pane is its own indexed region, and no slot reaches that region. Read
-            // from the slot→region table rather than from the variant list, so a
-            // slot added for another seat does not flip this row.
+            // The seats themselves: this list is the file-viewer region and a plugin
+            // pane in the column is its own indexed region, so the two are separate
+            // places whatever occupies them.
             let regions = variant_names(&block(
                 root,
                 "src/session/workspace_tree.rs",
@@ -176,10 +180,20 @@ const BLOCKERS: &[Blocker] = &[
             ));
             let separate_regions = regions.contains(&"FileViewer".to_string())
                 && regions.contains(&"Plugin".to_string());
-            let no_slot_reaches_it =
-                !method_body(root, "src/session/plugin_manifest.rs", "pub fn seat(")
-                    .contains("RegionId::FileViewer");
-            forces_column && own_focus && is_a_focus && separate_regions && no_slot_reaches_it
+            // And the fact that replaced "no slot reaches it": a slot does, and this
+            // list preempts it. Both halves, because either alone is a different
+            // world — a seat nobody preempts would be claimable, and a preemption
+            // with no seat would be the old verdict.
+            let seat_exists = method_body(root, "src/session/plugin_manifest.rs", "pub fn seat(")
+                .contains("Some(RegionId::FileViewer)");
+            let review_preempts_it = method_body(root, "src/app/mod.rs", "fn seat_preempted")
+                .contains("PaneSlot::FileViewer => self.active_review().is_some()");
+            forces_column
+                && own_focus
+                && is_a_focus
+                && separate_regions
+                && seat_exists
+                && review_preempts_it
         },
     },
     Blocker {
@@ -623,8 +637,9 @@ fn the_review_is_two_seats_not_one() {
     );
     let layout = method_body(&root, "src/app/mod.rs", "fn layout_for");
     assert!(
-        layout.contains("self.show_file_viewer || self.active_review().is_some()"),
-        "an open review should force the file-viewer column present: {layout}"
+        layout.contains("|| self.active_review().is_some()"),
+        "an open review should force the file-viewer column present, whoever else wants it \
+         (the kernel's own occupant of that seat is deleted since ADR-58): {layout}"
     );
 
     // And the second seat is a pane in its own right: its own focus, its own key
@@ -639,19 +654,27 @@ fn the_review_is_two_seats_not_one() {
         "the changed-files list should be a focus of its own"
     );
 
-    // A plugin, meanwhile, reaches exactly one of the two: ADR-46 gave it the
-    // central seat and deliberately not the file-viewer column, whose occupant is
-    // the native list a review forces present. Read from the slot→region table, so
-    // the assertion says which seat is missing rather than how many slots exist.
+    // A plugin reaches both seats by name now (ADR-46's central seat, ADR-58's
+    // file-viewer seat) and can hold only one of them: the file-viewer seat is
+    // *preempted* by this very list for as long as a review is open, so a
+    // plugin-drawn review would need the seat its own other half takes away. Read
+    // from the slot→region table and the preemption rule, so the assertion says which
+    // fact decides it rather than how many slots exist.
     let seats = method_body(&root, "src/session/plugin_manifest.rs", "pub fn seat(");
     assert!(
         seats.contains("Some(RegionId::Center)"),
         "a plugin should reach the central seat (ADR-46): {seats}"
     );
     assert!(
-        !seats.contains("RegionId::FileViewer"),
-        "a plugin pane now reaches the file-viewer column — re-verdict the second seat row and \
-         check what a two-seat surface would need: {seats}"
+        seats.contains("Some(RegionId::FileViewer)"),
+        "the file-viewer column should be a named seat since ADR-58 — if it stopped being one, \
+         the second-seat row stands on something else again: {seats}"
+    );
+    let preempt = method_body(&root, "src/app/mod.rs", "fn seat_preempted");
+    assert!(
+        preempt.contains("PaneSlot::FileViewer => self.active_review().is_some()"),
+        "an open review should preempt that seat, which is what stops a plugin holding it while \
+         the review needs it: {preempt}"
     );
 }
 

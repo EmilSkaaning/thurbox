@@ -4,6 +4,7 @@ mod background;
 pub(crate) mod clock;
 pub(crate) mod code_review;
 mod config_reload;
+pub(crate) mod file_viewer;
 mod helpers;
 mod key_handlers;
 pub(crate) mod metrics_state;
@@ -725,12 +726,37 @@ pub enum StatusLevel {
 pub(crate) enum ScrollTarget {
     Terminal,
     TaskPreview,
-    FileViewer,
     RunHistory,
+    // No `FileViewer`: that pane is a plugin's (ADR-58), and a plugin pane records no
+    // drag target — the painter reports row hitboxes and not the track's rect, so the
+    // thumb it draws is an indicator rather than a control. Wheel scrolling over the
+    // column is unaffected; it is resolved from the layout (`App::pane_at`), not from a
+    // recorded scrollbar.
     /// The code-review view's diff scrollbar.
     CodeReview,
     /// The active modal's list scrollbar — position is the selection index.
     Modal,
+}
+
+/// Chrome the kernel draws in a seated pane's place, as a **closed set of shapes**.
+///
+/// A handed-over pane may have chrome its plugin cannot draw — a hint row naming
+/// rebindable chords, an input bar showing kernel state. The kernel keeps drawing it,
+/// in the position it had, and the plugin's tree is laid out in what remains
+/// (ADR-53/57). Described as data rather than as a painter the seat invokes, so what a
+/// seat may draw stays enumerable: with a closure, "the kernel draws whatever it likes
+/// inside a plugin pane" would be the rule.
+///
+/// The two shapes differ in *where*, which the seat resolves before it draws the pane's
+/// frame — see [`App::pane_chrome`] for when each appears.
+#[cfg(feature = "plugins")]
+pub(crate) enum PaneChrome {
+    /// One row **inside** the frame, on its bottom line: the tasks pane's
+    /// `e edit · r run · n new`.
+    Hints(&'static [(&'static str, &'static str)]),
+    /// A bordered band of three rows **below** the frame: the file viewer's search bar,
+    /// where the native pane always drew it.
+    SearchBar(crate::ui::search_bar::SearchBar),
 }
 
 /// One scrollbar rendered this frame: its geometry plus the scroll state it
@@ -768,6 +794,11 @@ pub(crate) enum ClickAction {
     SelectAutomation(usize),
     /// Select + activate the file-viewer row at this flattened tree index
     /// (expand/collapse a directory, open a file).
+    ///
+    /// Recorded only by the pane that provides the file tree, which is a plugin's since
+    /// ADR-58 — so like [`ClickAction::SelectTask`] it exists only where a plugin can
+    /// exist. A build with no plugin host has no file viewer to click.
+    #[cfg(feature = "plugins")]
     SelectFileRow(usize),
     /// Focus the pane — the whole-rect fallback recorded after row targets.
     FocusPane(InputFocus),
@@ -1105,14 +1136,13 @@ pub struct App {
     /// animation from here; a plugin has no way to ask for a frame.
     #[cfg(feature = "plugins")]
     pub(crate) motion: motion_state::MotionState,
-    pub(crate) show_file_viewer: bool,
     /// Whether the session-list pane (the left column: sessions + automations)
     /// is shown. Inverse of the other `show_*` flags — defaults to `true` since
     /// the list is the primary nav surface, not an opt-in panel. In-memory only
     /// (resets to shown on restart), matching the other view toggles. Toggled
     /// by `Action::ToggleSessionList` (F9).
     pub(crate) show_session_list: bool,
-    pub(crate) file_viewer: crate::ui::file_viewer::FileViewerState,
+    pub(crate) file_viewer: file_viewer::FileViewerState,
     /// Open native code-review views, keyed by session — persisted per session
     /// like [`Self::session_terminal_views`] (the shell view), so switching
     /// sessions and returning keeps the review open. The active session's entry
@@ -1504,9 +1534,8 @@ impl App {
             focused_plugin_pane: None,
             #[cfg(feature = "plugins")]
             motion: motion_state::MotionState::default(),
-            show_file_viewer: false,
             show_session_list: true,
-            file_viewer: crate::ui::file_viewer::FileViewerState::new(),
+            file_viewer: file_viewer::FileViewerState::new(),
             code_reviews: std::collections::HashMap::new(),
             modal: modals::Modal::None,
             theme_picker_page: 0,
@@ -1715,11 +1744,13 @@ impl App {
     /// every read of visibility — which is live, and which also preserves the
     /// user's stored choice across the switch going off and on.
     fn enforce_feature_visibility(&mut self) {
-        if !self.features.file_viewer {
-            self.show_file_viewer = false;
-            if self.focus == InputFocus::FileViewer {
-                self.focus = self.focus_fallback();
-            }
+        // The file viewer hides *itself* when this flag goes off — it declares
+        // `feature = "file_viewer"` (ADR-47) — but focus does not follow, and a focus
+        // left on a pane that is gone would keep every key it scopes landing nowhere.
+        // The flag that used to be flipped here is deleted (ADR-58); the question it
+        // was answering for focus is not.
+        if !self.features.file_viewer && self.focus == InputFocus::FileViewer {
+            self.focus = self.focus_fallback();
         }
         // The tasks pane hides *itself* when this flag goes off — it declares
         // `feature = "tasks"` (ADR-47) — but focus does not follow, and a focus left
@@ -3437,6 +3468,7 @@ impl App {
                 self.refresh_automation_view();
                 true
             }
+            #[cfg(feature = "plugins")]
             ClickAction::SelectFileRow(i) => {
                 self.focus = InputFocus::FileViewer;
                 self.file_viewer.select_index(i);
@@ -3673,9 +3705,6 @@ impl App {
             ScrollTarget::TaskPreview => {
                 let max = self.task_preview_max_scroll();
                 self.task_ui.task_preview_scroll = (pos as u16).min(max);
-            }
-            ScrollTarget::FileViewer => {
-                self.file_viewer.select_index(pos);
             }
             ScrollTarget::RunHistory => {
                 let max = self
@@ -4826,6 +4855,15 @@ impl App {
 
         // Apply a finished off-thread code-review diff build (ADR-P8).
         self.poll_review_build();
+
+        // Keep the file tree pointed at the active session. The native pane did this
+        // as it painted; with the pane handed over (ADR-58) it belongs here, feeding
+        // the publication below rather than a renderer. Gated on the pane being on
+        // screen because that gate is the native behaviour: a closed column read no
+        // directory, and a hidden pane reads none either.
+        if self.pane_keyboard_taken(crate::session::KeyContext::FileViewer) {
+            self.rebuild_file_viewer_if_stale();
+        }
 
         // Publish the kernel state a plugin pane may read, before the renders
         // below are drained: a pane whose tree arrives this tick was built from
@@ -6343,6 +6381,24 @@ impl App {
                 warn!("backend shutdown timed out; abandoning remaining teardown");
                 return;
             }
+        }
+    }
+
+    /// Rebuild the tree only when its roots no longer match the active session's.
+    ///
+    /// The tick's form of the rebuild below, and the reason an idle tick costs no
+    /// directory read: `needs_rebuild_for` compares root paths and nothing else, so a
+    /// session that has not changed answers `false` and the expansion the user built up
+    /// survives. Rebuilding unconditionally would collapse the tree under them once per
+    /// tick.
+    pub(crate) fn rebuild_file_viewer_if_stale(&mut self) {
+        match self.sessions.get(self.active_index) {
+            Some(session) if self.file_viewer.needs_rebuild_for(&session.info) => {
+                self.file_viewer.rebuild_from_session(&session.info)
+            }
+            Some(_) => {}
+            None if !self.file_viewer.rows().is_empty() => self.file_viewer.clear(),
+            None => {}
         }
     }
 
@@ -8567,32 +8623,88 @@ impl App {
         }
     }
 
-    /// The key-hint row the kernel draws inside a seated pane's frame, when that
-    /// pane holds focus (ADR-53).
+    /// The chrome the kernel draws in a seated pane's place, if that pane has any
+    /// (ADR-53, widened by ADR-58).
     ///
     /// **Data rather than a closure**, so what a seat may draw stays enumerable: a
     /// painter argument would make "the kernel paints whatever it likes inside a
-    /// plugin pane" the rule. `None` for a pane with no such row.
+    /// plugin pane" the rule. `None` for a pane with no chrome.
     ///
-    /// It stays the kernel's because a plugin could not draw it honestly. These are
-    /// *rebindable* chords: a user who moved `TasksRun` to `x` should see `x`, and no
-    /// published section carries a keymap — a plugin printing the letters it happened
-    /// to know would print a lie for that user. (That the row is hardcoded here is a
-    /// separate defect, inherited from the native pane, and not one worth propagating
-    /// into a plugin.)
+    /// It stays the kernel's because a plugin could not draw it honestly, and for two
+    /// different reasons:
+    ///
+    /// - the tasks pane's hints are *rebindable* chords, which no published section
+    ///   carries — a plugin printing the letters it happened to know would print a lie
+    ///   for a user who moved them. (That the row is hardcoded here is a separate
+    ///   defect, inherited from the native pane, and not one worth propagating into a
+    ///   plugin.)
+    /// - the file viewer's search bar is *kernel state*: the kernel owns the `/` key,
+    ///   so it owns the query, the caret and the match count, and `Capability::Files`
+    ///   deliberately publishes none of the three.
+    ///
+    /// Each shape keeps the condition its native counterpart had, which is why this
+    /// takes `&self`: the hint row followed **focus** (resolved by the caller, which is
+    /// the only thing here that varies with it) while the bar follows its own sub-mode,
+    /// visible whenever a search is running or a query is committed.
     #[cfg(feature = "plugins")]
-    pub(crate) fn pane_hints(
-        context: crate::session::KeyContext,
-    ) -> Option<&'static [(&'static str, &'static str)]> {
+    pub(crate) fn pane_chrome(&self, context: crate::session::KeyContext) -> Option<PaneChrome> {
         use crate::session::KeyContext;
         match context {
             // The same relative order as the central preview's footer (e · r · n).
-            KeyContext::Tasks => Some(&[("e", " edit "), ("r", " run "), ("n", " new ")]),
+            KeyContext::Tasks => Some(PaneChrome::Hints(&[
+                ("e", " edit "),
+                ("r", " run "),
+                ("n", " new "),
+            ])),
+            KeyContext::FileViewer => {
+                let fv = &self.file_viewer;
+                (fv.search_active || !fv.search_query.is_empty()).then(|| {
+                    PaneChrome::SearchBar(crate::ui::search_bar::SearchBar {
+                        query: fv.search_query.clone(),
+                        is_active: fv.search_active,
+                        cursor: fv.search_cursor,
+                        current: fv.current_match_index(),
+                        total: fv.match_count(),
+                    })
+                })
+            }
             KeyContext::SessionList
             | KeyContext::Automations
-            | KeyContext::FileViewer
             | KeyContext::Global
             | KeyContext::Terminal => None,
+        }
+    }
+
+    /// Whether a **kernel** surface has taken `slot` for as long as it is present, so
+    /// the pane holding that seat must not be painted (ADR-58).
+    ///
+    /// One seat has a second kernel occupant: a code review's changed-files list is
+    /// drawn into the file viewer's column for as long as the review is open. ADR-46's
+    /// rule — a visible plugin pane takes its seat — is the wrong one there: it would
+    /// draw a working-tree file tree where the changed files belong while `Ctrl+L`
+    /// landed on `InputFocus::ReviewFiles`, a list nobody could see.
+    ///
+    /// Stated as **preemption** rather than sharing because the two never coexist: the
+    /// review's list replaces the file viewer in that column by design. The pane is
+    /// told nothing and its stored visibility is untouched, so closing the review
+    /// restores exactly what the user had, with no keystroke. And the precedence is the
+    /// kernel's: a manifest cannot declare it, since a plugin cannot see thurbox's
+    /// surfaces and a declared precedence would let one plugin outrank another with
+    /// nothing able to arbitrate.
+    ///
+    /// Gated on the plugin host because only a *pane* is preempted: with no host there is
+    /// no claimant for the seat, and the review's list draws in a column carved for it
+    /// alone.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn seat_preempted(&self, slot: PaneSlot) -> bool {
+        match slot {
+            PaneSlot::FileViewer => self.active_review().is_some(),
+            PaneSlot::Right
+            | PaneSlot::Left
+            | PaneSlot::LeftBottom
+            | PaneSlot::CenterLeft
+            | PaneSlot::Center
+            | PaneSlot::Tasks => false,
         }
     }
 
@@ -8792,9 +8904,12 @@ impl App {
                 // (ADR-53), so the column is carved by a claim or not at all — a
                 // retained flag would carve a column nothing paints.
                 show_tasks_panel: self.seat_taken(PaneSlot::Tasks),
-                // The review's changed-files list lives in the file-viewer
-                // column, so force that column present while a review is open.
-                show_file_viewer: self.show_file_viewer || self.active_review().is_some(),
+                // The kernel's own occupant of this seat went with its renderer
+                // (ADR-58), so the column is carved by a claim — or by the seat's
+                // *second* kernel occupant, the review's changed-files list, which
+                // preempts the pane for as long as a review is open.
+                show_file_viewer: self.seat_taken(PaneSlot::FileViewer)
+                    || self.active_review().is_some(),
                 plugin_panes: self.visible_plugin_panes(),
                 show_global_search: self.global_search.active,
                 // The kernel's own occupant of this band went with its renderer
@@ -9377,6 +9492,33 @@ mod tests {
     /// `show_tasks_panel` answered before the pane was handed over.
     fn tasks_pane_shown(app: &App) -> bool {
         app.pane_keyboard_taken(crate::session::KeyContext::Tasks)
+    }
+
+    /// Seat the pane that provides the file viewer, as the bundled `file-viewer`
+    /// plugin's manifest does (ADR-58). Seeds hidden, like the flag it replaced.
+    #[cfg(feature = "plugins")]
+    fn seat_file_viewer_pane(app: &mut App) {
+        use crate::session::plugin_manifest::PaneSlot;
+        use crate::session::settings::FeatureFlag;
+        let mut pane = crate::plugin::PluginPane::loading(
+            "file-viewer",
+            "files",
+            "Files",
+            PaneSlot::FileViewer,
+            false,
+        );
+        pane.toggle_action = Some(crate::session::Action::ToggleFileViewer);
+        pane.feature = Some(FeatureFlag::FileViewer);
+        pane.key_context = Some(crate::session::KeyContext::FileViewer);
+        let mut panes = app.plugin_panes.clone();
+        panes.push(pane);
+        app.set_plugin_panes(panes);
+    }
+
+    /// Whether the interface's file tree is on screen — the question
+    /// `show_file_viewer` answered before the pane was handed over.
+    fn file_viewer_pane_shown(app: &App) -> bool {
+        app.pane_keyboard_taken(crate::session::KeyContext::FileViewer)
     }
 
     /// Seat the pane that provides the automations list, as the bundled `automations`
@@ -10449,6 +10591,9 @@ mod tests {
 
     // --- Cmd/Super chord routing (kitty keyboard protocol) ---
 
+    /// Needs a pane to flip, and the pane that provides the file viewer is a plugin's
+    /// (ADR-58) — so the claim is made in the build that can have one.
+    #[cfg(feature = "plugins")]
     #[test]
     fn super_chord_dispatches_bound_global_action() {
         let mut app = app_with_sessions(1);
@@ -10456,9 +10601,13 @@ mod tests {
             crate::session::Action::ToggleFileViewer,
             crate::session::KeyChord::cmd('e'),
         );
-        assert!(!app.show_file_viewer);
+        seat_file_viewer_pane(&mut app);
+        assert!(!file_viewer_pane_shown(&app));
         app.handle_key(KeyCode::Char('e'), KeyModifiers::SUPER);
-        assert!(app.show_file_viewer, "bound Cmd chord must dispatch");
+        assert!(
+            file_viewer_pane_shown(&app),
+            "bound Cmd chord must dispatch"
+        );
     }
 
     #[test]
@@ -11051,7 +11200,7 @@ mod tests {
         assert!(app.status_message.take().unwrap().text.contains("disabled"));
 
         app.handle_key(KeyCode::F(3), KeyModifiers::NONE);
-        assert!(!app.show_file_viewer);
+        assert!(!file_viewer_pane_shown(&app));
         assert!(app.status_message.take().unwrap().text.contains("disabled"));
 
         // F2 is gated by `info_panel` even though the pane it shows is a plugin's:
@@ -11154,20 +11303,27 @@ mod tests {
         assert_eq!(editor.title.value(), "only task");
     }
 
+    /// Both callers need a plugin pane to resize around, since the two panes whose
+    /// toggles narrow the terminal are plugins' now (ADR-50, ADR-58).
+    #[cfg(feature = "plugins")]
     fn session_parser_size(app: &App, index: usize) -> (u16, u16) {
         let parser = app.sessions[index].parser.lock().unwrap();
         parser.screen().size()
     }
 
+    /// Same as [`super_chord_dispatches_bound_global_action`]: the column F3 opens is a
+    /// plugin's pane now, so this is a claim the build with a host makes.
+    #[cfg(feature = "plugins")]
     #[test]
     fn f3_toggle_resizes_session_parser() {
         let mut app = app_with_sessions(1);
         app.update(AppMessage::Resize(160, 40));
         let before = session_parser_size(&app, 0);
 
+        seat_file_viewer_pane(&mut app);
         app.handle_key(KeyCode::F(3), KeyModifiers::NONE);
         let after_open = session_parser_size(&app, 0);
-        assert!(app.show_file_viewer);
+        assert!(file_viewer_pane_shown(&app));
         assert!(
             after_open.1 < before.1,
             "terminal width must shrink when file viewer opens: before={before:?}, after={after_open:?}",
@@ -11175,7 +11331,7 @@ mod tests {
 
         app.handle_key(KeyCode::F(3), KeyModifiers::NONE);
         let after_close = session_parser_size(&app, 0);
-        assert!(!app.show_file_viewer);
+        assert!(!file_viewer_pane_shown(&app));
         assert_eq!(
             after_close, before,
             "terminal size must return to original after file viewer closes",
@@ -13214,12 +13370,13 @@ mod tests {
             .as_ref()
             .unwrap()
             .enabled;
-        let fv_before = app.show_file_viewer;
+        let fv_before = file_viewer_pane_shown(&app);
         // Ctrl+E is the global file-viewer toggle, but the pane editor must
         // capture it as "toggle enabled" instead.
         app.handle_key(KeyCode::Char('e'), KeyModifiers::CONTROL);
         assert_eq!(
-            app.show_file_viewer, fv_before,
+            file_viewer_pane_shown(&app),
+            fv_before,
             "file viewer must not toggle"
         );
         assert_eq!(

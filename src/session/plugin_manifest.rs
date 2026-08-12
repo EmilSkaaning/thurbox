@@ -441,6 +441,18 @@ pub enum PaneSlot {
     /// position in a column is part of the pane, so the seat is named rather than
     /// approximated (ADR-53).
     Tasks,
+    /// The right column's occupant **after** the tasks seat — the seat the file
+    /// viewer occupies, left of the plugin columns.
+    ///
+    /// The second seat inside that column, named for [`PaneSlot::Tasks`]' reason
+    /// and one more of its own: this seat has a **second kernel occupant**. A code
+    /// review's changed-files list is drawn into the same column for as long as
+    /// the review is open, so unlike every other seat a claim here does not simply
+    /// win — the review *preempts* the pane holding it (ADR-58). That precedence
+    /// is the kernel's and is deliberately not expressible here: a manifest naming
+    /// a surface it cannot see would let one plugin outrank another with nothing
+    /// able to arbitrate.
+    FileViewer,
 }
 
 impl PaneSlot {
@@ -453,6 +465,7 @@ impl PaneSlot {
             PaneSlot::CenterLeft => "center-left",
             PaneSlot::Center => "center",
             PaneSlot::Tasks => "tasks",
+            PaneSlot::FileViewer => "file-viewer",
         }
     }
 
@@ -465,6 +478,7 @@ impl PaneSlot {
             PaneSlot::CenterLeft,
             PaneSlot::Center,
             PaneSlot::Tasks,
+            PaneSlot::FileViewer,
         ]
     }
 
@@ -488,6 +502,7 @@ impl PaneSlot {
             PaneSlot::CenterLeft => Some(RegionId::Info),
             PaneSlot::Center => Some(RegionId::Center),
             PaneSlot::Tasks => Some(RegionId::Tasks),
+            PaneSlot::FileViewer => Some(RegionId::FileViewer),
         }
     }
 }

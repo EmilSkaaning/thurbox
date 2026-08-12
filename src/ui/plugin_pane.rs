@@ -2,7 +2,7 @@
 //!
 //! Named for the pane kind it was written for, but **not** limited to one: since
 //! Phase 0's exit criterion this is also how thurbox's own panes are painted —
-//! [`crate::ui::file_viewer`], [`crate::ui::project_list`] and the rest — so it
+//! [`crate::ui::project_list`], [`crate::ui::code_review`] and the rest — so it
 //! compiles in every build rather than only with the plugin host. The name is kept
 //! as a deliberate non-decision — renaming it carries no behaviour and would have
 //! obscured the diff that ungated it.
@@ -706,7 +706,7 @@ fn paint(
             // which is what lets a native pane and a plugin reproducing it paint
             // the same frame rather than merely build the same tree.
             let window = selected.map(|selected| {
-                super::file_viewer::visible_window(children.len(), selected, area.height as usize)
+                super::visible_window(children.len(), selected, area.height as usize)
             });
             let (start, end) = window.unwrap_or((0, children.len()));
             if let Some(track) = track {
@@ -1133,7 +1133,7 @@ mod tests {
         let labels: Vec<String> = (0..20).map(|i| format!("r{i}")).collect();
         let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
         for selected in [0usize, 7, 19] {
-            let (start, end) = super::super::file_viewer::visible_window(refs.len(), selected, 5);
+            let (start, end) = super::super::visible_window(refs.len(), selected, 5);
             let expected: Vec<String> = refs[start..end].iter().map(|s| s.to_string()).collect();
             assert_eq!(draw(&rows(&refs, Some(selected)), 4, 5), expected);
         }

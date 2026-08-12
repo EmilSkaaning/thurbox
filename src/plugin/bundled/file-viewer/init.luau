@@ -1,12 +1,12 @@
 --!strict
 -- thurbox's file viewer, in Luau.
 --
--- A faithful reproduction of `ui::file_viewer::file_tree`: the same indentation,
--- the same marker per (directory, expanded, nerd-font) triple, the same
--- selected > excluded > directory > file precedence, the same empty-state line.
--- `tests/bundled_file_viewer.rs` asserts the two view trees are *equal* and that
--- they paint the same frame, which makes this the measurement of whether a third
--- party could have written the pane.
+-- Not a reproduction any more: `src/ui/file_viewer.rs` is deleted and this is the
+-- pane (ADR-58). `tests/bundled_file_viewer.rs` still holds it to that pane's tree —
+-- the ten checked-in recordings were generated from `ui::file_viewer::file_tree`
+-- while it existed, so they are a statement about the pane rather than about this
+-- file, and they are what makes this the measurement of whether a third party could
+-- have written it.
 --
 -- Three things are worth reading for what they imply about writing a tree pane:
 --
@@ -20,16 +20,19 @@
 --    Nothing here can list a directory, read a file, or learn where on disk the
 --    tree is — and it needs none of that, because four of the five facts a row
 --    draws (depth, expansion, the search's verdict, the cursor) are not on disk
---    at all.
+--    at all. Nor does it need any of it to *answer a key*: the two keys that reach
+--    outside the process — expanding a directory, opening a file — are the
+--    kernel's, performed on the kernel's own dispatch.
 -- 3. **The glyphs are this plugin's.** The host publishes whether nerd-font
 --    glyphs are enabled; which glyph a collapsed directory draws as is a
 --    presentation decision, and presentation is the pane's.
 --
--- What this pane deliberately does *not* draw is the search **bar** — the
--- bordered block with the query and the match counter below the tree. The host
--- surface cannot describe a bordered container, a cursor cell, or a
--- bottom-anchored region, so it is out of scope rather than approximated. The
--- search's effect on the rows is drawn: see `matched` below.
+-- What this pane does *not* draw is the search **bar** — the bordered block with the
+-- query and the match counter below the tree. It is **kernel chrome**: the query, the
+-- caret and the counter are kernel state, the kernel owns the `/` key that collects
+-- them, and a pane redrawing them would be a second renderer for one fact. So the seat
+-- reserves its three rows and the kernel paints it there, exactly where the native pane
+-- drew it. The search's effect on the rows *is* this pane's: see `matched` below.
 
 local thurbox = require("@thurbox")
 local ui = thurbox.ui

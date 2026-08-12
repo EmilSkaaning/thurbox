@@ -222,12 +222,28 @@ const REPLACEMENTS: &[Replacement] = &[
         native_module: Some("automations_panel"),
         oracle: Some("bundled_automations_panel"),
     },
-    pane(
-        "file-viewer-plugin",
-        "the file viewer",
-        "file_viewer",
-        Some("bundled_file_viewer"),
-    ),
+    // The fourth pane handed over (ADR-58), and the first whose seat has a **second
+    // kernel occupant**: `src/ui/file_viewer.rs` is deleted, the bundled plugin draws the
+    // tree from a new `file-viewer` seat, and the code review's changed-files list
+    // *preempts* that seat for as long as a review is open. It is also the handover whose
+    // gate expected to need a capability and needed none — the directory read and the
+    // editor launch stayed the kernel's, on the kernel's own keys.
+    Replacement {
+        id: "file-viewer-plugin",
+        v1_capability: "the file viewer",
+        v2_home: "a bundled plugin under src/plugin/bundled/, drawn instead of the native pane",
+        ready: true,
+        probe: |root, id| {
+            pane_is_handed_over(
+                bundled_plugin_exists(root, id),
+                view_draws_native_pane(root, id),
+                plugin_host_reaches_the_installed_build(root),
+                pane_oracle_records_the_native_tree(root, id),
+            )
+        },
+        native_module: Some("file_viewer"),
+        oracle: Some("bundled_file_viewer"),
+    },
     // Global search is recorded structurally unportable and has no bundled plugin,
     // so it has no reproduction for an oracle to constrain: condition 1 already
     // holds its row blocked, and naming an oracle would be inventing one.
@@ -695,7 +711,12 @@ fn readiness_is_derived_from_the_verdicts() {
         .collect();
     assert_eq!(
         handed_over,
-        vec!["info-panel-plugin", "tasks-plugin", "automations-plugin"],
+        vec![
+            "info-panel-plugin",
+            "tasks-plugin",
+            "automations-plugin",
+            "file-viewer-plugin"
+        ],
         "the handed-over set is a deliberate list, so a pane joining it is a decision made \
          here and not a side effect"
     );
@@ -732,9 +753,10 @@ fn readiness_is_derived_from_the_verdicts() {
 /// attached, rather than quietly permitting the deletion of the pane every user is
 /// looking at.
 ///
-/// The worked example is the **automations pane**, and that choice is load-bearing.
-/// It was the info panel until ADR-50 and the tasks pane until ADR-53, at which point
-/// every assertion here would have been false — and the repair that passes is to flip
+/// The worked example is the **session list**, and that choice is load-bearing.
+/// It was the info panel until ADR-50, the tasks pane until ADR-53, the automations
+/// pane until ADR-56 and the file viewer until ADR-58, at each of which points every
+/// assertion here would have been false — and the repair that passes is to flip
 /// them, which turns an argument about why a row is blocked into a record of what the
 /// tree happens to say. So the example must always name a pane the interface still
 /// draws; `the_example_pane_is_still_drawn_natively` is what fails if it stops being
@@ -768,10 +790,11 @@ fn a_reproduced_pane_is_not_a_replaced_one() {
 ///
 /// A `const` rather than a literal in four places, so moving the example after the
 /// next handover is one edit and cannot be done halfway. It has been the info panel
-/// (until ADR-50), the tasks pane (until ADR-53) and the automations pane (until
-/// ADR-56); the file viewer is the closest of the four that remain, and its refusal
-/// (ADR-54) is the record of what it still needs.
-const EXAMPLE_BLOCKED_PANE: &str = "file-viewer-plugin";
+/// (until ADR-50), the tasks pane (until ADR-53), the automations pane (until ADR-56)
+/// and the file viewer (until ADR-58); the session list is the closest of the three
+/// that remain — it has a plugin that reproduces it and recordings to hold it — and
+/// its refusal (ADR-57) is the record of what it still needs.
+const EXAMPLE_BLOCKED_PANE: &str = "session-list-plugin";
 
 /// The example must name a pane that is still drawn natively, or the illustration
 /// above comes to assert the opposite of the tree and the passing repair is to

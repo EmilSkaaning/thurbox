@@ -3792,3 +3792,123 @@ Four panes remain native. Two of the four (this one and the file viewer) are now
 on the *same class* of thing — a module that is simultaneously the pane's renderer and the
 kernel's model — which is a shared host decision rather than two pane problems, and is
 worth taking as one piece.
+
+## ADR-58: The file viewer is deleted, and a plugin is the pane — a seat with two occupants
+
+**Context.** The file viewer's handover was refused in ADR-54 with four rows outstanding
+(`tests/file_viewer_pane_input_gap.rs`), and the important thing about that table is what
+had already *stopped* being a requirement. It began as an **input** gate: seven
+`KeyContext::FileViewer` actions, two of which reach outside the process — expanding a
+directory **reads the filesystem**, opening a file **launches `$EDITOR`** — and the brief
+asked for the minimum widening of `Capability::Files` that would let a plugin do them.
+ADR-51 answered a different question, and five rows closed with no grant: a pane that
+declares it *is* thurbox's file viewer is focused as `InputFocus::FileViewer`, and the
+kernel resolves and performs all seven actions itself.
+
+So the four that remained were decisions, not powers, and
+`the_verdict_is_derived_from_the_blockers` asserted exactly that — every outstanding row
+was `Gap::Vocabulary`, nothing structural was left.
+
+**Decision.** The pane is handed over. `src/ui/file_viewer.rs` (1601 lines) is deleted;
+the column is `src/plugin/bundled/file-viewer/init.luau`, drawn from a new `file-viewer`
+seat, bound to `ToggleFileViewer`, gated by `[features] file_viewer`, declaring the
+`FileViewer` keyboard. **No capability was widened**: `files` still publishes a basename
+per row and nothing else — no path, no contents, no directory listing, no query — and the
+gate's three structural rows are preserved in the table below rather than deleted with
+their tests, because "the grant was unnecessary" and "the grant happened" must not become
+indistinguishable.
+
+| The row said the pane needed | What it needed instead |
+|---|---|
+| a filesystem read, to fill a directory on `l`/`Enter` | nothing: the kernel keeps the key, so `FileViewerState::activate` keeps doing the read |
+| a process launch, to open a file in the editor | nothing: `App::file_viewer_expand` keeps calling `open_file_in_editor` |
+| a view write, for all seven keys | nothing: they resolve against `App::file_viewer` because the pane declared the keyboard |
+
+**Four decisions, in the order the gate stated them.**
+
+**1. The seat is named** — `PaneSlot::FileViewer` → `RegionId::FileViewer`, ADR-53's
+argument applied a second time: the right column's occupants are drawn in a fixed order,
+so a `right`-slot pane lands to the *right* of this pane's position, and a position within
+a column is part of the pane.
+
+**2. The seat has a second kernel occupant, and it preempts.** This is the first seat
+where ADR-46's rule — a visible plugin pane takes its seat — is the *wrong* rule. The code
+review's changed-files list is force-shown into this same column, with its own focus
+(`InputFocus::ReviewFiles`) and its own keys, and ADR-45 records that list as wanting
+`RegionId::FileViewer` specifically. Under ADR-46 a claim would win and opening a review
+would draw a working-tree file tree where the changed files belong, while `Ctrl+L` landed
+on a list nobody could see.
+
+`App::seat_preempted` is the rule: while `active_review().is_some()` the seat belongs to
+the review's list, `render_plugin_panes` skips it, and `layout_for` carves the column for
+the claim **or** the review. Three properties make it preemption rather than sharing —
+the two never coexist (the list *replaces* the tree in that column by design), the plugin
+is told nothing and keeps its **stored** visibility (so closing the review restores
+exactly what the user had, with no keystroke), and the precedence is the kernel's. A
+manifest cannot declare it, deliberately: a plugin cannot see thurbox's surfaces, and a
+declared precedence would let one independently-written manifest outrank another with
+nothing able to arbitrate. Rejected alternatives: a *second region* for the review's list
+(empty in every configuration but one, and the layout would have to know which to fill);
+and *waiting for the code review's handover* — that handover is refused for **structural**
+reasons this change cannot close, so the file viewer would have waited indefinitely for
+nothing.
+
+**3. Seat chrome widens from a row to a band.** ADR-53 made the tasks pane's hint row
+kernel chrome; the search bar is the same mechanism at three rows, a border and a block
+cursor. `App::pane_hints` becomes `App::pane_chrome`, returning a closed set of shapes
+(`Hints` inside the frame's bottom row, `SearchBar` as a bordered band **below** the
+frame), and `paint_plugin_pane` subtracts a band *before* drawing the frame — the same
+`Min(0) | Length(3)` split the native pane made, so the pane's box, content area and row
+hitboxes are the ones that pane's content had. Still **data, not a painter**, for ADR-53's
+reason. Each shape keeps its own condition: hints follow focus, the bar follows its
+sub-mode (visible while a search runs *or* a query is committed, focused or not). It stays
+the kernel's because the query, the caret and the counter are kernel state — the kernel
+owns the `/` key, so it owns the query, and the `no-query-write` row is why `FilesSnapshot`
+carries none.
+
+**4. The module was the model and the window, and splits three ways.**
+`FileNode`/`Activation`/`FileViewerState`/`enumerate_paths` move to
+`src/app/file_viewer.rs`; `visible_window` — the rule every plugin list and three native
+panes scroll by — moves to `src/ui/mod.rs`, the layer's shared vocabulary; the bar's
+painter moves to `src/ui/search_bar.rs`. The model goes to `app` and **not** to `session`,
+despite `session::review` being the obvious parallel: `session::review` is pure data about
+a diff and the git that produces it lives in `git`, whereas `FileViewerState` calls
+`read_dir` in `activate`, `reveal_path` and its search expansion — putting it in `session`
+would put filesystem I/O in the layer the architecture rules keep free of effects.
+`FileRow` is **deleted**: its five fields are `FileNodeSnapshot`'s five fields and the
+publication is now its only consumer, so `rows()` yields the published type.
+
+**Two behaviours changed, both named rather than discovered.**
+
+*The scrollbar's **drag** is lost.* The native pane recorded `ScrollTarget::FileViewer`
+from geometry its own renderer resolved; `paint_plugin_pane` records no drag target,
+because `render_tree_rows` reports row hitboxes and not the track's rect, so the variant
+is deleted with it. Wheel scrolling over the column is unaffected (`App::pane_at` resolves
+it from the layout). Restoring it means giving the plugin-pane painter a way to report the
+track, which is a change for *every* seated list pane and could not be made inside a
+handover claiming only that the pane's painter changed.
+
+*The tree is rebuilt on the tick, not in the paint.* The native renderer refreshed the
+tree for the active session as it drew; that moves to `tick_core`, immediately before the
+publication it feeds, gated on the pane being on screen — which is the native behaviour, a
+closed column read no directory.
+
+**Consequences.** `tests/file_viewer_pane_input_gap.rs` is retired. The teardown gate's
+`file-viewer-plugin` row is `ready`, and `EXAMPLE_BLOCKED_PANE` moves to the session list.
+The oracle keeps its ten recordings — byte-identical after the deletion — and loses the
+`file_tree` edge ADR-42 predicted; its two frame tests keep their claims (the kernel
+windows the list, the kernel reserves the track) and assert them on painted cells, since
+the second builder they compared against is gone.
+
+The code review's `no-second-seat-for-the-changed-files-list` row is **re-verdicted, not
+silenced**. It stood on "no slot names `RegionId::FileViewer`"; one does now, and the row
+stays blocked for a stronger reason — the seat exists, and this list is its *preemptor*,
+so a plugin-drawn review would have to claim a seat its own other half is the reason
+nobody may hold. A gate row's probe is a proxy for its reason, and a proxy that stops
+matching its reason reports the opposite of the truth.
+
+Three panes remain native: the session list (ADR-57), global search (structurally
+unportable) and the code review. A build with no plugin host has no file viewer and no
+`InputFocus::FileViewer`; `plugins` is a default feature, so no install is in that
+position, and `ToggleFileViewer` says so in that build's own words rather than doing
+nothing.

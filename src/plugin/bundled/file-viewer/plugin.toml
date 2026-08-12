@@ -1,19 +1,27 @@
-# thurbox's file viewer, as a plugin.
+# thurbox's file viewer.
 #
-# The third pane of Phase 4, and the one that could not accept the scrolling gap
-# the tasks port recorded: this pane's whole interaction is moving a cursor
-# through a tree taller than its column, so a copy that drew from the first row
-# would not be a reproduction of it. It scrolls by declaring which row its cursor
-# is on and letting the kernel window the list — it is told no height, and it
-# reads no directory.
+# Not a reproduction any more: `src/ui/file_viewer.rs` is deleted and this is the pane
+# (ADR-58). It is the fourth of thurbox's own panes the kernel does not draw, and the one
+# whose keys reach furthest outside the process — expanding a directory **reads the
+# filesystem** and expanding a file **launches an editor**.
 #
-# A *reproduction*, not a replacement — the native pane is still what thurbox
-# draws, and `tests/bundled_file_viewer.rs` asserts this plugin builds the
-# identical view tree and paints the identical frame.
+# Neither is granted here, and that is the finding. The gate that refused this handover
+# was written expecting the opposite: it asked for the minimum widening of `files` that
+# would let a plugin do those two things. The answer was that no widening is needed,
+# because the *kernel* keeps the keys (ADR-51) — `key_context = "FileViewer"` means *I am
+# thurbox's file viewer*, so all seven `KeyContext::FileViewer` actions resolve while this
+# pane holds focus and thurbox performs them against its own state:
+# `FileViewerState::activate` does the directory read, `App::file_viewer_expand` launches
+# the editor, and this plugin never sees a key. Still rebindable in F1.
 #
-# Two capabilities, and that is the whole reach: it renders, and it reads the
-# file tree the viewer already has open. `files` grants no filesystem access —
-# no directory listing, no file contents, no path.
+# So two capabilities, and that is the whole reach: it renders, and it reads the tree the
+# viewer already has open. `files` grants no filesystem access — no directory listing, no
+# file contents, no path, no search query.
+#
+# `tests/bundled_file_viewer.rs` still holds it to the native pane's tree: the ten
+# checked-in recordings under `tests/snapshots/` were generated from
+# `ui::file_viewer::file_tree` while it existed, so they are a statement about the pane
+# rather than about this file.
 name = "file-viewer"
 api_version = 1
 
@@ -21,9 +29,26 @@ capabilities = ["render", "files"]
 
 [[panes]]
 id = "files"
-title = "Files (plugin)"
-slot = "right"
-# Off by default. The native file viewer is still what F3 shows, so shipping this
-# visible would put two file trees side by side on every install. Turn it on to
-# compare them.
+# The native pane's title, not "Files (plugin)": a name that marks the pane as a plugin is
+# right for a copy drawn beside the original and wrong for the pane.
+title = "Files"
+# The seat the native pane occupied: the right column's occupant after the tasks column
+# and before any plugin column. It is also the one seat with a **second kernel occupant** —
+# a code review's changed-files list preempts this pane for as long as the review is open
+# (ADR-58). Nothing here says so, deliberately: that precedence is the kernel's, and a
+# manifest able to name it would let one plugin outrank another.
+slot = "file-viewer"
+# The key that always showed the file viewer (`Ctrl+E`/`F3`). With no kernel pane left for
+# this seat it flips this pane, and the kernel's own arm does what the flip cannot: rebuild
+# the tree for the active session and follow it with focus.
+toggle_action = "ToggleFileViewer"
+# The switch that always gated the file viewer. Off, this is not a pane: not shown, no
+# seat, not rendered — and the user's stored visibility survives, so turning it back on
+# restores what they had.
+feature = "file_viewer"
+# thurbox's file-viewer keyboard (ADR-51). See the header: seven actions, none of them this
+# plugin's.
+key_context = "FileViewer"
+# Hidden, because `App::show_file_viewer` initialised to `false`: a handover changes which
+# code draws a pane, not whether it is on screen.
 default_visible = false

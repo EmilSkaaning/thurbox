@@ -91,7 +91,7 @@ fn total_height(rows: &[Row]) -> u16 {
 ///
 /// Row heights vary (a section-opening row costs an extra line for its
 /// header), so this walks rows rather than doing the flat index arithmetic
-/// [`super::file_viewer::visible_window`] can get away with.
+/// [`super::visible_window`] can get away with.
 fn scroll_start(rows: &[Row], selected: usize, height: u16) -> usize {
     /// Rows of context to keep above the selection while scrolling, matching
     /// the other selectors' feel.

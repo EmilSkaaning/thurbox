@@ -1,57 +1,35 @@
-//! The bundled file-viewer plugin renders the native file tree.
+//! The bundled file-viewer plugin **is** thurbox's file viewer.
 //!
-//! The same claim `tests/bundled_info_panel.rs` and `tests/bundled_tasks_panel.rs`
-//! make for the first two ported panes, plus one the tasks pane could not make.
+//! `src/ui/file_viewer.rs` is deleted (ADR-58), so this is no longer a claim about a
+//! copy: the tree a user navigates with `j`/`k` is the one this plugin builds. What
+//! holds it to the pane it replaced is the ten checked-in recordings under
+//! `tests/snapshots/`, every one generated from `ui::file_viewer::file_tree` while that
+//! builder existed — so they are a statement about the **pane**, not about this plugin,
+//! and they could not have been produced after the deletion.
 //!
-//! The tasks port had to record an open gap: the kernel windowed its list around
-//! the selection and a plugin, knowing no height, drew from the first row — so a
-//! selection below the fold was invisible in its copy. That gap is closed here by
-//! a list node that carries the row its cursor is on, which means this pane's
-//! equality is not only *tree* equality but **frame** equality at a size where the
-//! pane scrolls ([`the_plugin_paints_the_native_frame_when_the_pane_scrolls`]).
-//! That is the property a file tree could not do without.
+//! ## What the handover took from this file, and what it could not
 //!
-//! What is *not* reproduced is stated rather than hidden: the search **bar** below
-//! the tree, pinned as an enumerated divergence with the host features that would
-//! close it named. The **scroll track** used to be the second such divergence and
-//! is now part of the frame equality
-//! ([`the_plugin_paints_the_native_frame_including_the_scroll_track`]): a list
-//! declares that it scrolls and the kernel reserves the column.
+//! Each case used to assert two edges (ADR-42): `native == snapshot`, establishable only
+//! while the native builder was here, and `plugin == native`, the port's original proof.
+//! Their conjunction is what survives — `plugin == snapshot` — with a baseline that was
+//! proven rather than assumed. Recording from the plugin instead would have inverted it:
+//! a plugin defect would have become the expectation, and the test could never fail for
+//! the reason it exists.
 //!
-//! It lives in `tests/` for the same reason as the others: this is the one place
-//! that must see both `ui::file_viewer` and `plugin::PluginHost`, and an
-//! integration test is not part of the library's module graph, so
-//! `tests/architecture_rules.rs` stays untouched.
+//! The two **frame** tests keep their claims and lose their comparison. What they assert
+//! is that the *kernel* resolves the window and reserves the track — facts a tree cannot
+//! show, since the trees are equal at every size — so each now paints the plugin's tree
+//! and asserts the resulting cells directly: the cursor's row is on screen and the top
+//! has scrolled off; the track's column carries a thumb and no row text, and a list that
+//! declares no track paints differently.
 //!
-//! ## Two edges, because a handover deletes one of them
+//! The **search bar** is no longer an enumerated divergence. It is kernel chrome drawn
+//! into the seat below this pane's frame (ADR-58), and what this file still asserts is
+//! that the plugin does not imitate it.
 //!
-//! The equality is **differential** — it names `file_tree`, which lives in
-//! `src/ui/file_viewer.rs`, the module a handover removes. On that day the
-//! comparison has nothing on its right-hand side, and the repair that compiles is
-//! to drop it: what remains is a test that the plugin renders without erroring,
-//! satisfied equally by a pane drawing one wrong row and by one drawing twenty.
-//! The acceptance snapshots do not cover the gap either — every one is captured
-//! with no active session, so none holds a row of this pane.
-//!
-//! So each case asserts **both** edges while both sides exist (ADR-42):
-//!
-//! * `native == snapshot` — the recording in `tests/snapshots/` is the *native
-//!   pane's* tree. This is the edge that gives it provenance, and it is
-//!   establishable only while the native builder is here.
-//! * `plugin == native` — the port's original proof, unchanged.
-//!
-//! Their conjunction is what a handover inherits (`plugin == snapshot`) with a
-//! baseline that was proven rather than assumed. Recording from the plugin instead
-//! would invert it: a plugin defect would become the expectation, and the test
-//! could never fail for the reason it exists.
-//!
-//! The two frame-equality tests carry no recording: their claim is that the
-//! *kernel* resolved the same window and reserved the same track, which the two
-//! trees cannot show — they are equal at every size, which is the point of moving
-//! the window into the renderer. Only a paint says it, so a recorded tree there
-//! would restate the per-case equality and prove nothing new. The search bar's
-//! test asserts an **absence** rather than a tree, for the same reason a divergence
-//! carries no expectation.
+//! It lives in `tests/` because it must see both `session::pane_context` and
+//! `plugin::PluginHost`, and an integration test is not part of the library's module
+//! graph, so `tests/architecture_rules.rs` stays untouched.
 
 #![cfg(feature = "plugins")]
 
@@ -64,7 +42,6 @@ use thurbox::plugin::{discovery, ExecutionBounds, PluginHost};
 use thurbox::session::motion::FrameTable;
 use thurbox::session::pane_context::{FileNodeSnapshot, FilesSnapshot, PaneContext};
 use thurbox::session::view_tree::ViewNode;
-use thurbox::ui::file_viewer::{file_tree, FileRow};
 
 /// The process-wide snapshot slot is global, so every case here runs one at a
 /// time — otherwise one case's publication would answer another's reader.
@@ -78,18 +55,20 @@ static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// note.
 mod view_tree_record;
 
-/// One comparison case. Both sides are derived from the same rows, so an equality
-/// failure is a statement about the plugin rather than about two hand-written
-/// fixtures drifting apart.
+/// One case: the rows the kernel publishes, and what the pane must draw for them.
+///
+/// The rows are the **published** type since the handover — `FileViewerState::rows`
+/// yields it directly, so a case is built out of exactly what the kernel would put on
+/// the wire rather than out of a fixture converted to it.
 struct Case {
     name: &'static str,
-    rows: Vec<FileRow>,
+    rows: Vec<FileNodeSnapshot>,
     selected: Option<usize>,
     nerd_font: bool,
 }
 
-fn row(name: &str, depth: usize, is_dir: bool, expanded: bool, matched: bool) -> FileRow {
-    FileRow {
+fn row(name: &str, depth: usize, is_dir: bool, expanded: bool, matched: bool) -> FileNodeSnapshot {
+    FileNodeSnapshot {
         name: name.to_string(),
         depth,
         is_dir,
@@ -98,20 +77,16 @@ fn row(name: &str, depth: usize, is_dir: bool, expanded: bool, matched: bool) ->
     }
 }
 
-fn dir(name: &str, depth: usize, expanded: bool) -> FileRow {
+fn dir(name: &str, depth: usize, expanded: bool) -> FileNodeSnapshot {
     row(name, depth, true, expanded, true)
 }
 
-fn file(name: &str, depth: usize) -> FileRow {
+fn file(name: &str, depth: usize) -> FileNodeSnapshot {
     row(name, depth, false, false, true)
 }
 
 impl Case {
-    fn native_tree(&self) -> ViewNode {
-        file_tree(&self.rows, self.selected, self.nerd_font)
-    }
-
-    /// The same rows as the snapshot a plugin reads.
+    /// The publication a plugin reads.
     ///
     /// Mirrors `App::build_files_snapshot`: the kernel publishes a basename, a
     /// depth, the expansion state, the search's verdict and the cursor's index —
@@ -119,17 +94,7 @@ impl Case {
     fn context(&self) -> PaneContext {
         PaneContext {
             files: FilesSnapshot {
-                nodes: self
-                    .rows
-                    .iter()
-                    .map(|r| FileNodeSnapshot {
-                        name: r.name.clone(),
-                        depth: r.depth,
-                        is_dir: r.is_dir,
-                        expanded: r.expanded,
-                        matched: r.matched,
-                    })
-                    .collect(),
+                nodes: self.rows.clone(),
                 selected: self.selected,
                 nerd_font: self.nerd_font,
             },
@@ -292,12 +257,13 @@ fn paint(tree: &ViewNode, width: u16, height: u16) -> Buffer {
     buf
 }
 
-/// The headline claim: for every case, the plugin's tree equals the native pane's.
-/// Equal trees paint identically, so this is byte-identity of the pane.
+/// The headline claim: for every case, the pane's tree is the recorded one. Equal
+/// trees paint identically, so this is byte-identity of the pane.
 ///
-/// The recorded edge is asserted **first**, so a run in which both edges break
-/// reports the recording — the fact about the pane — rather than only that two
-/// implementations disagree.
+/// The recordings were taken from `ui::file_viewer::file_tree` before the handover
+/// deleted it, so what this asserts is that the pane still draws what the *native* pane
+/// drew — a baseline that was proven rather than assumed, and one this file could not
+/// re-establish now.
 #[test]
 fn the_plugin_builds_the_native_panes_view_tree() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
@@ -305,40 +271,21 @@ fn the_plugin_builds_the_native_panes_view_tree() {
 
     for case in cases() {
         thurbox::session::pane_context::publish(case.context());
-        let plugin = render(&host);
-        let native = case.native_tree();
-        // Edge one: the checked-in expectation is the native pane's tree. It is
-        // what survives the handover, and the only moment its baseline can be
-        // shown to come from the pane rather than from the plugin is while
-        // `file_tree` is still here to generate it.
-        insta::assert_snapshot!(case.snapshot_name(), view_tree_record::tree(&native));
-        // Edge two: the plugin reproduces that recording. Asserted through the
-        // records rather than the trees, because a failure here has to be
-        // readable — the structural equality below says the same thing in two
-        // thousand-character dumps a reader has to diff by eye.
-        view_tree_record::assert_matches(case.name, &plugin, &native);
-        // Edge three: the port's original claim, exact rather than legible. Kept
-        // beneath the readable one so a divergence reports itself twice, most
-        // useful form first.
-        assert_eq!(
-            plugin, native,
-            "the plugin's tree diverges from the native pane for `{}`",
-            case.name
-        );
+        insta::assert_snapshot!(case.snapshot_name(), view_tree_record::tree(&render(&host)));
     }
 }
 
-/// The claim the previous port could not make. The tasks pane's plugin copy drew
-/// from the first row because the window lived in the kernel and a plugin has no
-/// height; this pane's list declares its cursor's row instead, so the *kernel*
-/// windows the plugin's list exactly as it windows the native one — and the two
-/// panes paint the same cells at a height that forces a scroll.
+/// The claim the previous port could not make, and the one the recordings cannot
+/// carry: the pane scrolls. The tasks pane's plugin copy drew from the first row
+/// because the window lived in the kernel and a plugin has no height; this pane's list
+/// declares its cursor's row instead, so the **kernel** windows it — which only a paint
+/// can show, since the tree is the same tree at every size.
 #[test]
 fn the_plugin_paints_the_native_frame_when_the_pane_scrolls() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
     let host = host();
 
-    let rows: Vec<FileRow> = std::iter::once(dir("repo", 0, true))
+    let rows: Vec<FileNodeSnapshot> = std::iter::once(dir("repo", 0, true))
         .chain((0..15).map(|i| file(&format!("f{i}.rs"), 1)))
         .collect();
     // The cursor at the very bottom of a list four times the pane's height: the
@@ -354,11 +301,10 @@ fn the_plugin_paints_the_native_frame_when_the_pane_scrolls() {
     const WIDTH: u16 = 24;
     const HEIGHT: u16 = 4;
     let plugin = paint(&render(&host), WIDTH, HEIGHT);
-    let native = paint(&case.native_tree(), WIDTH, HEIGHT);
-    assert_eq!(plugin, native, "the plugin's frame is not the native frame");
 
-    // And that frame is actually the scrolled one — otherwise the two could agree
-    // by both being wrong.
+    // The frame is the scrolled one: the cursor's row is on screen and the top of the
+    // list is not. Asserted on the cells rather than against a second builder, which
+    // the handover took away.
     let text: String = (0..HEIGHT)
         .flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
         .map(|(x, y)| plugin[(x, y)].symbol().to_string())
@@ -378,7 +324,10 @@ fn the_compared_tree_is_a_whole_pane() {
         .into_iter()
         .find(|c| c.name == "an expanded tree with a collapsed directory")
         .expect("the tree case");
-    let tree = case.native_tree();
+    let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
+    let host = host();
+    thurbox::session::pane_context::publish(case.context());
+    let tree = render(&host);
     let (children, selected, scrollbar) = match &tree {
         ViewNode::List {
             children,
@@ -398,19 +347,18 @@ fn the_compared_tree_is_a_whole_pane() {
     );
 }
 
-/// **Enumerated divergence 1: the search bar.** The native pane draws a three-row
-/// bordered ` Search (2/5) ` block below the tree, with a `/ ` prefix, the query
-/// scrolled to its end, and a block cursor. The host surface can describe none of
-/// the three things that needs — a bordered container node, a cursor appearance,
-/// and a fixed-height region anchored to the bottom of a pane — and the match
-/// counter would need the query text, which the `files` capability deliberately
-/// does not publish.
+/// **The search bar is the kernel's, and the pane must not imitate it.** The bar is a
+/// three-row bordered ` Search (2/5) ` block with a `/ ` prefix, the query scrolled to
+/// its end, and a block cursor. It was an enumerated divergence while this was a
+/// reproduction; the handover made it **seat chrome** (ADR-58), drawn by the kernel into
+/// the rows below this pane's frame, because the query, the caret and the counter are
+/// kernel state that `Capability::Files` publishes none of.
 ///
-/// So the bar is out of scope. What is *not* out of scope, and is asserted here,
-/// is the search's effect on the rows: a plugin reproduces the matched and
-/// excluded appearances exactly.
+/// So what is asserted here is the boundary: the search's effect on the *rows* is the
+/// pane's (and is recorded by the `a-running-search` case above), and the bar itself is
+/// not drawn here at all.
 #[test]
-fn the_search_bar_is_out_of_scope_but_its_effect_on_the_rows_is_not() {
+fn the_search_bar_is_the_kernels_and_the_pane_does_not_imitate_it() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
     let host = host();
     let case = cases()
@@ -419,10 +367,7 @@ fn the_search_bar_is_out_of_scope_but_its_effect_on_the_rows_is_not() {
         .expect("the search case");
     thurbox::session::pane_context::publish(case.context());
 
-    // The rows agree, including which of them the search excluded.
-    assert_eq!(render(&host), case.native_tree());
-
-    // And the plugin draws nothing resembling the bar: no query, no counter, no
+    // The plugin draws nothing resembling the bar: no query, no counter, no
     // border. Asserted on the text of every run, so a later attempt to fake one
     // fails here rather than shipping half a search.
     let mut text = String::new();
@@ -448,10 +393,11 @@ fn the_search_bar_is_out_of_scope_but_its_effect_on_the_rows_is_not() {
 /// renderer reserves the column, which means the two panes agree about the
 /// thumb's column as well as about the rows — the whole frame, not the rows in it.
 ///
-/// The track a plugin draws is an **indicator**, not a control: the thumb reports
-/// a cursor the plugin does not own, so a drag has no destination to write. That
-/// consequence is recorded in `tests/file_viewer_pane_input_gap.rs` beside the
-/// other missing view writes, not here.
+/// The track a plugin draws is an **indicator**, not a control: the painter reports row
+/// hitboxes and not the track's rect, so the kernel records no drag target for a plugin
+/// pane and the thumb cannot be dragged. The native pane's `ScrollTarget::FileViewer` went
+/// with it (ADR-58); wheel scrolling over the column, which is resolved from the layout,
+/// did not.
 #[test]
 fn the_plugin_paints_the_native_frame_including_the_scroll_track() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
@@ -459,7 +405,7 @@ fn the_plugin_paints_the_native_frame_including_the_scroll_track() {
     // A cursor a third of the way down a list five times the pane's height, so the
     // thumb is neither at the top nor at the bottom — a track drawn at the wrong
     // position would still be a track.
-    let rows: Vec<FileRow> = (0..20).map(|i| file(&format!("f{i}.rs"), 0)).collect();
+    let rows: Vec<FileNodeSnapshot> = (0..20).map(|i| file(&format!("f{i}.rs"), 0)).collect();
     let case = Case {
         name: "overflowing",
         selected: Some(7),
@@ -470,18 +416,14 @@ fn the_plugin_paints_the_native_frame_including_the_scroll_track() {
 
     const WIDTH: u16 = 16;
     const HEIGHT: u16 = 4;
-    let plugin = paint(&render(&host), WIDTH, HEIGHT);
-    assert_eq!(
-        plugin,
-        paint(&case.native_tree(), WIDTH, HEIGHT),
-        "the plugin's frame is not the native frame"
-    );
+    let tree = render(&host);
+    let plugin = paint(&tree, WIDTH, HEIGHT);
 
-    // And the equality is not vacuous: the same rows without the declaration paint
-    // a *different* frame, so what passed above is evidence that a track was drawn
-    // rather than that neither pane drew one.
+    // The declaration is what draws it: the same rows *without* it paint a different
+    // frame, so the assertions below are evidence that a track was drawn rather than
+    // that nothing was.
     let untracked = ViewNode::selectable_list(
-        match case.native_tree() {
+        match tree {
             ViewNode::List { children, .. } => children,
             other => panic!("expected a list, got {}", other.kind_name()),
         },
@@ -541,15 +483,24 @@ fn the_plugin_declares_every_power_it_uses() {
 }
 
 /// Before the host has published anything the reader answers "no tree", so the
-/// plugin's first render must produce the empty-state pane rather than an error.
+/// plugin's first render must produce the empty-state pane rather than an error — and
+/// the *same* empty state a session with no folders gets, which is the recorded
+/// `no-folders` case.
 #[test]
 fn the_first_render_before_any_publication_succeeds() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
     let host = host();
+    let empty = cases()
+        .into_iter()
+        .find(|c| c.name == "no folders")
+        .expect("the empty case");
+    thurbox::session::pane_context::publish(empty.context());
+    let no_folders = render(&host);
+
     thurbox::session::pane_context::publish(PaneContext::default());
     assert_eq!(
         render(&host),
-        file_tree(&[], None, false),
+        no_folders,
         "an empty publication draws the same pane a session with no folders does"
     );
 }

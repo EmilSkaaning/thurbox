@@ -12,8 +12,8 @@
 //!
 //! So the rule binds the whole bundled set rather than the manifests that
 //! happened to remember it, and [`PANES_DRAWN_IN_A_NATIVE_PANES_PLACE`] is where a
-//! handover argues its exception. Two of its three entries still seed hidden, because
-//! the kernel flags they replaced initialised to `false`; the third replaced a band that
+//! handover argues its exception. Three of its four entries still seed hidden, because
+//! the kernel flags they replaced initialised to `false`; the other replaced a band that
 //! was **always on screen**, so it seeds visible. Which value is right is not this
 //! rule's to choose — [`a_handed_over_pane_seeds_at_the_native_panes_default`] compares
 //! against the native default the list records.
@@ -50,6 +50,7 @@ const PANES_DRAWN_IN_A_NATIVE_PANES_PLACE: &[HandedOver] = &[
     HandedOver::hidden("info-panel", "info"),
     HandedOver::hidden("tasks", "tasks"),
     HandedOver::visible("automations", "automations"),
+    HandedOver::hidden("file-viewer", "files"),
 ];
 
 /// One handed-over pane: which plugin and pane id, and whether the native pane it

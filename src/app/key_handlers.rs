@@ -597,7 +597,7 @@ impl App {
         // that panel is toggled on.
         if review {
             ring.push(ReviewFiles);
-        } else if self.show_file_viewer || self.pane_keyboard_taken(KeyContext::FileViewer) {
+        } else if self.pane_keyboard_taken(KeyContext::FileViewer) {
             ring.push(FileViewer);
         }
         // A plugin pane is a ring stop only when it can do something
@@ -1576,12 +1576,24 @@ impl App {
         self.resize_sessions_to_content_area();
     }
 
-    /// Toggle the file viewer column; showing it rebuilds it for the active
-    /// session, hiding it returns focus to the session list.
+    /// The file viewer is a plugin's pane (ADR-58), so the *flip* already happened in
+    /// `toggle_panes_bound_to` before this ran and there is no kernel pane left to
+    /// toggle. What is left for the kernel is what the flip cannot do: rebuild the tree
+    /// for the active session and follow the pane with **focus**, exactly as `F3`
+    /// always did — showing it focuses it, hiding it drops focus back — and report when
+    /// nothing provides the pane at all, since a silent key is indistinguishable from a
+    /// broken binding.
     fn act_toggle_file_viewer(&mut self) {
-        self.show_file_viewer = !self.show_file_viewer;
-        if self.show_file_viewer {
+        if !self.pane_bound_to(crate::session::Action::ToggleFileViewer) {
+            self.set_info(format!(
+                "File viewer: {}",
+                Self::no_pane_hint("file-viewer")
+            ));
+            return;
+        }
+        if self.pane_keyboard_taken(crate::session::KeyContext::FileViewer) {
             self.rebuild_file_viewer_for_active();
+            self.focus = InputFocus::FileViewer;
         } else if self.focus == InputFocus::FileViewer {
             self.focus = self.focus_fallback();
         }
@@ -1653,10 +1665,10 @@ impl App {
     /// Expand the selected file-viewer node, opening it in the editor when it's
     /// a file (dirs just toggle). Shared by the `FileViewerExpand` action.
     pub(super) fn file_viewer_expand(&mut self) {
-        use crate::ui::file_viewer::Activation;
+        use crate::app::file_viewer::Activation;
         // Capture root+file before activate() (activate only opens files, not dirs).
         let file_with_root = self.file_viewer.selected_file_with_root();
-        if matches!(self.file_viewer.activate(), Activation::Open(_)) {
+        if matches!(self.file_viewer.activate(), Activation::Open) {
             if let Some((file, root)) = file_with_root {
                 self.open_file_in_editor(root, file);
             }

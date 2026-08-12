@@ -3016,3 +3016,86 @@ than argued:
 And a cross-pane observation worth carrying: this pane and the file viewer are now blocked
 on the *same class* of thing — a `ui` module that is simultaneously a pane's renderer and
 the kernel's model — which is one host decision rather than two pane problems.
+
+## 33. The file viewer's handover — a seat with two occupants (ADR-58)
+
+The fourth pane handed over, and the one whose gate was written around a **capability**
+that turned out not to be needed. `src/ui/file_viewer.rs` is deleted; the column is
+`src/plugin/bundled/file-viewer/init.luau`, drawn from a new `file-viewer` seat, bound to
+`ToggleFileViewer`, gated by `[features] file_viewer`, declaring the `FileViewer` keyboard.
+
+### The finding: the pane that reaches outside the process needs no reach
+
+Two of the pane's seven keys do things no other pane's do — `l`/`Enter` on a directory
+**reads the filesystem**, `l`/`Enter` on a file **launches `$EDITOR`** — and §16 recorded
+the port's brief as finding the minimum widening of `Capability::Files` that would let a
+plugin perform them. ADR-51 made the question moot and ADR-54 recorded that it had:
+because the pane declares `key_context = "FileViewer"`, thurbox resolves those seven
+actions itself and performs them against `App::file_viewer`, so `FileViewerState::activate`
+still does the read and `App::file_viewer_expand` still launches the editor.
+
+The handover therefore grants **nothing**. `files` publishes a basename per row and
+nothing else: no path, no contents, no directory listing, no query. The gate's three
+structural rows are preserved as a table in ADR-58 rather than deleted with their tests,
+because a record that says "this was unnecessary" is the only thing distinguishing it from
+a record that stopped looking.
+
+### The decision the earlier three did not face: two occupants, one seat
+
+Every seat handed over so far had exactly one possible occupant once its kernel renderer
+was deleted. This one has two: a code review's changed-files list is force-shown into the
+file viewer's column, with its own focus and its own keys, and ADR-45 records it as wanting
+`RegionId::FileViewer` specifically. ADR-46's rule — a visible plugin pane takes its seat —
+would have drawn a working-tree file tree where the changed files belong.
+
+The rule is **preemption**, in `App::seat_preempted`: while a review is open the seat is
+the review list's, `render_plugin_panes` skips it, and `layout_for` carves the column for
+the claim *or* the review. It is preemption and not sharing because the two never coexist —
+the list replaces the tree in that column by design — and it is the *kernel's* rule because
+a manifest naming a thurbox surface would let one plugin outrank another. The plugin is
+told nothing and keeps its stored visibility, so closing the review restores the pane with
+no keystroke.
+
+### The mechanism §28 predicted, widened
+
+The tasks pane's hint row made seat chrome a concept and named the file viewer's search bar
+as what would need it next. It does, at three rows instead of one: `App::pane_hints` becomes
+`App::pane_chrome` over a closed set of shapes, and a `SearchBar` band is subtracted from
+the seat **before** the pane's frame is drawn — the same split the native pane made, so the
+pane's box and its row hitboxes are unchanged. Still data rather than a painter. The bar
+stays the kernel's for the reason the hint row did, in its own form: the query, the caret
+and the counter are kernel state, and the `no-query-write` row is why no snapshot carries
+a query.
+
+### What the oracle kept, and what it lost
+
+The ten recordings are byte-identical after the deletion — `git status tests/snapshots/`
+empty, ADR-42's payoff for the fourth time. What went is the `file_tree` edge. The two
+**frame** tests kept their claims and lost their comparison: what they assert is that the
+*kernel* resolves the window and reserves the track, which no tree can show, so each now
+paints the plugin's tree and asserts the cells — the cursor's row on screen with the top
+scrolled off, and a track column carrying a thumb and no row text. The search-bar test
+stopped being a divergence and became a boundary: the bar is chrome, and the pane must not
+imitate it.
+
+### Two behaviours changed, both named
+
+The scrollbar's **drag** is gone: a plugin pane records no drag target, because the painter
+reports row hitboxes and not the track's rect, so `ScrollTarget::FileViewer` is deleted
+with it. The wheel still scrolls the column (`App::pane_at` resolves that from the layout).
+Restoring the drag means letting the plugin-pane painter report its track, which is a change
+for every seated list pane. And the tree's rebuild moved from the paint to the tick, before
+the publication it feeds, gated on the pane being on screen — which is the native
+behaviour, since a closed column read no directory.
+
+### Where this leaves §32's cross-pane observation
+
+§32 closed by noting that this pane and the session list were blocked on the same class of
+thing: a `ui` module that is simultaneously a pane's renderer and the kernel's model. That
+class is now half-resolved rather than merely halved in count, because the missing piece
+was a *destination rule* and this handover wrote one: the model goes to the layer that owns
+the value (`app`), and **not** to the pure-data layer if it performs effects — which is why
+`FileViewerState`, whose `activate`/`reveal_path` call `read_dir`, could not follow
+`session::review`'s example. A shared helper goes to its layer's own vocabulary, which is
+where `visible_window` went. The session list's module row can be taken on those terms; its
+window row cannot, and that is what is left.

@@ -356,6 +356,46 @@ impl Harness {
             .pane_keyboard_taken(crate::session::KeyContext::Tasks)
     }
 
+    /// Seat the pane that provides the file viewer, mirroring
+    /// `src/plugin/bundled/file-viewer/plugin.toml` (ADR-58).
+    ///
+    /// Seeded **hidden**, like the manifest and like the `show_file_viewer` flag it
+    /// replaced, so a test that wants the column on screen presses `F3`.
+    #[cfg(feature = "plugins")]
+    fn seat_file_viewer_pane(&mut self) -> &mut Self {
+        use crate::session::plugin_manifest::PaneSlot;
+        use crate::session::settings::FeatureFlag;
+        use crate::session::{Action, KeyContext};
+
+        let mut pane = crate::plugin::PluginPane::loading(
+            "file-viewer",
+            "files",
+            "Files",
+            PaneSlot::FileViewer,
+            false,
+        );
+        pane.toggle_action = Some(Action::ToggleFileViewer);
+        pane.feature = Some(FeatureFlag::FileViewer);
+        pane.key_context = Some(KeyContext::FileViewer);
+        // A tree, so the column has rows to click and a frame to paint.
+        pane.apply(Ok(crate::session::view_tree::ViewNode::selectable_list(
+            vec![crate::session::view_tree::ViewNode::text("a file")],
+            Some(0),
+        )));
+        let mut panes = self.app.plugin_panes.clone();
+        panes.push(pane);
+        self.app.set_plugin_panes(panes);
+        self
+    }
+
+    /// Whether the interface's file tree is on screen — the question
+    /// `App::show_file_viewer` used to answer before the pane was handed over.
+    #[cfg(feature = "plugins")]
+    fn file_viewer_pane_shown(&self) -> bool {
+        self.app
+            .pane_keyboard_taken(crate::session::KeyContext::FileViewer)
+    }
+
     /// Feed one key event, exactly as the real event loop converts a crossterm
     /// `KeyPress` into an [`AppMessage`].
     fn key(&mut self, code: KeyCode, mods: KeyModifiers) -> &mut Self {
@@ -1122,24 +1162,29 @@ fn session_list_renders_seeded_sessions() {
 
 // ── Side panels: file viewer, info panel ─────────────────────────────────────
 
+/// Both chords bound to `ToggleFileViewer` reach the pane that replaced the file
+/// viewer (ADR-58) — the point being that the handover changed the pane's
+/// *implementation*, not its keyboard.
+#[cfg(feature = "plugins")]
 #[test]
 fn file_viewer_toggles_via_f3_and_ctrl_e() {
     // F3 and Ctrl+E are the two default chords for ToggleFileViewer.
     let mut h = Harness::standard(1);
-    assert!(!h.app.show_file_viewer);
+    h.seat_file_viewer_pane();
+    assert!(!h.file_viewer_pane_shown());
 
     h.func(3);
-    assert!(h.app.show_file_viewer, "F3 reveals the file viewer");
+    assert!(h.file_viewer_pane_shown(), "F3 reveals the file viewer");
     h.func(3);
-    assert!(!h.app.show_file_viewer, "F3 again hides it");
+    assert!(!h.file_viewer_pane_shown(), "F3 again hides it");
 
     h.ctrl('e');
     assert!(
-        h.app.show_file_viewer,
+        h.file_viewer_pane_shown(),
         "Ctrl+E also reveals the file viewer"
     );
     h.ctrl('e');
-    assert!(!h.app.show_file_viewer, "Ctrl+E again hides it");
+    assert!(!h.file_viewer_pane_shown(), "Ctrl+E again hides it");
 }
 
 /// Both chords bound to `ToggleInfoPanel` reach the pane that replaced the info
@@ -1378,11 +1423,13 @@ fn focus_cycles_between_session_list_and_terminal() {
     );
 }
 
+#[cfg(feature = "plugins")]
 #[test]
 fn focus_ring_includes_file_viewer_when_shown() {
     let mut h = Harness::standard(1);
+    h.seat_file_viewer_pane();
     h.func(3); // show the file viewer
-    assert!(h.app.show_file_viewer);
+    assert!(h.file_viewer_pane_shown());
 
     // Cycling forward from the session list must reach the file viewer.
     let mut saw_file_viewer = false;
@@ -2259,14 +2306,16 @@ async fn disabling_a_live_feature_tears_down_its_open_surfaces() {
     // switch is enforced by `PluginPane::is_shown` on every read rather than by a
     // teardown pass — which is also what preserves the user's stored choice across
     // the switch going off and on (`a_gated_off_pane_keeps_its_stored_visibility`).
-    h.app.show_file_viewer = true;
-    // The tasks pane exists only where a plugin can provide it (ADR-53), so its half
-    // of this test does too.
+    // The tasks pane and the file viewer exist only where a plugin can provide them
+    // (ADR-53, ADR-58), so their halves of this test do too.
     #[cfg(feature = "plugins")]
     {
         h.seat_tasks_pane();
+        h.seat_file_viewer_pane();
         h.app
             .set_pane_keyboard_visible(crate::session::KeyContext::Tasks, true);
+        h.app
+            .set_pane_keyboard_visible(crate::session::KeyContext::FileViewer, true);
     }
     h.app
         .session_terminal_views
@@ -2283,12 +2332,15 @@ async fn disabling_a_live_feature_tears_down_its_open_surfaces() {
     settings.features.code_review = false;
     h.app.apply_live_settings(&settings);
 
-    assert!(!h.app.show_file_viewer, "file viewer hidden");
-    // The tasks pane hides itself: it declares `feature = "tasks"`, so the switch is
-    // enforced on every read of its visibility rather than by a teardown pass — like
-    // the info panel, and which is what preserves the user's stored choice.
+    // The tasks pane and the file viewer hide themselves: each declares its
+    // `feature`, so the switch is enforced on every read of its visibility rather than
+    // by a teardown pass — like the info panel, and which is what preserves the user's
+    // stored choice.
     #[cfg(feature = "plugins")]
-    assert!(!h.tasks_pane_shown(), "tasks pane hidden");
+    {
+        assert!(!h.tasks_pane_shown(), "tasks pane hidden");
+        assert!(!h.file_viewer_pane_shown(), "file viewer hidden");
+    }
     assert_eq!(
         h.app.session_terminal_views.get(&sid).copied(),
         Some(TerminalView::Claude),
@@ -3413,14 +3465,11 @@ fn assert_invariants(app: &App, ctx: &str) {
         "[{ctx}] automation pane selection out of bounds"
     );
 
-    // Panel visibility never outlives its feature flag. Neither the tasks pane nor the
-    // automations band is here: both are plugin panes (ADR-53, ADR-56) whose
-    // `[features]` switch is enforced by `PluginPane::is_shown` on every read, which
-    // the focus rules below are what exercise.
-    assert!(
-        !app.show_file_viewer || app.features.file_viewer,
-        "[{ctx}] file viewer shown with the feature disabled"
-    );
+    // Panel visibility never outlives its feature flag — a rule with nothing left to
+    // check here. Every pane it covered is a plugin pane now (ADR-50/53/56/57), whose
+    // `[features]` switch is enforced by `PluginPane::is_shown` on every read of
+    // visibility rather than by a flag a teardown pass has to remember to clear. The
+    // focus rules below are what exercise it.
 
     // Focus only ever rests on a surface that exists.
     match app.focus {
@@ -3435,9 +3484,12 @@ fn assert_invariants(app: &App, ctx: &str) {
             "[{ctx}] focus {:?} but no pane provides the task list",
             app.focus
         ),
+        // As for the task list, and for the same reason (ADR-58): a pane has to
+        // *provide* the file viewer for its focus to be reachable, which a build with
+        // no plugin host cannot do — so this asserts that build never reaches it.
         InputFocus::FileViewer => assert!(
-            app.show_file_viewer,
-            "[{ctx}] focus on a hidden file viewer"
+            app.pane_keyboard_taken(crate::session::KeyContext::FileViewer),
+            "[{ctx}] focus on the file viewer but no pane provides it"
         ),
         InputFocus::GlobalSearch => assert!(
             app.global_search.active,
@@ -4829,8 +4881,8 @@ fn a_focused_plugin_pane_draws_a_focused_border() {
 #[test]
 fn the_tasks_seat_is_carved_by_the_claim_and_sits_left_of_the_file_viewer() {
     let mut h = Harness::new(160, 40, 1);
-    h.app.show_file_viewer = true;
     h.seat_tasks_pane();
+    h.seat_file_viewer_pane();
     assert!(
         h.app.screen_layout().tasks_panel.is_none(),
         "a hidden pane claims no seat"
@@ -4838,6 +4890,8 @@ fn the_tasks_seat_is_carved_by_the_claim_and_sits_left_of_the_file_viewer() {
 
     h.app
         .set_pane_keyboard_visible(crate::session::KeyContext::Tasks, true);
+    h.app
+        .set_pane_keyboard_visible(crate::session::KeyContext::FileViewer, true);
     let areas = h.app.screen_layout();
     let tasks = areas.tasks_panel.expect("the claim carves the seat");
     let files = areas.file_viewer.expect("the file viewer is shown");
@@ -6171,8 +6225,11 @@ fn pane_context_bounds_how_many_file_rows_it_publishes() {
     let idx = h.app.active_index;
     h.app.sessions[idx].info.cwd = Some(repo.path().to_path_buf());
     h.app.rebuild_file_viewer_for_active();
-    // Put the cursor past the bound, which is the case the drop rule is for.
-    h.app.file_viewer.select_index(over);
+    // Put the cursor past the bound, which is the case the drop rule is for. Reached
+    // through the pane's own key rather than `select_index`, which exists only where a
+    // pane can be clicked (ADR-58) — and this is a claim about the publication, which
+    // both builds make.
+    h.app.file_viewer.move_selection(over as i32);
 
     let files = h.app.build_pane_context().files;
     assert_eq!(
@@ -6552,7 +6609,6 @@ fn no_claim_leaves_every_rect_unchanged() {
     use crate::session::plugin_manifest::PaneSlot;
 
     let mut h = Harness::new(160, 40, 1);
-    h.app.show_file_viewer = true;
     let before = h.app.screen_layout();
 
     // Hidden panes in every seat, plus a hidden right-column one: a seat is
@@ -6561,6 +6617,7 @@ fn no_claim_leaves_every_rect_unchanged() {
         crate::plugin::PluginPane::loading("a", "l", "L", PaneSlot::Left, false),
         crate::plugin::PluginPane::loading("a", "lb", "LB", PaneSlot::LeftBottom, false),
         crate::plugin::PluginPane::loading("a", "cl", "CL", PaneSlot::CenterLeft, false),
+        crate::plugin::PluginPane::loading("a", "fv", "FV", PaneSlot::FileViewer, false),
         crate::plugin::PluginPane::loading("a", "c", "C", PaneSlot::Center, false),
         crate::plugin::PluginPane::loading("a", "r", "R", PaneSlot::Right, false),
     ]);
@@ -6572,8 +6629,9 @@ fn no_claim_leaves_every_rect_unchanged() {
 ///
 /// Both occupants flip: the assertion checks the kernel's own flag moves too, so
 /// the reversibility rule ADR-46 established is not quietly dropped. The action is
-/// `ToggleFileViewer` because it is one whose kernel pane still *exists* —
-/// `ToggleInfoPanel`'s does not (ADR-50), and that case is
+/// `ToggleSessionList` because it is the last one whose kernel pane still *exists* —
+/// the info panel's, the tasks pane's and the file viewer's are all deleted
+/// (ADR-50/53/57), and that case is
 /// [`a_handed_over_panes_action_has_one_occupant`] below.
 #[cfg(feature = "plugins")]
 #[test]
@@ -6582,28 +6640,27 @@ fn a_pane_bound_to_an_action_answers_it() {
     use crate::session::Action;
 
     let mut h = Harness::new(160, 40, 1);
-    assert!(!h.app.show_file_viewer);
+    assert!(h.app.show_session_list);
     let mut pane =
-        crate::plugin::PluginPane::loading("demo", "files", "Files", PaneSlot::Right, false);
-    pane.toggle_action = Some(Action::ToggleFileViewer);
+        crate::plugin::PluginPane::loading("demo", "board", "Board", PaneSlot::Right, false);
+    pane.toggle_action = Some(Action::ToggleSessionList);
     h.app.set_plugin_panes(vec![pane]);
 
-    h.func(3);
+    h.func(9);
     assert_eq!(
-        h.app.plugin_pane_visible("demo", "files"),
+        h.app.plugin_pane_visible("demo", "board"),
         Some(true),
         "the declared action shows the pane"
     );
     assert!(
-        h.app.show_file_viewer,
-        "the kernel's own pane keeps answering its action, so hiding the plugin \
-         pane hands its column back"
+        !h.app.show_session_list,
+        "the kernel's own pane keeps answering its action too"
     );
 
-    h.func(3);
-    assert_eq!(h.app.plugin_pane_visible("demo", "files"), Some(false));
+    h.func(9);
+    assert_eq!(h.app.plugin_pane_visible("demo", "board"), Some(false));
     assert!(
-        !h.app.show_file_viewer,
+        h.app.show_session_list,
         "twice returns every occupant to the start"
     );
 }

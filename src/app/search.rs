@@ -73,7 +73,9 @@ pub(crate) struct SearchSnapshot {
     /// on-screen, so restoring cannot erase a choice a `[features]` switch was
     /// hiding.
     pub tasks_pane_visible: Option<bool>,
-    pub show_file_viewer: bool,
+    /// The same, for the pane that provides the file viewer — a plugin's since ADR-58,
+    /// and captured on the same terms for the same reason.
+    pub file_viewer_pane_visible: Option<bool>,
 }
 
 /// State for the global-search strip.
@@ -131,7 +133,8 @@ impl App {
             automation_panel_index: self.automation_ui.automation_panel_index,
             tasks_pane_visible: self
                 .pane_keyboard_stored_visibility(crate::session::KeyContext::Tasks),
-            show_file_viewer: self.show_file_viewer,
+            file_viewer_pane_visible: self
+                .pane_keyboard_stored_visibility(crate::session::KeyContext::FileViewer),
         });
         self.global_search.active = true;
         self.global_search.query.clear();
@@ -155,7 +158,9 @@ impl App {
             if let Some(visible) = snap.tasks_pane_visible {
                 self.set_pane_keyboard_visible(crate::session::KeyContext::Tasks, visible);
             }
-            self.show_file_viewer = snap.show_file_viewer;
+            if let Some(visible) = snap.file_viewer_pane_visible {
+                self.set_pane_keyboard_visible(crate::session::KeyContext::FileViewer, visible);
+            }
             self.focus = snap.focus;
         }
         self.global_search.active = false;
@@ -352,7 +357,7 @@ impl App {
         let Some(info) = self.sessions.get(self.active_index).map(|s| &s.info) else {
             return files;
         };
-        for (root, path, name) in crate::ui::file_viewer::enumerate_paths(info) {
+        for (root, path, name) in crate::app::file_viewer::enumerate_paths(info) {
             if files.len() >= MAX_PER_GROUP {
                 break;
             }
@@ -548,10 +553,24 @@ impl App {
                 }
             }
             SearchTarget::File { root: _, path } => {
-                self.show_file_viewer = true;
+                // Revealing the pane is how a file result is *opened*, and the pane is
+                // a plugin's now (ADR-58) — so a build with none has nowhere to land,
+                // and the jump reports that rather than focusing a pane that is not
+                // there. The reveal itself is the kernel's either way: it expands the
+                // tree down to the path, which is a directory read no plugin could do.
+                let revealed =
+                    self.set_pane_keyboard_visible(crate::session::KeyContext::FileViewer, true);
                 self.rebuild_file_viewer_for_active();
                 self.file_viewer.reveal_path(&path);
-                self.focus = InputFocus::FileViewer;
+                if revealed {
+                    self.focus = InputFocus::FileViewer;
+                } else {
+                    self.focus = fallback_focus;
+                    self.set_info(format!(
+                        "File viewer: {}",
+                        Self::no_pane_hint("file-viewer")
+                    ));
+                }
             }
         }
         self.resize_sessions_to_content_area();

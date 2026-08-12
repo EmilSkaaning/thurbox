@@ -236,7 +236,7 @@ const BLOCKERS: &[Blocker] = &[
         stands: "`render_session_section` hands its nodes to a ratatui `List` with a `ListState`, \
                  and reads `list_state.offset()` back **after** the stateful render for all three \
                  of the above. A seated plugin pane declares its cursor and the kernel windows it \
-                 with `ui::file_viewer::visible_window` over flat single rows — a different rule, \
+                 with `ui::visible_window` over flat single rows — a different rule, \
                  over a different row count, since the plugin's index counts the headers the \
                  native item folds in (`the_two_panes_window_a_long_list_by_different_rules`). So \
                  both keep the cursor visible and they do **not** agree on which other rows are \
@@ -263,7 +263,7 @@ const BLOCKERS: &[Blocker] = &[
             // And a plugin pane's window is the kernel's shared helper over the tree's
             // own children, which is a different rule over a different count.
             let plugin_window_is_the_shared_rule =
-                source(root, "src/ui/plugin_pane.rs").contains("file_viewer::visible_window");
+                source(root, "src/ui/plugin_pane.rs").contains("super::visible_window");
             widget_owns_the_window
                 && indicators_come_off_it
                 && hitboxes_come_off_it

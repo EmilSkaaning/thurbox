@@ -85,7 +85,7 @@ pub fn render_run_history(
     // column for a scrollbar when the history overflows.
     let height = list_area.height as usize;
     let (rows_area, track) = scrollbar::reserve_track(list_area, runs.len(), height);
-    let (start, end) = super::file_viewer::visible_window(runs.len(), selected, height.max(1));
+    let (start, end) = super::visible_window(runs.len(), selected, height.max(1));
 
     let lines: Vec<Line> = runs[start..end]
         .iter()

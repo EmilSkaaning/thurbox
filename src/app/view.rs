@@ -18,8 +18,8 @@ use crate::ui::selection;
 use crate::ui::theme::Theme;
 use crate::ui::{
     agent_picker_modal, automation_editor_modal, automations_list_modal, branch_selector_modal,
-    file_viewer, global_search, project_list, restore_sessions_modal, session_name_modal,
-    status_bar, task_editor_modal, terminal_view, theme_picker_modal, worktree_name_modal,
+    global_search, project_list, restore_sessions_modal, session_name_modal, status_bar,
+    task_editor_modal, terminal_view, theme_picker_modal, worktree_name_modal,
 };
 
 #[cfg(feature = "plugins")]
@@ -209,7 +209,7 @@ impl App {
         // `render_plugin_panes` from the `left-bottom` and `center-left` seats.
         #[cfg(feature = "plugins")]
         self.render_plugin_panes(frame, &areas);
-        self.render_file_viewer(frame, areas.file_viewer);
+        self.render_review_files(frame, areas.file_viewer);
         self.render_central_pane(frame, areas.terminal);
         if let Some(search_area) = areas.global_search {
             let gs = &self.global_search;
@@ -280,13 +280,15 @@ impl App {
                         | ClickAction::RepoFocus(_)
                 )
             } else {
-                // The tasks and automations row targets are listed separately because
-                // they exist only in a build with the plugin host: the panes that
-                // record them are plugins' (ADR-53, ADR-56).
+                // The tasks, automations and file-viewer row targets are listed
+                // separately because they exist only in a build with the plugin host:
+                // the panes that record them are plugins' (ADR-53, ADR-56, ADR-58).
                 #[cfg(feature = "plugins")]
                 let a_plugin_pane_row = matches!(
                     t.action,
-                    ClickAction::SelectTask(_) | ClickAction::SelectAutomation(_)
+                    ClickAction::SelectTask(_)
+                        | ClickAction::SelectAutomation(_)
+                        | ClickAction::SelectFileRow(_)
                 );
                 #[cfg(not(feature = "plugins"))]
                 let a_plugin_pane_row = false;
@@ -294,7 +296,6 @@ impl App {
                     || matches!(
                         t.action,
                         ClickAction::SelectSession(_)
-                            | ClickAction::SelectFileRow(_)
                             | ClickAction::Global(_)
                             | ClickAction::ReviewButton(_)
                             | ClickAction::ReviewTarget(_)
@@ -505,21 +506,26 @@ impl App {
             Vec::new();
 
         // Seats first, in the order the native panes are drawn in. Each holds one
-        // pane, so a second claimant is simply not placed.
+        // pane, so a second claimant is simply not placed — and a seat a kernel
+        // surface has preempted holds none at all (ADR-58).
         for (slot, rect) in [
             (PaneSlot::Left, areas.left_panel),
             (PaneSlot::LeftBottom, areas.automations_panel),
             (PaneSlot::CenterLeft, areas.info_panel),
             (PaneSlot::Tasks, areas.tasks_panel),
+            (PaneSlot::FileViewer, areas.file_viewer),
             (PaneSlot::Center, Some(areas.terminal)),
         ] {
+            if self.seat_preempted(slot) {
+                continue;
+            }
             let (Some(pane), Some(rect)) = (self.plugin_seat(slot), rect) else {
                 continue;
             };
             let focus = self.plugin_pane_focus_level(pane);
             let clicks = pane_clicks(pane);
-            let hints = self.plugin_pane_hints(pane, focus);
-            let rows = Self::paint_plugin_pane(frame, pane, rect, &self.motion, focus, hints);
+            let chrome = self.plugin_pane_chrome(pane, focus);
+            let rows = Self::paint_plugin_pane(frame, pane, rect, &self.motion, focus, chrome);
             painted.push((pane.plugin.clone(), pane.id.clone(), rect, clicks, rows));
         }
 
@@ -532,8 +538,8 @@ impl App {
         for (pane, &rect) in column.into_iter().zip(&areas.plugin_panes) {
             let focus = self.plugin_pane_focus_level(pane);
             let clicks = pane_clicks(pane);
-            let hints = self.plugin_pane_hints(pane, focus);
-            let rows = Self::paint_plugin_pane(frame, pane, rect, &self.motion, focus, hints);
+            let chrome = self.plugin_pane_chrome(pane, focus);
+            let rows = Self::paint_plugin_pane(frame, pane, rect, &self.motion, focus, chrome);
             painted.push((pane.plugin.clone(), pane.id.clone(), rect, clicks, rows));
         }
 
@@ -589,22 +595,28 @@ impl App {
         }
     }
 
-    /// The chrome row the kernel draws in this pane's seat, if any.
+    /// The chrome the kernel draws in this pane's seat, if any.
     ///
-    /// Only for a pane that declared one of thurbox's keyboards, and only while that
-    /// pane holds focus — the same condition the native pane's own footer had. A pane
-    /// that is nobody's reproduction gets none: the kernel has nothing to say about
-    /// keys it does not dispatch there.
+    /// Only for a pane that declared one of thurbox's keyboards: a pane that is
+    /// nobody's reproduction gets none, since the kernel has nothing to say in a place
+    /// it draws nothing.
+    ///
+    /// **Focus gates the hint row and not the bar**, because that is the condition each
+    /// had before its handover: the tasks pane's footer appeared with the pane's focus,
+    /// while the file viewer's search bar stayed on screen with a committed query and a
+    /// muted border however focus moved (ADR-58). A handover keeps a pane's conditions,
+    /// so the difference is here rather than smoothed away.
     #[cfg(feature = "plugins")]
-    fn plugin_pane_hints(
+    fn plugin_pane_chrome(
         &self,
         pane: &crate::plugin::PluginPane,
         focus: crate::ui::FocusLevel,
-    ) -> Option<&'static [(&'static str, &'static str)]> {
-        if !matches!(focus, crate::ui::FocusLevel::Focused) {
-            return None;
+    ) -> Option<super::PaneChrome> {
+        let chrome = self.pane_chrome(pane.key_context?)?;
+        match chrome {
+            super::PaneChrome::Hints(_) if !matches!(focus, crate::ui::FocusLevel::Focused) => None,
+            chrome => Some(chrome),
         }
-        Self::pane_hints(pane.key_context?)
     }
 
     /// How a plugin pane's frame is drawn: focused, active, or neither.
@@ -643,9 +655,26 @@ impl App {
         rect: Rect,
         motion: &motion_state::MotionState,
         focus: crate::ui::FocusLevel,
-        hints: Option<&'static [(&'static str, &'static str)]>,
+        chrome: Option<super::PaneChrome>,
     ) -> Vec<crate::ui::RowHitbox> {
         use crate::ui::focus_block;
+
+        // Seat chrome the kernel draws **outside** the pane's frame is subtracted
+        // first, so the frame below is the box the native pane's own block occupied
+        // (ADR-58). The same `Min(0) | Length(3)` split the native pane's own chrome
+        // made, through the same layout, so the bar lands in the rows it always did.
+        let mut rect = rect;
+        let band = match &chrome {
+            Some(super::PaneChrome::SearchBar(_)) => {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(0), Constraint::Length(3)])
+                    .split(rect);
+                rect = chunks[0];
+                Some(chunks[1])
+            }
+            _ => None,
+        };
 
         // An error is shown in the title rather than over the content, so a
         // failing render keeps the last good tree readable underneath it.
@@ -662,15 +691,24 @@ impl App {
         let mut inner = block.inner(rect);
         frame.render_widget(block, rect);
 
-        // Seat chrome: a row the *kernel* draws inside the frame, above the plugin's
-        // tree, because the plugin could not draw it (ADR-53). The same subtraction
-        // the native pane made before rendering its list, so the plugin's content
-        // area — and therefore its row hitboxes — is the area that pane's content
-        // had.
-        if let Some(hints) = hints.filter(|_| inner.height > 2) {
-            let hint_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
-            frame.render_widget(Paragraph::new(crate::ui::key_hint_line(hints)), hint_area);
-            inner.height -= 1;
+        // The other shape: a row the *kernel* draws inside the frame, below the
+        // plugin's tree, because the plugin could not draw it (ADR-53). The same
+        // subtraction the native pane made before rendering its list, so the plugin's
+        // content area — and therefore its row hitboxes — is the area that pane's
+        // content had.
+        match chrome {
+            Some(super::PaneChrome::Hints(hints)) if inner.height > 2 => {
+                let hint_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+                frame.render_widget(Paragraph::new(crate::ui::key_hint_line(hints)), hint_area);
+                inner.height -= 1;
+            }
+            Some(super::PaneChrome::SearchBar(search)) => {
+                // `band` is `Some` whenever this arm is, by the split above.
+                if let Some(band) = band {
+                    crate::ui::search_bar::render_search_bar(frame, band, &search);
+                }
+            }
+            _ => {}
         }
 
         let palette = crate::ui::theme::current();
@@ -749,49 +787,41 @@ impl App {
         self.record_click(pane, ClickAction::FocusPane(pane_focus));
     }
 
-    /// Render the file viewer in the right column (when present).
-    fn render_file_viewer(&mut self, frame: &mut Frame, fv_area: Option<Rect>) {
+    /// Draw the **code review's** changed-files list into the file-viewer column.
+    ///
+    /// The column's second occupant, and the reason this seat is the one where a plugin
+    /// claim does not simply win (ADR-58). The working-tree file viewer is a plugin's
+    /// pane now, seated at `PaneSlot::FileViewer`; while a review is open this list
+    /// *preempts* it — `render_plugin_panes` skips the seat, `layout_for` carves the
+    /// column for the review whether or not a pane claims it, and the pane's stored
+    /// visibility is untouched, so closing the review brings it back with no keystroke.
+    ///
+    /// The two never coexist: this list is the diff's navigation aid and replaces the
+    /// tree in that column by design, which is why it is preemption rather than a
+    /// second seat that would be empty in every configuration but one.
+    fn render_review_files(&mut self, frame: &mut Frame, fv_area: Option<Rect>) {
         let Some(fv_area) = fv_area else {
             return;
         };
-        // While a review is open, this column shows the review's changed-files
-        // list (the navigation aid) instead of the working-tree file viewer.
-        if self.active_review().is_some() {
-            let level = if self.focus == InputFocus::ReviewFiles {
-                crate::ui::FocusLevel::Focused
-            } else {
-                crate::ui::FocusLevel::Active
-            };
-            let rows = self
-                .active_review()
-                .map(|cr| crate::ui::code_review::render_files_list(frame, fv_area, cr, level));
-            if let Some(rows) = rows {
-                for h in rows {
-                    self.record_click(h.rect, ClickAction::ReviewFile(h.index));
-                }
-            }
-            // A click anywhere in the column focuses the changed-files pane (rows
-            // also jump the diff, recorded above and hit-tested first).
-            self.record_click(fv_area, ClickAction::FocusPane(InputFocus::ReviewFiles));
+        if self.active_review().is_none() {
             return;
         }
-        if let Some(session) = self.sessions.get(self.active_index) {
-            if self.file_viewer.needs_rebuild_for(&session.info) {
-                self.file_viewer.rebuild_from_session(&session.info);
-            }
+        let level = if self.focus == InputFocus::ReviewFiles {
+            crate::ui::FocusLevel::Focused
         } else {
-            self.file_viewer.clear();
+            crate::ui::FocusLevel::Active
+        };
+        let rows = self
+            .active_review()
+            .map(|cr| crate::ui::code_review::render_files_list(frame, fv_area, cr, level));
+        if let Some(rows) = rows {
+            for h in rows {
+                self.record_click(h.rect, ClickAction::ReviewFile(h.index));
+            }
         }
-        let fv_focus = self.pane_focus_level(crate::session::KeyContext::FileViewer);
-        let (geom, rows) =
-            file_viewer::render_file_viewer(frame, fv_area, &self.file_viewer, fv_focus);
-        self.record_scrollbar(geom, ScrollTarget::FileViewer);
-        self.record_row_clicks(
-            rows,
-            ClickAction::SelectFileRow,
-            fv_area,
-            InputFocus::FileViewer,
-        );
+        // A click anywhere in the column focuses the changed-files pane (rows
+        // also jump the diff, recorded above and hit-tested first).
+        self.record_click(fv_area, ClickAction::FocusPane(InputFocus::ReviewFiles));
     }
 
     /// Render the central pane. In the automations context (the pane or its
@@ -1202,7 +1232,7 @@ impl App {
             } else {
                 0
             },
-            file_viewer_open: self.show_file_viewer,
+            file_viewer_open: self.pane_keyboard_taken(crate::session::KeyContext::FileViewer),
             tasks_enabled: self.features.tasks,
             file_viewer_enabled: self.features.file_viewer,
             info_panel_enabled: self.features.info_panel,

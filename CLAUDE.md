@@ -991,7 +991,7 @@ deliberately no binding that reports a pane's resolved rect, since rendering
 would then be height-dependent (a resize would have to re-enter a VM before the
 frame that needed it) and a plugin that mis-windowed would produce a broken pane
 rather than a refused node. The window is
-`ui::file_viewer::visible_window`, the same helper thurbox's own panes use, so a
+`ui::visible_window`, the same helper thurbox's own panes use, so a
 native pane and a plugin reproducing it paint the *same frame* rather than merely
 build the same tree. An index outside the children is a named conversion error
 rather than a clamp — including `0`, so a zero-based index fails loudly instead
@@ -1105,7 +1105,7 @@ other — a pane up to a second stale — was closed by the event-driven render 
 *pane* is not.
 
 The bundled **`tasks`** plugin (`src/plugin/bundled/tasks/`) is the second, and the
-first *list* pane — the shape the four remaining Phase 4 panes have. From two
+first *list* pane — the shape the remaining Phase 4 panes have. From two
 capabilities (`render`, `tasks`) it reproduces the checkbox glyphs, the status
 colours, the selected > dimmed > status precedence, the emphasis on matched
 characters (segmenting the published byte offsets itself, UTF-8 rules included),
@@ -1123,8 +1123,30 @@ ellipsizing clip with a flush-right run, and a list node carrying a selected ind
 cannot scroll to its selection is not one. The port needed no new node, no new
 token and no formatter; see `docs/PHASE4-PANE-READINESS.md` §8.
 
+The bundled **`file-viewer`** plugin (`src/plugin/bundled/file-viewer/`) **is**
+thurbox's file viewer: `src/ui/file_viewer.rs` is deleted (ADR-58) and this is the
+fourth pane the kernel does not draw. It is the pane whose keys reach furthest
+outside the process — expanding a directory reads the filesystem, opening a file
+launches `$EDITOR` — and it holds **no** power for either: `key_context =
+"FileViewer"` means the kernel resolves those seven actions and performs them
+itself, so `files` still publishes a basename per row and nothing else. Its manifest
+binds the rest of the pane's identity: `slot = "file-viewer"`, `toggle_action =
+"ToggleFileViewer"` (F3/`Ctrl+E`), `feature = "file_viewer"`, `default_visible =
+false`. Two things stay the kernel's: the frame, and the **search bar** — three rows
+of bordered seat chrome below the pane, because the query, the caret and the match
+counter are kernel state no capability publishes (the tasks pane's hint row widened
+from one row to a band, `App::pane_chrome`). Its model moved with the deletion:
+`FileViewerState`/`FileNode`/`enumerate_paths` are now `src/app/file_viewer.rs` (the
+coordinator owns the value, and the model reads directories, so `session` — which
+the architecture keeps free of effects — was refused), and `visible_window` moved to
+`ui`'s shared vocabulary. Consequences worth knowing: the column's **scroll track is
+an indicator**, since a plugin pane records no drag target (the wheel still scrolls
+it); the tree is refreshed on the tick rather than in the paint, gated on the pane
+being on screen; and `--no-default-features` has no file viewer at all, with F3
+saying so.
+
 The bundled **`code-review`** plugin (`src/plugin/bundled/code-review/`) is the
-fourth, and the first ported **in part**: it reproduces the unified diff stream's
+fifth, and the first ported **in part**: it reproduces the unified diff stream's
 *lines* — the `{old} {new} {sign}` gutter, one styled run per syntax token, the
 insertion/deletion row tint reaching the pane's right edge, and the cursor's row —
 while the paired side-by-side layout, the wrap mode, horizontal scroll, file and
@@ -1148,8 +1170,12 @@ not nodes, and `MAX_REVIEW_ROWS` (60) caps the published section accordingly.
 A pane declares the **seat** it occupies (`slot`, ADR-46): `right` (the default —
 the right-hand column, which holds any number of panes), `left` (the left column,
 where the session list is), `left-bottom` (the band beneath it, the automations
-pane's), `center-left` (the narrow column left of centre, the info panel's) or
-`center` (the pane the agent terminal, the shell and the code review share).
+pane's), `center-left` (the narrow column left of centre, the info panel's),
+`center` (the pane the agent terminal, the shell and the code review share),
+`tasks` (the right column's first occupant, ADR-53) or `file-viewer` (the one after
+it, ADR-58). The last two are seats **inside** a column: its occupants are drawn in
+a fixed order, so a `right` pane lands to the right of both, and a position within a
+column is part of the pane.
 `PaneSlot::seat()` is the single mapping from that vocabulary to the `RegionId` the
 workspace tree already places, so a slot adds no geometry: a **visible** pane
 claiming a seat is drawn into exactly the rect the kernel's own pane for it would
@@ -1157,13 +1183,18 @@ have had, and that native renderer stands down for the frame (hiding the pane ha
 the seat back). A claim also *carves* the seat, so a pane in `center-left` shows
 whether or not the user has the info panel open; with no claim every rect is
 unchanged. Two claimants for one seat resolve by publication order — the first is
-drawn, the second is not drawn at all. The lower-left band is the one seat whose
+drawn, the second is not drawn at all. One seat has a **second kernel occupant**,
+and there a claim does *not* win: while a code review is open its changed-files list
+owns the `file-viewer` column, so `App::seat_preempted` skips the pane holding that
+seat (ADR-58). The pane is told nothing and keeps its stored visibility, so closing
+the review brings it back with no keystroke; the precedence is the kernel's, and no
+manifest can declare one. The lower-left band is the one seat whose
 height follows its content, and the policy stays the kernel's: it sizes the band
 from `ViewNode::stacked_row_count` (the seated pane's outermost stack), because a
 plugin is never told its rect. The central seat carries **no kernel chrome** — the
 `Agent · Review · Shell` tab strip and the F9 chevron select views that are then not
-on screen. No slot reaches the header, the footer, the global-search strip, the
-status band, or the file-viewer column.
+on screen. No slot reaches the header, the footer, the global-search strip or the
+status band.
 
 A pane may also declare **the kernel action that toggles it** and **the
 `[features]` switch that gates it** (ADR-47): `toggle_action = "ToggleInfoPanel"`
@@ -2335,7 +2366,8 @@ code_review`.
 - **Surface (tuicr-like).** A continuous diff stream in the central pane (its own
   `InputFocus::CodeReview` — unlike the shell pane, a `TerminalView` that forwards
   to a PTY, it *captures* keys), plus a **changed-files list in the file-viewer
-  column** (forced visible while a review is open via `layout_for`): it tracks the
+  column** (forced visible while a review is open via `layout_for`, and **preempting**
+  the plugin pane that otherwise holds that seat — ADR-58): it tracks the
   current file and clicking a row jumps the diff to that file
   (`ui::code_review::render_files_list` → `ClickAction::ReviewFile` →
   `cr_jump_to_file`). That changed-files list is itself a **focusable pane**
@@ -2804,7 +2836,7 @@ Global keys use `Ctrl` + semantic Vim conventions:
 | `Ctrl+Y` / `F4` | Pick TUI theme | Color **Y**oke |
 | `Ctrl+,` / `F6` | Settings panel (edit settings.toml) | **,** = preferences |
 | `Ctrl+B` / `F2` | Toggle info panel (a plugin pane; width >= 120) | Info **b**ox |
-| `Ctrl+E` / `F3` | Toggle file viewer | **E**xplore files |
+| `Ctrl+E` / `F3` | Toggle file viewer (a plugin pane) | **E**xplore files |
 | `F9` | Toggle session-list pane (hide for full-width terminal) | Sessions list |
 | `F10` | Show/hide plugin panes — picker when >1 (`plugins` feature) | Plugin pane |
 | `F12` | Toggle perf HUD (live counters + frame/tick timing) | Diagnostics |
