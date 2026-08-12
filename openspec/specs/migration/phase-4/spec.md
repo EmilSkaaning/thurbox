@@ -1592,13 +1592,20 @@ The window MUST NOT be closed by redefining the kernel's own windowing rule to m
 pane's widget: that rule is what every plugin list and several native panes scroll by, so
 a change for one pane changes all of them.
 
+The row SHALL be closed instead by converging the **pane** onto that rule — the native
+pane resolving its window, its clipped-row indicators and its click hitboxes through the
+same painter and the same windowing helper its reproduction goes through, and both trees
+folding a header and the row it heads into one list item so one index names the same row
+in both. The direction is the constraint: the shared rule is unchanged, and it is the
+pane scheduled for deletion that moves.
+
 The relocation of anything the widget's window feeds MUST be ordered **after** this
 decision, since what a windowing seam looks like decides where those functions live.
 
 #### Scenario: The two windows disagree
 
-- **WHEN** a list longer than the pane is drawn by the native pane and by its
-  reproduction
+- **WHEN** a list longer than the pane is drawn by the native pane through a list widget
+  and by its reproduction through the kernel's rule
 - **THEN** both keep the cursor visible, the sets of other visible rows differ, and the
   gate records the difference as structural
 
@@ -1608,6 +1615,13 @@ decision, since what a windowing seam looks like decides where those functions l
   proposed
 - **THEN** it is refused, because that helper is shared by every plugin list and several
   native panes
+
+#### Scenario: The pane converges onto the shared rule
+
+- **WHEN** the native pane is changed to window through the kernel's helper, to fold a
+  header into the row it heads, and to read its indicators and hitboxes off the paint
+- **THEN** the two panes draw the same rows at the same height, and the row is recorded
+  closed with the behaviour it changed
 
 ### Requirement: The file viewer is drawn by its bundled plugin, and its renderer is deleted
 
