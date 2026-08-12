@@ -15,6 +15,12 @@ a nested list's rows would give one click two answers. A pane whose tree contain
 no list has no clickable rows, and a click on it does nothing beyond focusing the
 pane.
 
+A row's rect MUST span every line that row renders as. A list's child is one row
+however many lines it stacks, so a click anywhere in a multi-line child — on the
+heading above a record as much as on the record — MUST report that one child's
+index, and MUST NOT be split into an index per line or fall through to the child
+below.
+
 When the kernel has scrolled a list — which it does when the list names a selected
 row and has more rows than the pane has lines — the reported index MUST be the
 row's index in the **whole** list, not its position on screen. A plugin's rows and
@@ -40,6 +46,13 @@ the kernel's window are different things, and the plugin only knows its own.
 
 - **WHEN** a click lands on a plugin pane below its last row
 - **THEN** no row is reported, and the pane is still focused
+
+#### Scenario: A click on any line of a multi-line row
+
+- **WHEN** a list's children each stack a heading line above a content line, and a
+  click lands on the heading of the second child
+- **THEN** row two is reported, the same index a click on that child's content
+  line reports
 
 ### Requirement: A click carries a row and nothing about geometry
 

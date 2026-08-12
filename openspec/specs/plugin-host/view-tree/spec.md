@@ -456,6 +456,19 @@ MUST NOT be required to window its own list: the whole reason this exists is tha
 a pane whose list cannot scroll to its cursor is not a reproduction of a pane
 whose list can.
 
+**A child is one row of the list however many lines it renders as.** A list's
+children are its rows for the cursor, for a click and for the window alike, so a
+child that stacks several lines — a record with a heading above it, say — MUST be
+kept whole: it counts once toward the index a plugin declares and a click reports,
+and it counts as its rendered height toward the rows the window fits. The kernel
+MUST resolve the window in **rows**, so a list of taller children scrolls to its
+cursor instead of clipping it, and MUST NOT require a plugin to know or declare
+any child's height.
+
+A list whose children each render as a single line MUST be windowed exactly as it
+was before children could be taller: the row-measured rule is a generalisation of
+the row-count rule and MUST agree with it everywhere the two are both defined.
+
 The chosen slice MUST be resolved by the same rule thurbox's own panes use, so a
 native pane and a plugin reproducing it cannot scroll differently.
 
@@ -488,6 +501,31 @@ zero-based index would send.
   past its last child
 - **THEN** conversion fails naming the node kind and the field, and the pane
   reports the error rather than drawing a different list
+
+#### Scenario: A list of two-line children scrolls to its cursor
+
+- **WHEN** a plugin returns a list whose children each stack two lines, more of
+  them than the pane has lines, with a selected child past the fold
+- **THEN** the selected child is drawn whole, and the drawn slice holds only as
+  many children as fit in the pane's lines
+
+#### Scenario: A taller child is still one index
+
+- **WHEN** a list mixes children of one and of several lines and declares a cursor
+- **THEN** the declared index counts children, not lines, and the child at that
+  index is the one kept in view
+
+#### Scenario: A list of single-line children is windowed as before
+
+- **WHEN** a list whose children each render as one line is windowed at any
+  combination of length, cursor and pane height
+- **THEN** the drawn slice is identical to the one the row-count rule chose
+
+#### Scenario: A child taller than the pane is still drawn
+
+- **WHEN** a list's selected child renders as more lines than the pane has
+- **THEN** that child is drawn and clipped by the pane's bottom, rather than the
+  list drawing nothing
 
 ### Requirement: A run may declare that it belongs to the selected row
 
@@ -655,12 +693,18 @@ declaration MUST be optional and MUST default to absent, so a list that does not
 declare one is laid out exactly as before — the panes that deliberately overflow
 without a scrollbar MUST NOT gain one.
 
-When a list declares a track and has more children than the rows it was given,
+When a list declares a track and renders more **rows** than the pane has lines,
 the **kernel** MUST reserve the rightmost column of the list's area for the
 track, draw the thumb there at the declared cursor's position, and lay the rows
 out in the width that remains. The column MUST be reserved by the same rule
 thurbox's own panes reserve one with, so a native pane and a plugin reproducing
 it cannot place the track in different columns or draw different thumbs.
+
+The track MUST describe the same quantity the window resolves: whether the list
+overflows, how much there is to scroll through, and where the thumb sits are all
+counted in rendered rows, so a list of taller children gets a thumb that matches
+what a user is scrolling past. For a list whose children each render as one line
+this is the count of children, which is what it always was.
 
 When the list fits the rows it was given, no column MUST be reserved and no thumb
 drawn: a track that appeared for a list with nothing to scroll would take a
@@ -705,6 +749,12 @@ thumb is never delivered as a click on a row.
 
 - **WHEN** a user clicks the column the track occupies
 - **THEN** no row hitbox contains that column, so the click does not select a row
+
+#### Scenario: A track appears for children that overflow only in rows
+
+- **WHEN** a list declares a track and holds fewer children than the pane has
+  lines, but they render as more lines than the pane has
+- **THEN** the track is reserved and a thumb is drawn
 
 ### Requirement: The scroll-track declaration is part of the granted module surface
 
