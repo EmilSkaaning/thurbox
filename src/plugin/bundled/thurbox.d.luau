@@ -127,6 +127,12 @@ export type Ui = {
     -- error naming the field — including `0`, so a 0-based index fails loudly
     -- rather than pinning the cursor to the first row.
     --
+    -- A row is **one child**, however many lines it draws as. Wrap a heading and
+    -- its record in a `column` and the two are one row: one index for `selected`,
+    -- one index a click reports, and a row the host scrolls whole rather than
+    -- splitting. Emit them as two children instead and they are two rows, which
+    -- is what you want for a heading a user can put the cursor on.
+    --
     -- `scrollbar` asks for the scroll track a pane shows on its rightmost column
     -- when the list is longer than the lines it got. You declare *that* the list
     -- scrolls; the host owns which column the track occupies, whether the list is

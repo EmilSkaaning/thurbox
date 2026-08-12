@@ -3221,3 +3221,66 @@ in a 30-row pane the native widget holds its offset until the cursor reaches row
 the shared rule scrolls after three keypresses, plus the two halves no scroll policy
 settles (a header travelling with its row as one hitbox, and the child-index-to-session
 mapping a seated pane's clicks resolve through).
+
+## 36. Half of the window row: a list's rows are measured in lines (ADR-61)
+
+§35 left `the-window-is-the-list-widgets` as the session list's sole structural blocker
+and named the two halves of it that no choice of scrolling policy answers. Both are
+closed here, and neither by a decision about policy.
+
+**The two halves were one problem: a plugin could not say "these two lines are one row".**
+Natively the pane's list item is `optional repo-group header + session row` — one item,
+one hitbox, one index. The plugin flattens it into `header, row, header, row, …`, so a
+session's index in the tree is not its index in the kernel's `rows` array, and
+`App::render_plugin_panes`' `row(index - 1)` mapping is wrong by the number of preceding
+headers, with the error growing down the list.
+
+**The tree could already express the grouping and could not scroll it.** A `column` inside
+a `list` is a valid child, gets one rect from `render_stacked`, one hitbox from the row
+sink and one index for the cursor. What it could not do was reach the screen: the kernel
+resolved a selected list's window with `ui::visible_window`, which counts children and
+assumes each is one line. Two-line items in a ten-line pane came back as ten items, five
+painted and five clipped — including, low enough in the list, the cursor's own. So the
+shape existed and was unusable, which is the most expensive kind of gap to leave in a
+catalog: it looks closed from the node list, which is the reading §6 already warned about.
+
+**What closed it.** `ui::visible_item_window` — the same arithmetic with the same margin
+and the same clamp, measured in **rows** instead of in items — and `visible_window` is now
+a wrapper over it with unit heights. A plugin list resolves its window through the general
+form, measuring each child with the `height_of` walk that will draw it; a declared scroll
+track measures the same quantity, so its overflow test, its content length and its thumb
+are row counts.
+
+**The reduction is the deliverable, not the generalisation.** Every list in the tree today
+has one-line children, so the only thing that could go wrong is the two forms disagreeing.
+`the_general_rule_reduces_to_the_uniform_one` walks every `(total ≤ 24, selected < total,
+height ≤ 24)` triple against the pre-change rule, kept in the test as an explicit
+reference, and requires the identical pair. Two clauses in the general rule exist only for
+what unit heights cannot produce — an item taller than the pane, and a tall item above the
+cursor eating the margin the window opened with — and each is marked unreachable for them,
+which the exhaustion then confirms. The suite went 2734 → 2741 (2226 → 2233 without
+default features): seven added, none lost, no recorded pane oracle regenerated and no
+acceptance snapshot moved.
+
+**What is still open, and it is the whole of what is left of the row.** The two rules
+disagree about *policy*: the shared rule keeps the cursor near the middle with a margin,
+ratatui's `List` holds its offset until the cursor leaves the viewport. ADR-60's
+measurement stands unchanged — at 40 sessions in a 30-row pane the widget does not scroll
+until the cursor reaches row 28, while the shared rule scrolls after three keypresses. So
+a handover would still change which *other* sessions sit beside the cursor.
+
+Converging is refused here for two reasons, both recorded rather than left to be
+rediscovered: the shared rule is what every plugin list and three native panes scroll by,
+and the widget's rule is **stateful** — it takes the previous offset as an input — where
+the view-tree renderer is a pure function of `(tree, frame table, palette)` with no state
+and no path back to a VM. A sticky window means a per-pane, per-node offset table threaded
+through the renderer the way `FrameTable` is. That is a real design with real precedent
+(`App::motion`) and it is a scrolling-policy change wearing a plumbing change's clothes;
+it belongs to whoever hands this pane over, with its own measurement.
+
+**A gate correction worth reading**, the fourth in this family. The row's probe asked
+whether `src/ui/plugin_pane.rs` contains `super::visible_window`, and after the renderer
+stopped calling it the needle went on matching — because a *test* in the same file still
+calls the uniform form to assert the two panes share a rule. A probe answering for a call
+its subject no longer makes is exactly the silent case these gates exist to catch, and it
+was caught by running the suite rather than by reading the probe.

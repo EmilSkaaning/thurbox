@@ -158,6 +158,23 @@ fn height_of(node: &ViewNode, width: u16, palette: &ThemePalette, frames: &Frame
     }
 }
 
+/// Rows a list's children render as in total, at `width`.
+///
+/// The quantity a scroll track is decided from. It is the count of children only
+/// while every child is one line, which was the assumption before a list could
+/// hold a row that stacks several.
+fn list_rows(
+    children: &[ViewNode],
+    width: u16,
+    palette: &ThemePalette,
+    frames: &FrameTable,
+) -> usize {
+    children
+        .iter()
+        .map(|child| height_of(child, width, palette, frames) as usize)
+        .sum()
+}
+
 /// The equal-share cells a [`ViewNode::Row`] divides `width` into.
 ///
 /// Shared by the height walk and the paint so the two split identically; a
@@ -694,33 +711,61 @@ fn paint(
             // width they will actually be drawn at. Reserved through the helper
             // every native pane reserves with, so the plugin's track and the
             // native pane's cannot land in different columns.
+            //
+            // Measured at the width the list came in at, because the question is
+            // only whether it overflows at all: losing a column can make a
+            // wrapping child taller, never shorter, so a list that overflows here
+            // still overflows once the track is taken.
             let (area, track) = if *scrollbar {
-                super::scrollbar::reserve_track(area, children.len(), area.height as usize)
+                let rows = list_rows(children, area.width, palette, frames);
+                super::scrollbar::reserve_track(area, rows, area.height as usize)
             } else {
                 (area, None)
             };
+            // A list's children are its rows, and a row may stack more than one
+            // line — so the window is resolved in rows, from each child's height
+            // at the width it will be drawn at. Measured only when something
+            // depends on it: a list with neither a cursor nor a track (the info
+            // panel's gauge column, every `ui.list(rows)`) measures nothing and
+            // takes the path it always took.
+            let heights: Option<Vec<u16>> = (*scrollbar || selected.is_some()).then(|| {
+                children
+                    .iter()
+                    .map(|child| height_of(child, area.width, palette, frames))
+                    .collect()
+            });
             // The one place the kernel resolves a *height* on a plugin's behalf.
             // A plugin is never told how many rows it got, so a list that
             // declares which child the cursor is on hands the scroll decision
-            // here — through the same `visible_window` thurbox's own panes use,
-            // which is what lets a native pane and a plugin reproducing it paint
-            // the same frame rather than merely build the same tree.
-            let window = selected.map(|selected| {
-                super::visible_window(children.len(), selected, area.height as usize)
-            });
-            let (start, end) = window.unwrap_or((0, children.len()));
-            if let Some(track) = track {
+            // here — through the same `visible_item_window` thurbox's own panes
+            // window by, which is what lets a native pane and a plugin
+            // reproducing it paint the same frame rather than merely build the
+            // same tree.
+            let (start, end) = match (heights.as_deref(), selected) {
+                (Some(heights), Some(selected)) => super::visible_item_window(
+                    children.len(),
+                    |i| heights[i] as usize,
+                    *selected,
+                    area.height as usize,
+                ),
+                _ => (0, children.len()),
+            };
+            if let (Some(track), Some(heights)) = (track, heights.as_deref()) {
+                // The track describes the same quantity the window resolves —
+                // rows, not children — so a list of taller items gets a thumb
+                // that matches what the user is scrolling past.
+                //
                 // Position 0 for a list that declares a track and no cursor: the
                 // cursor's presence is a decision of whatever the pane reads, and
                 // a node shape that changed with it would break the equality that
                 // is a port's deliverable.
-                super::scrollbar::draw_into(
-                    buf,
-                    track,
-                    children.len(),
-                    area.height as usize,
-                    selected.unwrap_or(0),
-                );
+                let rows: usize = heights.iter().map(|h| *h as usize).sum();
+                let above: usize = heights
+                    .iter()
+                    .take(selected.unwrap_or(0))
+                    .map(|h| *h as usize)
+                    .sum();
+                super::scrollbar::draw_into(buf, track, rows, area.height as usize, above);
             }
             let drawn = render_stacked(&children[start..end], area, palette, frames, buf, rows);
             if let Some(sink) = rows.as_mut() {
@@ -1137,6 +1182,76 @@ mod tests {
             let expected: Vec<String> = refs[start..end].iter().map(|s| s.to_string()).collect();
             assert_eq!(draw(&rows(&refs, Some(selected)), 4, 5), expected);
         }
+    }
+
+    /// A list's row that stacks two lines, in the shape a pane declares it: a
+    /// heading above a record, which is what a repo-group header is to the
+    /// session it opens.
+    fn stacked_rows(labels: &[&str], selected: Option<usize>) -> ViewNode {
+        ViewNode::selectable_list(
+            labels
+                .iter()
+                .map(|l| {
+                    ViewNode::Column(vec![ViewNode::text(format!("-{l}")), ViewNode::text(*l)])
+                })
+                .collect(),
+            selected,
+        )
+    }
+
+    /// The claim this generalisation exists for: a list of two-line rows scrolls
+    /// to its cursor. Windowed by child count it handed back six rows for a
+    /// six-line pane, three of which were painted — and low enough in the list,
+    /// the cursor was one of the three that were not.
+    #[test]
+    fn a_list_of_two_line_rows_scrolls_to_its_cursor() {
+        let labels = ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"];
+        let drawn = draw(&stacked_rows(&labels, Some(7)), 6, 6);
+        assert!(drawn.contains(&"r7".to_string()), "{drawn:?}");
+        assert!(!drawn.contains(&"r0".to_string()), "{drawn:?}");
+        // Three two-line rows fill six lines, and no fourth is started.
+        assert_eq!(drawn, vec!["-r5", "r5", "-r6", "r6", "-r7", "r7"]);
+    }
+
+    /// The identity half: a two-line row is **one** index, so a click on either
+    /// of its lines reports the same row — which is what a repo-group header
+    /// travelling with its session needs, and what a flattened tree could not
+    /// say.
+    #[test]
+    fn a_click_on_either_line_of_a_stacked_row_reports_one_index() {
+        let hits = row_hits(&stacked_rows(&["a", "b", "c"], None), 6, 6);
+        assert_eq!(hits.len(), 3, "three rows, not six: {hits:?}");
+        for (i, hit) in hits.iter().enumerate() {
+            assert_eq!(hit.index, i + 1);
+            assert_eq!(hit.rect.height, 2, "a row's rect spans both its lines");
+        }
+    }
+
+    /// The track measures the same quantity the window does. Six children in an
+    /// eight-line pane fit by count and overflow by rows, and a track that
+    /// counted children would not appear at all.
+    #[test]
+    fn a_track_appears_for_rows_that_overflow_only_in_lines() {
+        let stacked = ViewNode::scrolling_list(
+            (0..6)
+                .map(|i| {
+                    ViewNode::Column(vec![
+                        ViewNode::text("XXXXXXXXXX"),
+                        ViewNode::text(format!("r{i}")),
+                    ])
+                })
+                .collect(),
+            Some(0),
+        );
+        let column = right_column(&stacked, 10, 8);
+        assert!(
+            !column.contains('X'),
+            "the track's column is not row content: {column:?}"
+        );
+        assert!(
+            column.chars().any(|c| c != ' '),
+            "a thumb is drawn: {column:?}"
+        );
     }
 
     #[test]

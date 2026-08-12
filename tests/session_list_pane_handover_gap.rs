@@ -242,18 +242,25 @@ const BLOCKERS: &[Blocker] = &[
                 pending-spawn placeholder is inserted at",
         stands: "`render_session_section` hands its nodes to a ratatui `List` with a `ListState`, \
                  and reads `list_state.offset()` back **after** the stateful render for all three \
-                 of the above. A seated plugin pane declares its cursor and the kernel windows it \
-                 with `ui::visible_window` over flat single rows — a different rule, \
-                 over a different row count, since the plugin's index counts the headers the \
-                 native item folds in (`the_two_panes_window_a_long_list_by_different_rules`). So \
-                 both keep the cursor visible and they do **not** agree on which other rows are \
-                 beside it: a handover would change which sessions are on screen whenever the \
-                 list overflows, in the pane whose selection decides what the central pane, the \
-                 info column, the file viewer and the code review are all showing. Not closable \
-                 by teaching `visible_window` the widget's sticky offset — that helper is what \
-                 every plugin list and three native panes scroll by, so a change for this pane \
-                 changes all of them (the hazard ADR-39 recorded from the other side). The \
-                 port's own file calls this Phase 6 work; this row is what that work is",
+                 of the above. **Half of this row closed with ADR-61, and the half that closed is \
+                 the one about identity**: the kernel's shared rule now windows a list in *rows*, \
+                 from each child's rendered height (`ui::visible_item_window`), so a pane may \
+                 express a repo-group header and its session as **one** child — one index, one \
+                 hitbox, one row that scrolls whole — which is what a flattened tree could not \
+                 say and what made the plugin's index drift from the kernel's by a margin that \
+                 grew down the list. What is left is the **policy**: the shared rule keeps the \
+                 cursor near the middle with a margin, the widget holds its offset until the \
+                 cursor leaves the viewport, and both keep the cursor visible \
+                 (`the_two_panes_window_a_long_list_by_different_rules`). So a handover would \
+                 still change which *other* sessions are beside the cursor whenever the list \
+                 overflows, in the pane whose selection decides what the central pane, the info \
+                 column, the file viewer and the code review are all showing. Not closable by \
+                 teaching the shared rule the widget's sticky offset — that helper is what every \
+                 plugin list and three native panes scroll by, so a change for this pane changes \
+                 all of them (the hazard ADR-39 recorded from the other side), and the widget's \
+                 rule is *stateful* where the view-tree renderer is a pure function of (tree, \
+                 frames, palette). The port's own file calls this Phase 6 work; this row is what \
+                 that work is",
         gap: Gap::Structural,
         blocked: true,
         probe: |root| {
@@ -268,9 +275,16 @@ const BLOCKERS: &[Blocker] = &[
             let hitboxes_come_off_it = pane.contains("skip(list_state.offset())");
             let placeholder_comes_off_it = pane.contains("items.insert(slot.index");
             // And a plugin pane's window is the kernel's shared helper over the tree's
-            // own children, which is a different rule over a different count.
+            // own children, which is a different rule from the widget's sticky offset.
+            //
+            // Named `visible_item_window` rather than `visible_window` since ADR-61,
+            // and the needle had to be tightened rather than the verdict flipped —
+            // the fourth time in this family of gates. The old needle went on matching
+            // by accident, because a *test* in that file still calls the uniform form,
+            // so the probe would have kept answering for a call the renderer no longer
+            // makes.
             let plugin_window_is_the_shared_rule =
-                source(root, "src/ui/plugin_pane.rs").contains("super::visible_window");
+                source(root, "src/ui/plugin_pane.rs").contains("super::visible_item_window(");
             widget_owns_the_window
                 && indicators_come_off_it
                 && hitboxes_come_off_it

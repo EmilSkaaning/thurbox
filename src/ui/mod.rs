@@ -72,15 +72,95 @@ pub struct RowHitbox {
 /// the file viewer's until that pane was handed over (ADR-58), and none of its callers
 /// is a file viewer now.
 pub(crate) fn visible_window(total: usize, selected: usize, height: usize) -> (usize, usize) {
-    if total <= height {
+    visible_item_window(total, |_| 1, selected, height)
+}
+
+/// The same rule when a list's items are not all one line tall: `total` items
+/// whose heights `item_rows` reports, windowed into `height` **rows**.
+///
+/// A list's children are its rows — for the cursor a plugin declares, for the
+/// index a click reports, and for this window — so an item that stacks several
+/// lines is kept whole: it counts once toward the index and as its rendered
+/// height toward the rows that fit. Without this a pane could express a
+/// two-line row (a `Column` inside a `List` already draws as one) and could not
+/// scroll to it, because the window would hand back one item per available row
+/// and the renderer would clip the rest away — including, low enough in the
+/// list, the cursor's own.
+///
+/// A **generalisation** of [`visible_window`], not a second policy: with every
+/// height 1 each step below is the step that rule already took, which
+/// `the_general_rule_reduces_to_the_uniform_one` asserts by exhaustion rather
+/// than by argument. Two clauses exist only for the case unit heights cannot
+/// produce, and each is marked as such — that is what keeps a change here from
+/// silently moving four panes that scroll by the uniform form.
+///
+/// An accessor rather than a slice of heights so the uniform callers need not
+/// allocate a vector of ones, and so a caller measuring with a costly walk is
+/// only asked about the items this rule actually visits.
+pub(crate) fn visible_item_window(
+    total: usize,
+    item_rows: impl Fn(usize) -> usize,
+    selected: usize,
+    height: usize,
+) -> (usize, usize) {
+    // How many items, counting back from the list's end, fit in `height` rows —
+    // i.e. the furthest the window may start and still fill the pane. With unit
+    // heights this is `total - height`, the clamp the uniform rule applies.
+    let last_start = {
+        let mut start = total;
+        let mut rows = 0usize;
+        while start > 0 {
+            let next = rows + item_rows(start - 1);
+            if next > height {
+                break;
+            }
+            rows = next;
+            start -= 1;
+        }
+        start
+    };
+    // Everything fits: the whole list is the window, which is where the walk
+    // above stops exactly when it consumed every item.
+    if last_start == 0 {
         return (0, total);
     }
-    // Center-ish: keep selected in view with a small margin.
+    // The furthest a window may start. Bounded below `total` so an item taller
+    // than the pane — which the walk above skips over entirely — still yields a
+    // window rather than an empty one.
+    let last_start = last_start.min(total.saturating_sub(1));
+
+    // Center-ish: keep selected in view with a small margin. The margin counts
+    // items, as it always did — it is how far above the cursor the window opens.
     let margin = (height / 4).min(3);
-    let start = selected.saturating_sub(margin);
-    let start = start.min(total.saturating_sub(height));
-    let end = (start + height).min(total);
-    (start, end)
+    let mut start = selected.saturating_sub(margin).min(last_start);
+    loop {
+        let mut end = start;
+        let mut rows = 0usize;
+        while end < total {
+            let next = rows + item_rows(end);
+            if next > height {
+                break;
+            }
+            rows = next;
+            end += 1;
+        }
+        // An item taller than the whole pane would otherwise window to nothing;
+        // drawing it clipped is the same answer a list gives its last row. Never
+        // reached with unit heights, where the first item always fits.
+        if end == start && height > 0 && start < total {
+            end = start + 1;
+        }
+        // A tall item above the cursor can push the cursor past the bottom, which
+        // no margin anticipates. Also never reached with unit heights, where the
+        // window holds `height` items and the cursor is at most `margin` inside
+        // it. Guarded on `selected` being a real index so an out-of-range cursor
+        // is clamped by the rule above rather than chased off the end.
+        if end <= selected && selected < total && start < selected {
+            start += 1;
+            continue;
+        }
+        return (start, end);
+    }
 }
 
 /// Build one `RowHitbox` per single-line entry of a vertically packed list that
@@ -1124,6 +1204,73 @@ mod tests {
         let (s, e) = visible_window(100, 50, 10);
         assert!(s <= 50 && e > 50);
         assert_eq!(e - s, 10);
+    }
+
+    /// The safety property of the row-measured rule, by exhaustion rather than by
+    /// argument: every list that exists today has one-line children, so the whole
+    /// risk of generalising is that the two forms disagree somewhere. The
+    /// argument for why they cannot is in `visible_item_window`'s own comments,
+    /// and it is exactly what a later edit would break silently.
+    #[test]
+    fn the_general_rule_reduces_to_the_uniform_one() {
+        for total in 0..24usize {
+            for height in 0..24usize {
+                for selected in 0..total.max(1) {
+                    assert_eq!(
+                        visible_item_window(total, |_| 1, selected, height),
+                        uniform_reference(total, selected, height),
+                        "total={total} selected={selected} height={height}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The rule as it was written before item heights existed, kept here as the
+    /// reference the generalisation is checked against. Inlining it into the test
+    /// would compare `visible_window` with itself, since that is now a wrapper.
+    fn uniform_reference(total: usize, selected: usize, height: usize) -> (usize, usize) {
+        if total <= height {
+            return (0, total);
+        }
+        let margin = (height / 4).min(3);
+        let start = selected.saturating_sub(margin);
+        let start = start.min(total.saturating_sub(height));
+        let end = (start + height).min(total);
+        (start, end)
+    }
+
+    /// A list of two-line items scrolls by items and fits by rows: the cursor is
+    /// on screen and only as many items as fit are drawn. Under the uniform rule
+    /// this returned six items for a six-row pane, of which three were painted
+    /// and the cursor was one of the three that were not.
+    #[test]
+    fn a_list_of_taller_items_windows_by_rows() {
+        let (start, end) = visible_item_window(10, |_| 2, 8, 6);
+        assert!(start <= 8 && 8 < end, "the cursor must be in view");
+        assert_eq!(end - start, 3, "six rows hold three two-line items");
+    }
+
+    /// The case unit heights cannot produce: an item taller than the pane is
+    /// drawn and clipped, rather than the list windowing to nothing.
+    #[test]
+    fn an_item_taller_than_the_pane_is_still_drawn() {
+        assert_eq!(visible_item_window(4, |_| 9, 2, 3), (2, 3));
+    }
+
+    /// The other one: a tall item above the cursor eats the margin the window
+    /// opened with, so the window has to move down to keep the cursor visible.
+    #[test]
+    fn a_tall_item_above_the_cursor_does_not_push_it_off() {
+        // Item 3 is nine rows; the margin would open the window at it and leave
+        // no room for the cursor on item 4.
+        let heights = [1usize, 1, 1, 9, 1, 1, 1, 1];
+        let (start, end) = visible_item_window(heights.len(), |i| heights[i], 4, 4);
+        assert!(start <= 4 && 4 < end, "({start}, {end})");
+        assert!(
+            start > 3,
+            "the tall item cannot stay in the window: {start}"
+        );
     }
 
     #[test]

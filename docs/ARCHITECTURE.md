@@ -4072,7 +4072,8 @@ refuses the converse (redefining the shared rule, which every plugin list and th
 surfaces scroll by, to match one pane's widget).
 
 Two further halves of that row are untouched by whichever scroll rule is chosen, and are
-why it is not merely a policy question:
+why it is not merely a policy question (**both closed by ADR-61**, which made a list's
+window a quantity in rows so that a two-line child is expressible *and* scrollable):
 
 - **Item granularity.** A repo-group header travels with the row below it, so a two-line
   item is **one** hitbox and the window can never split a header from its row. A plugin's
@@ -4082,3 +4083,75 @@ why it is not merely a policy question:
   emits one child per row. This pane's children include headers, so the mapping is wrong
   by the number of preceding headers and the error grows through the list. A handover
   today would ship a session list whose clicks select the wrong session.
+
+## ADR-61: A plugin list's window is a quantity in rows, so a row may be more than one line
+
+**Context.** ADR-60 left `the-window-is-the-list-widgets` as the session list's sole
+structural blocker and, at its close, named two halves of it that no choice of scrolling
+policy answers: a repo-group header travels with its session as **one** item natively and
+is a separate child in a tree, so the plugin's index is not the kernel's, and
+`App::render_plugin_panes`' `row(index - 1)` mapping is wrong by the number of preceding
+headers — an error that grows down the list.
+
+The tree could already *express* the grouping. A `Column` inside a `List` is a valid
+child, already gets one rect from `render_stacked`, one hitbox from the row sink and one
+index for the cursor. What it could not do is **scroll**: `ui::visible_window` counts
+children and assumes each is one line, so a list of two-line items in a ten-line pane was
+handed ten items, five of which were painted and five clipped — including, low enough in
+the list, the cursor's own. The grouping was expressible and unusable.
+
+**Decision.** The layer's windowing rule is generalised from "N children in H rows" to "N
+items of declared heights in H rows" (`ui::visible_item_window`), and `visible_window`
+becomes a wrapper over it with unit heights. A plugin list resolves its window through the
+general form, measuring each child with the same `height_of` walk that will draw it. A
+declared scroll track measures the same quantity: whether the list overflows, how long its
+content is, and where the thumb sits become row counts rather than child counts.
+
+**The reduction is the safety property, and it is proved rather than argued.** Every list
+in the tree today has one-line children, so the whole risk is a disagreement between the
+two forms. `the_general_rule_reduces_to_the_uniform_one` walks every
+`(total ≤ 24, selected < total, height ≤ 24)` triple against the pre-change rule kept in
+the test as a reference, and requires the identical pair. Two clauses in the general rule
+exist only for cases unit heights cannot produce — an item taller than the whole pane, and
+a tall item above the cursor eating the margin the window opened with — and each is
+documented as unreachable for them, which is what the exhaustion then confirms.
+
+**Rejected: teaching the shared rule the widget's sticky offset.** The obvious way to make
+the two panes agree is to give the shared rule ratatui's policy, since that is what the
+pane being handed over does. Refused twice over: that helper is what every plugin list and
+three native panes scroll by, so a change for this pane changes all of them (ADR-39's
+hazard from the other side); and the widget's rule is *stateful* — it takes the previous
+offset as an input — where the view-tree renderer is deliberately a pure function of
+`(tree, frame table, palette)` with no state and no path back to a VM. Making it sticky
+means a per-pane, per-node offset table threaded through the renderer the way `FrameTable`
+is. That is a real design with real precedent (`App::motion`) and it is a *scrolling
+policy* change wearing a *plumbing* change's clothes. Nothing here forecloses it: it would
+be a second implementation of the same signature, chosen by a declaration on the node.
+
+**Rejected: a new `item` node kind.** `ui.list({ ui.item({header, row}), … })` reads well
+and is what ratatui's own `ListItem` is. It would put a second spelling of an existing
+container into a catalog whose stated discipline is that it holds "the set thurbox's own
+panes need, not a general drawing API", and every walk over the tree — `children`,
+`depth`, `node_count`, `is_inlineable`, `height_of`, conversion, the recorder — would grow
+an arm saying "same as a column". The cost accepted in exchange is that grouping is a
+convention rather than a type: a plugin that forgets to wrap gets exactly today's
+behaviour, which is the failure mode worth having.
+
+**Rejected: publishing the rows already grouped**, so the plugin's array and the tree's
+children are 1:1 by construction. That is the rule ADR-29 set and every port since has
+applied — the kernel publishes a *rendering* only when two panes must agree about it — and
+a group header is one pane's presentation of a fact (`row.group`) the snapshot already
+carries. It would also help no other pane with a multi-line row.
+
+**Consequence.** `the-window-is-the-list-widgets` stays **blocked**, and its `stands` is
+rewritten to record which half moved: the two panes no longer disagree about *what a row
+is*, only about *which rows sit beside the cursor*. Its probe is tightened to name
+`visible_item_window` — the fourth time in this family of gates that a needle has had to
+be updated rather than a verdict flipped, and this one is instructive: the old needle went
+on matching by accident, because a *test* in the same file still calls the uniform form.
+
+No tree changes. `session_list_tree` still emits a header and a row as two children and
+the bundled plugin still flattens them, because adopting the item shape moves the recorded
+goldens — the handover's change to make and to justify. Cost per frame is one `height_of`
+call per child, and only for a list that declares a cursor or a track; a list that
+declares neither measures nothing and takes the path it always took.
