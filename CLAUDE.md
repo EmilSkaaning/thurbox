@@ -949,8 +949,12 @@ plugin command registry — below; unlike `plugin list`, discovery here starts n
 plugin, since a command's id and schema are manifest facts).
 A plugin builds its pane from `require("@thurbox").ui`
 constructors (`text`/`row`/`line`/`paragraph`/`column`/`list`/`divider`/`fill`/
-`gauge`/`spacer`), styled by **theme token** rather than by colour, so every plugin
-follows a theme switch. The token set is the palette's *role* set —
+`gauge`/`spacer`/`center`), styled by **theme token** rather than by colour, so every
+plugin follows a theme switch. One non-constructor sits beside them, ungated for the
+same reason: `thurbox.trim` is `str::trim`, exposed because Luau's `%s` is a *byte*
+class — a plugin trimming a string thurbox gave it would leave a no-break space behind
+and draw a row a column wider than thurbox's own (ADR-64).
+The token set is the palette's *role* set —
 `accent`/`muted`/`danger`/`success`/`warning`/`secondary`/`role`/`branch`/
 `accent_bright`/`added`/`border` plus one per session status (`status_working`/`status_blocked`/
 `status_done`/`status_idle`/`status_error`/`status_unreachable`) — because a

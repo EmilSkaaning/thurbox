@@ -305,6 +305,27 @@ pub fn build_module_table(
     // and then be surprised by what the host converts.
     module.set("ui", build_ui_table(lua)?)?;
 
+    // Ungated for the constructors' reason, and for one more: it is a pure
+    // function of its argument. It reads no kernel state, reaches nothing
+    // outside the VM and cannot fail, so a capability guarding it would guard
+    // nothing.
+    //
+    // It exists because a plugin cannot write it. Luau's pattern classes are
+    // byte predicates — `%s` is the six ASCII whitespace bytes — so a no-break
+    // space, a figure space or an ideographic space is invisible to
+    // `"^%s*(.-)%s*$"`, and a pane reproducing a kernel row that trims its text
+    // is off by a column for every whitespace character outside ASCII. A table
+    // of code points written in the plugin would be a second definition of
+    // whitespace, wrong whenever the first one grows.
+    //
+    // `str::trim` itself rather than a whitespace set spelled out here: the
+    // point is that the plugin's answer and the kernel's are the *same* answer,
+    // and two implementations of "whitespace" are how they stopped being the
+    // same in the first place (`session::session_list::agent_status_text` calls
+    // this same function).
+    let trim = lua.create_function(|_, text: String| Ok(text.trim().to_string()))?;
+    module.set("trim", trim)?;
+
     // Frozen so the capability surface cannot be rewritten from inside the VM.
     // Without this a plugin could assign its own function to a binding name it
     // was not granted — which grants it no host power, but makes the table a
@@ -675,6 +696,65 @@ mod tests {
         ] {
             assert!(ui.contains_key(name).unwrap(), "missing ui.{name}");
         }
+    }
+
+    /// `trim` is the kernel's own trim, character for character — asserted as an
+    /// identity over a table rather than on a sample, because the whole reason it
+    /// exists is that the plugin's answer and the kernel's must be the *same*
+    /// answer.
+    ///
+    /// The middle group is what Luau cannot do: `%s` is a byte class, so each of
+    /// those survives `"^%s*(.-)%s*$"` untouched. The last group is the other
+    /// error — a control character that is **not** `White_Space` and must be left
+    /// alone, so a broader-than-Rust implementation fails here too.
+    #[test]
+    fn trim_is_the_kernels_trim() {
+        let lua = Lua::new();
+        let module =
+            build_module_table(&lua, "demo", &GrantedCapabilities::none(), None, None).unwrap();
+        let trim: mlua::Function = module.get("trim").unwrap();
+
+        for pad in [
+            // ASCII, which Luau's `%s` also covers.
+            " ", "\t", "\n", "\r", "\u{b}", "\u{c}",
+            // Whitespace outside ASCII, which it does not.
+            "\u{a0}", "\u{2007}", "\u{202f}", "\u{2028}", "\u{3000}", "\u{1680}",
+            // Not whitespace: a zero-width space and a NUL must survive.
+            "\u{200b}", "\0",
+        ] {
+            for text in [
+                format!("{pad}word{pad}"),
+                format!("{pad}{pad}two words{pad}"),
+                pad.to_string(),
+                String::new(),
+            ] {
+                let got: String = trim.call(text.clone()).unwrap();
+                assert_eq!(
+                    got,
+                    text.trim(),
+                    "pad {:?} on {text:?}",
+                    pad.escape_unicode().to_string()
+                );
+            }
+        }
+    }
+
+    /// It is present for a plugin that declared nothing, and adding it grew no
+    /// capability — the two halves of "this grants nothing", asserted rather than
+    /// argued.
+    #[test]
+    fn trim_is_ungated_and_grants_nothing() {
+        let lua = Lua::new();
+        let module =
+            build_module_table(&lua, "demo", &GrantedCapabilities::none(), None, None).unwrap();
+        assert!(module.contains_key("trim").unwrap());
+        assert!(
+            !Capability::all()
+                .iter()
+                .any(|c| c.as_str().contains("trim")),
+            "trimming is not a capability: {:?}",
+            Capability::all()
+        );
     }
 
     #[test]

@@ -3375,3 +3375,37 @@ now asserts that nothing structural remains: `no-pane-chrome` (the one-dot-per-s
 strip and the clipped-row indicators, on a frame a plugin does not draw), `no-pending-spawn-row`
 (the placeholder for a session still being created, and the slot it lands in), and
 `non-ascii-whitespace-is-the-kernels-trim`.
+
+## 39. The trim row: the predicate crosses, not the answer (ADR-64)
+
+§38 left three rows, all vocabulary. This closes the smallest, and it is the only one of
+the three that is not really about the session list.
+
+**The gap was Luau's.** Its pattern classes are byte predicates, so `%s` is the six ASCII
+whitespace characters and a no-break space around an agent's activity title survives
+`"^%s*(.-)%s*$"` untouched. The kernel trims the same string with `str::trim`, which is
+Unicode's `White_Space`. So the reproduction's row was a column wider than the row it
+reproduces, for every whitespace character outside ASCII.
+
+**The closure is `thurbox.trim`**, ungated beside the node constructors, whose body is
+`str::trim` — not a whitespace set spelled out at the binding, because the property is
+that the two answers are the *same* answer. The pane goes on deciding *what* to trim and
+which of its two reported strings to show; it stops having to define whitespace.
+
+**Nothing was granted.** `Capability` is unchanged, no existing grant gained a binding,
+and the gate's `a_view_write_binding_exists` — which reads the whole binding list — goes
+on answering "none". The bundled plugin's manifest is still `["render", "sessions"]`, and
+the port's reach test now asserts that it uses `thurbox.trim` *and* that its capability
+list did not grow, so "the helper is ungated" cannot quietly become "the pane asked for
+more".
+
+**The enumerated divergence inverts.** `non_ascii_whitespace_is_trimmed_by_the_kernel_only`
+becomes `non_ascii_whitespace_is_trimmed_the_same_way_by_both`, and it keeps a guard that
+the padded fixture still differs from its trimmed form — the same trap the window
+divergence had to avoid one change earlier: an equality can pass by having stopped testing
+anything.
+
+**What is left.** Two rows, both about the pane's frame and its one row for a record that
+does not exist yet: `no-pane-chrome` (the one-dot-per-session strip and the clipped-row
+indicators, drawn on a frame the host owns) and `no-pending-spawn-row` (the placeholder
+for a session still being created, and the slot it lands in).

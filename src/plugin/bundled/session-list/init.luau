@@ -160,8 +160,11 @@ local function reportedText(row: SessionRow): string?
     end
     local activity = row.activity
     if activity then
-        local trimmed = string.match(activity, "^%s*(.-)%s*$")
-        if trimmed ~= nil and trimmed ~= "" then
+        -- `thurbox.trim` rather than `"^%s*(.-)%s*$"`: `%s` is a byte class, so
+        -- a no-break space around a title would survive it and this row would
+        -- be a column wider than the one it reproduces.
+        local trimmed = thurbox.trim(activity)
+        if trimmed ~= "" then
             return trimmed
         end
     end

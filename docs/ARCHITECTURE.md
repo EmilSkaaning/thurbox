@@ -4299,3 +4299,56 @@ indicators, on a frame a plugin does not draw), the pending-spawn placeholder ro
 Unicode-aware trim of an agent's activity text. `pending_spawn_slot` deliberately stays in
 the pane — it is downstream of the seam this change settled, and moving it is the
 placeholder row's work.
+
+## ADR-64: A plugin trims by the kernel's rule, because the predicate crossed and not the answer
+
+**Context.** The bundled session-list plugin trimmed an agent's reported activity text
+with `string.match(activity, "^%s*(.-)%s*$")`; the kernel trims with `str::trim`. Those
+are not the same function. Luau's pattern classes are C `ctype` predicates applied to
+**bytes**, so `%s` is exactly `{' ', '\t', '\n', '\v', '\f', '\r'}`. A UTF-8 no-break
+space is the two bytes `C2 A0`, neither of which is in that set, so a title padded with
+one came out of the plugin unchanged and its row was a column wider than the row it
+reproduces. `tests/session_list_pane_handover_gap.rs` carried it as
+`non-ascii-whitespace-is-the-kernels-trim`, one of the three vocabulary rows still
+refusing that pane's handover.
+
+No pattern closes it. `[%s\194\160]` closes it for one code point and is wrong for the
+other twenty-odd, and wrong again whenever Unicode adds one — a table of code points in a
+plugin is a second definition of whitespace, which is the same class of problem as two
+implementations of a windowing rule (ADR-63).
+
+**Decision.** `thurbox.trim(s)` — `str::trim`, on the `@thurbox` module table, ungated
+beside the node constructors. The row closes by giving the plugin the **predicate**, not
+the answer.
+
+**It grants nothing, and both halves of that are asserted.** It is a pure function of its
+argument: it reads no kernel state, reaches nothing outside the VM, and cannot fail, so a
+capability guarding it would guard nothing. `Capability` gains no variant and no existing
+grant gains a binding (`trim_is_ungated_and_grants_nothing`), and the handover gate's
+`a_view_write_binding_exists` — which reads the whole binding list — goes on answering
+"none", since `trim` is neither a view verb nor a mutator naming a view noun. That the
+function lives in a file called `capabilities.rs` is not the same as it granting one;
+`ui.center` landed there one change earlier under the same argument.
+
+**Why not the answer.**
+
+| Alternative | Why not |
+|---|---|
+| Publish `activity` already trimmed | Moves a presentation decision into the publication — which of a row's two reported strings is shown, and whether whitespace-only counts as nothing, are the pane's calls. And the next pane wanting a trim is exactly where this one was. |
+| A `trim` flag on the `text` constructor | Makes a deliberate leading space undrawable, and this pane draws several: the status glyph's padding, the tree prefix, the two-space separator. |
+| A general string library | One function, because one function is what a pane cannot write. `upper`, `lower` and grapheme counts are not blocked by anything and are not added on speculation. |
+| Fold it into the handover | A handover claims that which code draws a pane changed and nothing else did; a commit that also adds a host binding gives a reviewer two things to attribute. Same reason the frame converges first (ADR-53) and the window did (ADR-63). |
+
+**The body is `str::trim` itself**, not a whitespace set spelled out at the binding. The
+point is that the plugin's answer and the kernel's are the *same* answer, and the test
+asserts that as an identity over a table — ASCII whitespace, the separators Luau cannot
+see (U+00A0, U+1680, U+2007, U+202F, U+2028, U+3000), and two characters that must **not**
+be trimmed (U+200B, NUL) so an implementation broader than Rust's fails too.
+
+**The port's enumerated divergence inverts rather than being deleted**, and keeps a guard
+that its fixture still carries whitespace to trim — an equality can pass by having stopped
+testing anything, which is the same trap the window divergence had to avoid one change
+earlier.
+
+**What is left.** Two rows, both vocabulary, both about the pane's own frame and its one
+row for a record that does not exist yet: `no-pane-chrome` and `no-pending-spawn-row`.

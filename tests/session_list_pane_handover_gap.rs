@@ -450,27 +450,39 @@ const BLOCKERS: &[Blocker] = &[
         id: "non-ascii-whitespace-is-the-kernels-trim",
         needs: "the agent activity text a row shows, trimmed the way the kernel trims it: \
                 `str::trim`, which is Unicode-aware",
-        stands: "the plugin trims with Luau's `%s`, which is ASCII-only, so a no-break space \
-                 around an activity title survives in its copy \
-                 (`non_ascii_whitespace_is_trimmed_by_the_kernel_only`). Left open by the port \
-                 rather than closed by publishing the *trimmed* text, because a trim is a \
-                 presentation decision about the pane's own row and the port's rule is that the \
-                 kernel publishes no rendering — so closing it needs either a Unicode-aware \
-                 predicate a plugin can reach or a decision to reverse that rule. Small, and a \
-                 row because a handover would ship it",
+        stands: "**closed** (ADR-64), and closed by crossing the *predicate* rather than the \
+                 answer. The row named two ways out — a Unicode-aware predicate a plugin can \
+                 reach, or a decision to reverse the rule that the kernel publishes no rendering \
+                 — and the first is the one taken: `thurbox.trim` is `str::trim`, ungated beside \
+                 the node constructors because it is a pure function of its argument, so the \
+                 pane still decides *what* to trim and no longer has to define whitespace \
+                 itself. It could not: Luau's `%s` is a byte class, so no pattern a plugin can \
+                 write sees a no-break space, and a table of code points written in the plugin \
+                 would be a second definition of whitespace that is wrong whenever the first one \
+                 grows. **No capability was added**, which is the half worth asserting \
+                 (`trim_is_ungated_and_grants_nothing`)",
         gap: Gap::Vocabulary,
-        blocked: true,
+        blocked: false,
         probe: |root| {
-            // Both sides, so the row is about a *difference* rather than about either
-            // implementation: the kernel's trim is Rust's, and the plugin's is Luau's
-            // ASCII class. The kernel's half reads the model's module rather than the
-            // pane's, because `agent_status_text` moved there with the rest of the
-            // model (ADR-60) — the difference this row measures did not move with it.
+            // Three halves: the kernel's trim is still Rust's, the binding exists and
+            // is not behind a grant, and the plugin actually reaches for it. The last
+            // is what stops "the route exists" from coming to mean "the panes agree",
+            // which is the distinction the centred-line row had to keep separately.
             let kernel_trims_unicode =
                 source(root, "src/session/session_list.rs").contains(".map(str::trim)");
-            let plugin_trims_ascii = source(root, "src/plugin/bundled/session-list/init.luau")
-                .contains(r#"string.match(activity, "^%s*(.-)%s*$")"#);
-            kernel_trims_unicode && plugin_trims_ascii
+            let capabilities = source(root, "src/plugin/capabilities.rs");
+            let binding_exists = capabilities.contains(r#"module.set("trim", trim)"#);
+            let ungated = capabilities
+                .split(r#"module.set("trim", trim)"#)
+                .next()
+                .is_some_and(|before| {
+                    // The nearest preceding `if granted.has(` would mean it landed
+                    // inside a capability's block; `ui` is inserted ungated just above.
+                    before.rfind("module.set(\"ui\"") > before.rfind("if granted.has(")
+                });
+            let plugin_uses_it = source(root, "src/plugin/bundled/session-list/init.luau")
+                .contains("thurbox.trim(activity)");
+            !(kernel_trims_unicode && binding_exists && ungated && plugin_uses_it)
         },
     },
 ];

@@ -757,34 +757,45 @@ fn the_two_panes_window_a_long_list_by_one_rule() {
     );
 }
 
-/// **Enumerated divergence 3: whitespace outside ASCII.** The kernel trims the
-/// agent's activity text with Rust's `str::trim`, which is Unicode-aware; the
-/// plugin trims with Luau's `%s`, which is not. A no-break space around an
-/// activity title therefore survives in the plugin's copy.
+/// **The divergence that closed: whitespace outside ASCII.** The kernel trims the
+/// agent's activity text with Rust's `str::trim`, which is Unicode-aware. The
+/// plugin trimmed with Luau's `%s`, which is a *byte* class — the six ASCII
+/// whitespace characters — so a no-break space around an activity title survived
+/// in its copy and the row it drew was a column wider than the row it reproduces.
 ///
-/// Left open rather than closed by publishing the trimmed text: the trim is a
-/// presentation decision about the pane's own row, and the port's rule is that the
-/// kernel publishes no rendering. Recorded as
-/// `non-ascii-whitespace-is-the-kernels-trim` in the handover gate.
+/// It was left open by the port rather than closed by publishing the *trimmed*
+/// text, because a trim is a decision about the pane's own row and the port's rule
+/// is that the kernel publishes no rendering. ADR-64 closed it the other way: the
+/// **predicate** crossed rather than the answer, as `thurbox.trim` — so the pane
+/// still decides what to trim and no longer has to define whitespace itself.
+///
+/// The case is inverted rather than deleted, and it keeps a guard that its fixture
+/// is still a fixture: an equality can pass by having stopped testing anything, so
+/// the padded activity must still differ from its trimmed form.
 #[test]
-fn non_ascii_whitespace_is_trimmed_by_the_kernel_only() {
+fn non_ascii_whitespace_is_trimmed_the_same_way_by_both() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
     let host = host();
+    // U+00A0 either side: `char::is_whitespace` says yes, `%s` says no.
+    const PADDED: &str = "\u{a0}Compacting\u{a0}";
+    assert_ne!(
+        PADDED,
+        PADDED.trim(),
+        "the fixture must still carry whitespace to trim, or this asserts nothing"
+    );
     let case = case(
         "nbsp",
         vec![Row {
-            // U+00A0 either side: `char::is_whitespace` says yes, `%s` says no.
-            activity: Some("\u{a0}Compacting\u{a0}"),
+            activity: Some(PADDED),
             ..row("padded", SessionStatus::Idle, "thurbox")
         }],
         0,
     );
     thurbox::session::pane_context::publish(case.context(WIDE));
-    assert_ne!(
+    assert_eq!(
         render(&host),
         case.native_tree(WIDE),
-        "if these agree, either the trims converged or the fixture stopped \
-         exercising the difference"
+        "the plugin must trim by the kernel's rule, not by an ASCII byte class"
     );
 }
 
@@ -811,6 +822,19 @@ fn the_plugin_declares_every_power_it_uses() {
     assert!(
         !plugin.manifest.capabilities.contains(&Capability::Input),
         "the reproduction receives no keys — the cursor it draws is the kernel's"
+    );
+
+    // `thurbox.trim` is used and is *not* in that list, which is the claim: it is
+    // ungated because it grants nothing, so reaching for it did not widen the
+    // pane's reach by a capability (ADR-64).
+    assert!(
+        std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("src/plugin/bundled/session-list/init.luau")
+        )
+        .expect("the plugin source")
+        .contains("thurbox.trim("),
+        "the pane should trim by the kernel's rule"
     );
 
     // Additive port: the pane must not appear on anyone's screen unasked, since

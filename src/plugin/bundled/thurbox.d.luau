@@ -522,6 +522,16 @@ export type Thurbox = {
     name: string,
     -- View-node constructors. Always present.
     ui: Ui,
+    -- Strip leading and trailing whitespace, by **Unicode's** rule rather than
+    -- Luau's. Always present, and it grants nothing: it is a pure function of
+    -- its argument.
+    --
+    -- Use it instead of `string.match(s, "^%s*(.-)%s*$")` whenever the string
+    -- came from thurbox. `%s` is a *byte* class — the six ASCII whitespace
+    -- characters — so a no-break space, a figure space or an ideographic space
+    -- survives it, and your row ends up a column wider than thurbox's own. This
+    -- is the same function thurbox trims with.
+    trim: (text: string) -> string,
     -- Present only when the manifest declares `capabilities = ["log"]`.
     log: ((message: string) -> ())?,
     -- Present only with `state-read` / `state-write`.
