@@ -116,7 +116,11 @@ fn height_of(node: &ViewNode, width: u16, palette: &ThemePalette, frames: &Frame
     match node {
         // A line is one row whatever it holds: it clips rather than wraps, so
         // its height does not depend on the width it is given.
-        ViewNode::Text { .. } | ViewNode::Divider | ViewNode::Fill { .. } | ViewNode::Line(_) => 1,
+        ViewNode::Text { .. }
+        | ViewNode::Divider
+        | ViewNode::Fill { .. }
+        | ViewNode::Line(_)
+        | ViewNode::Center(_) => 1,
         // Header rows plus the bar's one row. The header is normally one row,
         // but a label and suffix that together overflow the width wrap — and the
         // bar has to move down with them rather than being drawn over the
@@ -227,6 +231,7 @@ fn inline_width(node: &ViewNode) -> usize {
         // Refused at conversion, so unreachable from a plugin; zero is the only
         // honest answer for a node whose width comes from its area.
         ViewNode::Row(_)
+        | ViewNode::Center(_)
         | ViewNode::Paragraph(_)
         | ViewNode::Column(_)
         | ViewNode::List { .. }
@@ -374,6 +379,13 @@ fn collect_inline_spans<'a>(
                 out.push(Span::styled(content.clone(), text_style(*style, palette)));
             }
             ViewNode::Line(nested) => {
+                collect_inline_spans(nested, palette, frames, out, placeholders, yielding)
+            }
+            // Refused at conversion inside a line, so a centred node cannot be
+            // reached here from a plugin; a native caller passing one gets its
+            // runs packed rather than a silent gap, since the centring is the
+            // *row's* placement and there is no row of its own here.
+            ViewNode::Center(nested) => {
                 collect_inline_spans(nested, palette, frames, out, placeholders, yielding)
             }
             ViewNode::Fill { glyph, style } => {
@@ -662,6 +674,17 @@ fn paint(
             let mut spans = Vec::new();
             inline_spans(runs, area.width as usize, palette, frames, &mut spans);
             Paragraph::new(Line::from(spans)).render(area, buf);
+        }
+        ViewNode::Center(runs) => {
+            // Centred by the same call `ui::project_list::render_empty_sessions`
+            // makes, rather than by dividing the residue here: two panes centring
+            // through one implementation cannot land in different columns, and a
+            // hand-rolled split would put the odd column on the other side.
+            let mut spans = Vec::new();
+            inline_spans(runs, area.width as usize, palette, frames, &mut spans);
+            Paragraph::new(Line::from(spans))
+                .alignment(ratatui::layout::Alignment::Center)
+                .render(area, buf);
         }
         ViewNode::Paragraph(runs) => {
             let mut spans = Vec::new();
@@ -1252,6 +1275,70 @@ mod tests {
             column.chars().any(|c| c != ' '),
             "a thumb is drawn: {column:?}"
         );
+    }
+
+    /// The row the catalog had no way to place. Drawn with a trailing-trim view,
+    /// so the assertion is on the left padding — which is the whole content of
+    /// the node.
+    #[test]
+    fn a_centred_row_sits_in_the_middle_of_its_width() {
+        let node = ViewNode::center(vec![ViewNode::text("abcd")]);
+        assert_eq!(draw(&node, 10, 1), vec!["   abcd"]);
+    }
+
+    /// The reason a fill on either side is not good enough: `inline_spans` hands
+    /// its odd column to the **first** placeholder, and the kernel's own centring
+    /// leaves it on the right. A pane built out of fills would be one column off
+    /// against the pane it reproduces at half of all widths.
+    #[test]
+    fn the_odd_column_falls_where_the_kernels_own_centring_puts_it() {
+        let node = ViewNode::center(vec![ViewNode::text("abcd")]);
+        // 9 - 4 = 5 leftover: two on the left, three on the right.
+        assert_eq!(draw(&node, 9, 1), vec!["  abcd"]);
+
+        let fills = ViewNode::Line(vec![
+            ViewNode::fill(' ', TextStyle::default()),
+            ViewNode::text("abcd"),
+            ViewNode::fill(' ', TextStyle::default()),
+        ]);
+        assert_eq!(draw(&fills, 9, 1), vec!["   abcd"]);
+    }
+
+    #[test]
+    fn a_centred_row_that_fills_its_width_is_an_ordinary_line() {
+        let runs = vec![ViewNode::text("ab"), ViewNode::text("cd")];
+        assert_eq!(
+            draw(&ViewNode::center(runs.clone()), 4, 1),
+            draw(&ViewNode::Line(runs), 4, 1)
+        );
+    }
+
+    /// One row whatever it holds, like a line: a centred row that overflows must
+    /// not push its sibling down.
+    #[test]
+    fn a_centred_row_clips_at_one_row() {
+        let tree = ViewNode::Column(vec![
+            ViewNode::center(vec![ViewNode::text("far too wide for this pane")]),
+            ViewNode::text("below"),
+        ]);
+        assert_eq!(draw(&tree, 8, 2), vec!["far too", "below"]);
+    }
+
+    /// Its runs keep their own styles and are centred as one group, which is what
+    /// makes it a placement rule rather than a styled text node.
+    #[test]
+    fn a_centred_rows_runs_keep_their_styles() {
+        let node = ViewNode::center(vec![
+            ViewNode::token("ab", StyleToken::Accent),
+            ViewNode::text("cd"),
+        ]);
+        let rect = area(10, 1);
+        let mut buf = Buffer::empty(rect);
+        render_tree(&node, rect, &palette(), &FrameTable::default(), &mut buf);
+        assert_eq!(buf[(3, 0)].symbol(), "a");
+        assert_eq!(buf[(3, 0)].fg, palette().accent);
+        assert_eq!(buf[(5, 0)].symbol(), "c");
+        assert_eq!(buf[(5, 0)].fg, palette().text_primary);
     }
 
     #[test]

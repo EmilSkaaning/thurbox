@@ -345,6 +345,26 @@ pub enum ViewNode {
     /// Only children with an intrinsic width may appear here; see
     /// [`ViewNode::is_inlineable`].
     Line(Vec<ViewNode>),
+    /// Inline runs packed left to right on **one** row, that row placed
+    /// centrally in the width the node is given.
+    ///
+    /// The catalog's third placement rule, and the last one it was missing.
+    /// Drawing from the left is what every other node does; flush right has had
+    /// a spelling since [`ViewNode::Fill`] (a fill before a run pushes it
+    /// there); centring could not be built out of the parts, because a fill on
+    /// either side of a run splits the residue with the odd column on the
+    /// **left**, where the kernel's own centring leaves it on the right — off by
+    /// one at half of all widths, against the pane being reproduced.
+    ///
+    /// A sibling of [`ViewNode::Line`] rather than a field on it. The two admit
+    /// the same children and clip the same way; they differ in where the row
+    /// sits, exactly as `Line` and [`ViewNode::Paragraph`] differ in what
+    /// happens when the runs run out of room.
+    ///
+    /// The placement is the **kernel's**, from a rect the plugin is never shown
+    /// — the trade [`ViewNode::Gauge`] made for a bar's width and
+    /// [`ViewNode::List`] for a scroll window.
+    Center(Vec<ViewNode>),
     /// Inline runs laid out left to right and **soft-wrapped** onto further
     /// rows when they exceed the available width.
     ///
@@ -464,9 +484,11 @@ impl ViewNode {
     /// A node's children, or an empty slice for a leaf.
     pub fn children(&self) -> &[ViewNode] {
         match self {
-            ViewNode::Row(c) | ViewNode::Line(c) | ViewNode::Paragraph(c) | ViewNode::Column(c) => {
-                c
-            }
+            ViewNode::Row(c)
+            | ViewNode::Line(c)
+            | ViewNode::Center(c)
+            | ViewNode::Paragraph(c)
+            | ViewNode::Column(c) => c,
             ViewNode::List { children, .. } => children,
             // A motion's frames are its children: that is what makes them
             // count against the tree budget rather than escaping it.
@@ -557,6 +579,7 @@ impl ViewNode {
             // thing a one-row line cannot hold. A gauge likewise takes its width
             // from its area rather than its content.
             ViewNode::Row(_)
+            | ViewNode::Center(_)
             | ViewNode::Paragraph(_)
             | ViewNode::Column(_)
             | ViewNode::List { .. }
@@ -572,6 +595,7 @@ impl ViewNode {
             ViewNode::Text { .. } => "text",
             ViewNode::Row(_) => "row",
             ViewNode::Line(_) => "line",
+            ViewNode::Center(_) => "center",
             ViewNode::Paragraph(_) => "paragraph",
             ViewNode::Column(_) => "column",
             ViewNode::List { .. } => "list",
@@ -608,6 +632,11 @@ impl ViewNode {
                 ..TextStyle::default()
             },
         )
+    }
+
+    /// Build a centred line of runs.
+    pub fn center(runs: Vec<ViewNode>) -> ViewNode {
+        ViewNode::Center(runs)
     }
 
     /// Build a list with no cursor in it — what most lists are.
@@ -802,10 +831,50 @@ mod tests {
         );
     }
 
+    /// A centred line admits what a line admits and is refused where a line is
+    /// admitted — the two halves that make it a *placement* rather than a
+    /// container of its own.
+    #[test]
+    fn a_centred_line_follows_the_line_rule_and_is_not_itself_inline() {
+        // Asked of the children, which is how conversion asks it: the node
+        // itself is never inline, so asking it about itself would answer the
+        // other question.
+        let ok = [ViewNode::text("a"), ViewNode::Line(vec![])];
+        assert_eq!(
+            ok.iter().find_map(ViewNode::first_non_inlineable),
+            None,
+            "its children are a line's"
+        );
+
+        let bad = [ViewNode::Column(vec![])];
+        assert_eq!(
+            bad.iter().find_map(ViewNode::first_non_inlineable),
+            Some("column"),
+            "the error names the offending child, not the centred node"
+        );
+
+        // And its own width comes from the area, so a line may not hold one.
+        assert!(!ViewNode::center(vec![]).is_inlineable());
+        assert_eq!(
+            ViewNode::Line(vec![ViewNode::center(vec![])]).first_non_inlineable(),
+            Some("center")
+        );
+    }
+
+    /// Its runs are ordinary children, so centring buys no way past the budget.
+    #[test]
+    fn a_centred_lines_runs_count_toward_the_tree_bounds() {
+        let node = ViewNode::center(vec![ViewNode::text("a"), ViewNode::text("b")]);
+        assert_eq!(node.node_count(), 3);
+        assert_eq!(node.depth(), 2);
+        assert_eq!(node.stacked_row_count(), 1, "one row, like a line");
+    }
+
     #[test]
     fn every_kind_names_itself() {
         assert_eq!(ViewNode::text("x").kind_name(), "text");
         assert_eq!(ViewNode::Line(vec![]).kind_name(), "line");
+        assert_eq!(ViewNode::center(vec![]).kind_name(), "center");
         assert_eq!(ViewNode::Row(vec![]).kind_name(), "row");
         assert_eq!(ViewNode::Column(vec![]).kind_name(), "column");
         assert_eq!(ViewNode::list(vec![]).kind_name(), "list");

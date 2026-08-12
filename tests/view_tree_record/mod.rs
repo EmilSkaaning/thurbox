@@ -105,6 +105,10 @@ fn write_node(node: &ViewNode, depth: usize, out: &mut String) {
             out.push_str(&format!("{pad}line\n"));
             write_children(children, depth, out);
         }
+        ViewNode::Center(children) => {
+            out.push_str(&format!("{pad}center\n"));
+            write_children(children, depth, out);
+        }
         ViewNode::Paragraph(children) => {
             out.push_str(&format!("{pad}paragraph\n"));
             write_children(children, depth, out);

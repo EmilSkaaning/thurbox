@@ -399,11 +399,22 @@ const BLOCKERS: &[Blocker] = &[
         id: "no-centred-line",
         needs: "the empty state — `No sessions yet` and `Press Ctrl+N to create one`, drawn \
                 centred",
-        stands: "every node draws from the left; `Fill` can push a run flush right and nothing \
-                 centres. The one enumerated divergence of the port's oracle, and the plugin \
-                 draws the same words left-aligned",
+        stands: "**closed as a handover requirement** (ADR-62), on the rule the two seat rows \
+                 already use: a row closes when the *route* exists, not when the reproduction \
+                 takes it. `ViewNode::Center` packs inline runs on one row and the **kernel** \
+                 places that row centrally, through the same `Alignment::Center` call \
+                 `render_empty_sessions` makes — so the words can now be drawn centred by a pane \
+                 that is drawn from a tree. Neither pane adopted it: the native one still returns \
+                 early and draws a `Paragraph`, the bundled plugin still emits two left-aligned \
+                 rows, and `the_empty_pane_is_the_one_place_the_plugin_differs` goes on asserting \
+                 that they differ — so \"the vocabulary exists\" cannot come to read as \"the \
+                 panes agree\". Adopting it moves a recorded golden, which belongs to the \
+                 handover. The shape was **not** an alignment field on a run (two runs on one \
+                 line could disagree) and **not** a fill on either side of the words (the residue \
+                 splits with the odd column on the left, where the kernel's centring leaves it on \
+                 the right — off by one at half of all widths, against the pane being reproduced)",
         gap: Gap::Vocabulary,
-        blocked: true,
+        blocked: false,
         probe: |root| {
             let kinds = view_node_kinds(root);
             let no_centring_node = !kinds
@@ -411,7 +422,13 @@ const BLOCKERS: &[Blocker] = &[
                 .any(|k| k == "Center" || k == "Centre" || k == "Align");
             let style_has_no_alignment =
                 !block(root, "src/session/view_tree.rs", "pub struct TextStyle").contains("align");
-            no_centring_node && style_has_no_alignment
+            // And the kernel keeps the placement: a node that reported a column,
+            // an offset or a padding back to the plugin would be the geometry the
+            // model has refused four times, wearing this row's name.
+            let placement_is_the_kernels = source(root, "src/ui/plugin_pane.rs")
+                .contains("ViewNode::Center(runs) =>")
+                && source(root, "src/ui/plugin_pane.rs").contains("Alignment::Center");
+            no_centring_node && style_has_no_alignment || !placement_is_the_kernels
         },
     },
     Blocker {

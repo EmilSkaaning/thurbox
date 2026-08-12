@@ -242,6 +242,15 @@ fn convert(
             }
             Ok(ViewNode::Line(runs))
         }
+        // Same children and the same admissibility rule as a line; only the
+        // placement of the row differs, which is not a conversion concern.
+        "center" => {
+            let runs = convert_children(table, &kind, depth, budget, path)?;
+            if let Some(kind) = runs.iter().find_map(ViewNode::first_non_inlineable) {
+                return Err(ViewError::NotInlineable { kind });
+            }
+            Ok(ViewNode::Center(runs))
+        }
         "paragraph" => {
             let runs = convert_children(table, &kind, depth, budget, path)?;
             // Same admissibility rule as a line, asked of the converted child
@@ -779,6 +788,35 @@ mod tests {
         assert_eq!(
             convert_src(r#"return { kind = "paragraph", children = { { kind = "column" } } }"#),
             Err(ViewError::NotInlineable { kind: "column" })
+        );
+    }
+
+    #[test]
+    fn a_centred_line_converts_and_admits_only_inline_children() {
+        let node = convert_src(
+            r#"return { kind = "center", children = { { kind = "text", content = "hi" } } }"#,
+        )
+        .unwrap();
+        assert_eq!(node, ViewNode::center(vec![ViewNode::text("hi")]));
+
+        // No children is a blank centred row, not an error — an empty line is
+        // valid and this is a line's placement.
+        assert_eq!(
+            convert_src(r#"return { kind = "center" }"#).unwrap(),
+            ViewNode::center(Vec::new())
+        );
+
+        // Same admissibility rule as a line, and the error names the child.
+        assert_eq!(
+            convert_src(r#"return { kind = "center", children = { { kind = "list" } } }"#),
+            Err(ViewError::NotInlineable { kind: "list" })
+        );
+
+        // And it may not sit inside a line: its width comes from the area it is
+        // given, which is the property that makes centring the kernel's job.
+        assert_eq!(
+            convert_src(r#"return { kind = "line", children = { { kind = "center" } } }"#),
+            Err(ViewError::NotInlineable { kind: "center" })
         );
     }
 

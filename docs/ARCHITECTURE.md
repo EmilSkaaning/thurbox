@@ -4155,3 +4155,71 @@ the bundled plugin still flattens them, because adopting the item shape moves th
 goldens — the handover's change to make and to justify. Cost per frame is one `height_of`
 call per child, and only for a list that declares a cursor or a track; a list that
 declares neither measures nothing and takes the path it always took.
+
+## ADR-62: A centred line, because the last placement rule could not be built from the parts
+
+**Context.** `tests/session_list_pane_handover_gap.rs` held `no-centred-line` against the
+session list's handover: the empty state (`No sessions yet`, `Press Ctrl+N to create one`)
+is drawn centred, and every node in the catalog draws from the left. Small, and a handover
+would ship it — the session list is empty on a fresh install, so the first frame a new
+user sees is the one the row is about.
+
+It is also the last placement rule the catalog was missing. Left is the default;
+flush-right has had a spelling since ADR-31 (a `Fill` before a run, whose residue the
+kernel resolves); centre had none.
+
+**Decision.** `ViewNode::Center(Vec<ViewNode>)` — inline runs packed on one row, that row
+placed centrally in the width the node is given, by the kernel. It admits exactly what a
+line admits, clips the same way, is one row tall, and is not itself admissible inside a
+line, because its width comes from its area rather than from its content.
+
+**Rejected: a fill on either side.** A plugin can already write `line(fill, run, fill)`
+and `inline_spans` splits the residue between the placeholders. That is centring to within
+one column, and one column is the wrong kind of nearly-right: the remainder goes to the
+**first** placeholder, where ratatui's `Alignment::Center` — the call the native pane
+makes — leaves it on the **right**. So a pane built this way is off by one whenever the
+residue is odd, against the pane it is reproducing, at half of all widths.
+`the_odd_column_falls_where_the_kernels_own_centring_puts_it` pins both sides of that.
+Changing `Fill`'s remainder rule instead is refused outright: it is load-bearing for a diff
+row's tint and a group header's trailing rule, and it would move frames in panes with no
+stake in this.
+
+**Rejected: an `align` field on `TextStyle`.** The gate's probe accepted it, so it was on
+the table. It is not true of a run: two runs on one line could declare different
+alignments and the host would have to arbitrate or let the first win. Every other field of
+`TextStyle` says how *that run* is drawn. `ellipsize` is the near miss worth naming — a
+per-run field that is really a rule about the line — and it earns that because several
+yielding runs share one budget, which is a genuinely per-run fact. Centring has no such
+reading.
+
+**Rejected: an alignment field on `Line`.** The model's answer, and it would give
+right-alignment a clearer second spelling for free. `Line` is a tuple variant at 48 sites
+across five modules and the golden recorder, 21 of them patterns. A change whose whole
+content is one placement rule would arrive as a mechanical rewrite touching three native
+panes and the recorder — and the recorder prints node shape, so recordings would move for
+reasons unrelated to centring, in the artifacts that are the only evidence four
+handed-over panes have. If a second alignment consumer appears, `Center` collapses into
+the field in a change whose content is that collapse.
+
+**Why a third node is not a second spelling of `Line`.** The objection this change has to
+answer, having refused `Item` one commit earlier (ADR-61) on exactly that ground. The
+catalog already holds two nodes that take the same children and differ only in what
+happens when they run out of room — `Line` clips, `Paragraph` wraps. A third taking the
+same children and differing in where the row sits is that grain, not a novelty. `Item`
+was refused because `Column` already *was* it; nothing here already centres.
+
+**Consequence.** `no-centred-line` is re-verdicted **met**, on the rule the two seat rows
+already use: a row closes when the route exists, not when the reproduction takes it.
+Neither pane adopted it — the native one still returns early and draws a `Paragraph`, the
+bundled plugin still emits two left-aligned rows — and
+`the_empty_pane_is_the_one_place_the_plugin_differs` goes on asserting they differ, so
+"the vocabulary exists" cannot come to read as "the panes agree". The row's probe also
+asks that the placement stayed the kernel's, so a later change reporting a column or an
+offset back into a VM reopens it.
+
+**One note on where the constructor lives.** `ui.center` joins the loop in
+`plugin::capabilities::build_ui_table` that already builds `row`, `line`, `paragraph` and
+`column`. That file's name notwithstanding, this grants **no capability**: `Capability` is
+unchanged, `build_module_table`'s bindings are unchanged, and nothing a plugin may read,
+write, run or reach moves. The `ui` table is the node vocabulary and is frozen after
+construction.

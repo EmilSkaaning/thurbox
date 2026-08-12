@@ -119,6 +119,12 @@ export type Ui = {
     -- `line`; anything else is rejected, since its width would come from the
     -- area rather than from its content. Overflow is clipped, not wrapped.
     line: (children: { ViewNode }?) -> ViewNode,
+    -- A `line` whose row the host places centrally in the width it got. The one
+    -- placement you cannot build yourself: a `fill` either side of a run splits
+    -- the leftover columns, but the odd one lands on the left where the host's
+    -- own centring puts it on the right. Same children as `line`, clipped the
+    -- same way, one row.
+    center: (children: { ViewNode }?) -> ViewNode,
     column: (children: { ViewNode }?) -> ViewNode,
     -- A list of rows. `selected` is the 1-based index of the row the cursor is
     -- on; give it and the host scrolls the list to keep that row visible when

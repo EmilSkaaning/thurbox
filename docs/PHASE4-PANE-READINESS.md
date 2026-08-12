@@ -864,7 +864,7 @@ whose content changes fast enough for it to matter.
 
 | Open gap | Where the host stands | Cheapest closure |
 |---|---|---|
-| **a centred line** (new) | every node draws from the left; `Gauge` right-aligns a suffix and `Fill` can push a run flush right, but neither centres | an alignment on a line node. One consumer so far, so it is recorded rather than designed |
+| **a centred line** (new) | every node draws from the left; `Gauge` right-aligns a suffix and `Fill` can push a run flush right, but neither centres | **Closed in §37** (ADR-62): a centred-line node, whose row the kernel places. Not the alignment field this row proposed, and §37 records why |
 | **a pane's border chrome** (new) | a pane's block is drawn by the host around whatever the plugin returned; nothing describes an overlay on it | this is §9's frame-node row seen from the other side, and its **third** consumer (file-viewer search bar, global search strip, this) |
 | the render interval | above | above |
 | §8's ellipsizing clip | unchanged; this pane's fitting stays in the kernel | a line that clips with an ellipsis |
@@ -3284,3 +3284,42 @@ stopped calling it the needle went on matching — because a *test* in the same 
 calls the uniform form to assert the two panes share a rule. A probe answering for a call
 its subject no longer makes is exactly the silent case these gates exist to catch, and it
 was caught by running the suite rather than by reading the probe.
+
+## 37. The last placement rule (ADR-62)
+
+§13 recorded `a centred line` as the session-list port's one **new** vocabulary row, with
+"one consumer so far, so it is recorded rather than designed". This designs it, and the
+interesting part is why the obvious workaround is not one.
+
+**A plugin could already centre, to within one column.** `line(fill, run, fill)` splits the
+leftover width between the two fills — `inline_spans` hands out `residue / n` and the
+remainder from the left. ratatui's `Alignment::Center`, which is what
+`ui::project_list::render_empty_sessions` calls, computes `(width - line_width) / 2` on the
+left and so leaves the odd column on the right. The two disagree by one column at every odd
+residue, which is half of all widths, and they disagree *against the pane being reproduced*.
+A workaround that is wrong half the time and looks right is worse than an absence, because
+nothing fails.
+
+**So the node is the answer, and it calls the same widget.** `ViewNode::Center` hands its
+row to a `Paragraph` with `Alignment::Center` rather than dividing the residue itself: two
+panes centring through one implementation cannot land in different columns, which is the
+argument `visible_window` and `scrollbar::reserve_track` already make for height and for a
+track's column.
+
+**Two shapes refused, both cheaper.** An `align` on `TextStyle` — the gate's probe accepted
+it — is not true of a run, since two runs on one line could disagree. An alignment field on
+`Line` is the model's answer and costs a 48-site mechanical rewrite through three native
+panes and the golden recorder, in a change whose content is one placement rule; the
+recorder prints node shape, so recordings would move for reasons unrelated to centring.
+
+**And the objection this change had to answer**, one commit after refusing `ViewNode::Item`
+on the ground that `Column` already was it: `Line` and `Paragraph` already take the same
+children and differ only in their overflow rule, so a third differing in its placement rule
+is the catalog's existing grain. The test is whether something already does it. `Column`
+did; nothing centred.
+
+**What did not happen.** The empty state is *not* reproduced. The native pane still leaves
+the view tree entirely when there are no sessions, and the bundled plugin still draws two
+left-aligned rows — adopting the node moves a recording, which is the handover's to move.
+`the_empty_pane_is_the_one_place_the_plugin_differs` is kept for exactly that distinction,
+and now fails if one pane adopts the node and the other does not.

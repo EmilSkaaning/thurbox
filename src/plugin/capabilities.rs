@@ -423,7 +423,10 @@ fn build_ui_table(lua: &Lua) -> mlua::Result<Table> {
     // `paragraph` shares `line`'s inline children but wraps instead of clipping,
     // so an unbounded value stays readable where a fixed-width row must not push
     // its neighbours down.
-    for kind in ["row", "line", "paragraph", "column"] {
+    // `center` shares them again and differs only in where the row sits — the one
+    // placement a plugin cannot build out of the parts, since a fill on either
+    // side leaves the odd column on the wrong one.
+    for kind in ["row", "line", "center", "paragraph", "column"] {
         ui.set(
             kind,
             lua.create_function(move |lua, children: Option<Table>| {
@@ -660,6 +663,7 @@ mod tests {
             "text",
             "row",
             "line",
+            "center",
             "paragraph",
             "column",
             "list",

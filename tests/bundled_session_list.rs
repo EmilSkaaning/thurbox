@@ -630,12 +630,16 @@ fn the_plugins_animation_is_the_kernels_animation() {
 }
 
 /// **Enumerated divergence 1: the empty pane.** The native pane leaves the view
-/// tree entirely when there are no sessions — its two lines are drawn *centred*,
-/// and no node in the catalogue carries an alignment. The plugin draws the same
-/// words left-aligned.
+/// tree entirely when there are no sessions — its two lines are drawn *centred*
+/// by a `Paragraph`, never by a node. The plugin draws the same words
+/// left-aligned.
 ///
-/// This is the port's one new vocabulary gap, and closing it is an alignment on a
-/// line node. Recorded as `no-centred-line` in the handover gate.
+/// The vocabulary gap the port named is **closed** since ADR-62: `ViewNode::Center`
+/// places a row centrally and `no-centred-line` is met in the handover gate. The
+/// divergence is not, and the distinction is the point of keeping this test — a
+/// pane can now be centred and neither of these two has been, because changing
+/// either moves a recording. This is what fails if one of them changes and the
+/// other does not.
 #[test]
 fn the_empty_pane_is_the_one_place_the_plugin_differs() {
     let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
