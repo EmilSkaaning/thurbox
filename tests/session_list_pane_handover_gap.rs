@@ -365,15 +365,32 @@ const BLOCKERS: &[Blocker] = &[
         id: "no-pane-chrome",
         needs: "the pane's border, which carries one status dot per session (right-aligned in the \
                 block's top title) and `^ N` / `v N` indicators when rows are clipped",
-        stands: "the host draws a plugin pane's block around whatever the plugin returned, and \
-                 nothing in the catalogue describes an overlay on that frame. This is §9's \
-                 frame-node row, at its fourth consumer",
+        stands: "**closed as a handover requirement** (ADR-67), and the two halves closed by \
+                 different mechanisms — which is the finding, since the row named them as one \
+                 thing. The dots are a third `PaneChrome` shape (`StatusDots`), and the first \
+                 that subtracts **nothing**: they land in cells the border already owns, so the \
+                 pane's content area and row hitboxes are bit-for-bit what they were \
+                 (`border_chrome_costs_the_pane_no_content_row`). The indicators are not chrome \
+                 at all — a chrome shape is resolved *before* the pane is painted and the \
+                 clipped counts do not exist until after, so they are read off the paint and \
+                 drawn for **every** pane the host paints, which is why three already-handed-over \
+                 panes gained them. Nothing was declared: `PaneDecl` still names no border, \
+                 chrome, badge or indicator, so a pane cannot ask for either and cannot suppress \
+                 them. The native pane still draws its own of both, which is what \
+                 `the_native_pane_is_still_what_thurbox_draws` is about",
         gap: Gap::Vocabulary,
-        blocked: true,
+        blocked: false,
         probe: |root| {
-            // The native pane puts the dots on the block, outside any tree.
-            let native_draws_on_the_border =
-                source(root, "src/ui/project_list.rs").contains("block.title_top(");
+            // Four halves, because any one alone would be the wrong claim: the shape
+            // must exist, the seat must paint it on the frame, the indicators must
+            // come off the host's own paint, and the manifest must still describe no
+            // chrome — asserted so "closed" can never come to mean "a plugin was
+            // given the frame".
+            let shape_exists = block(root, "src/app/mod.rs", "pub(crate) enum PaneChrome")
+                .contains("StatusDots {");
+            let view = source(root, "src/app/view.rs");
+            let seat_paints_the_border = view.contains("block.title_top(");
+            let indicators_come_off_the_paint = view.contains("draw_clipped_indicators(");
             let manifest = block(
                 root,
                 "src/session/plugin_manifest.rs",
@@ -383,7 +400,10 @@ const BLOCKERS: &[Blocker] = &[
             let nothing_declares_chrome = !["border", "chrome", "badge", "indicator"]
                 .iter()
                 .any(|n| manifest.contains(n));
-            native_draws_on_the_border && nothing_declares_chrome
+            !(shape_exists
+                && seat_paints_the_border
+                && indicators_come_off_the_paint
+                && nothing_declares_chrome)
         },
     },
     Blocker {

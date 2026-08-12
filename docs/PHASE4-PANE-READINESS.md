@@ -3497,3 +3497,39 @@ resolved width, the click that means a column, the row-anchored overlay, and the
 box's multi-line body. What the port changes is that the seat row is now the *only* thing
 standing between this list and its handover — the drawing, the model, the window and the
 recording are all in place.
+
+## 42. The frame the session list draws on, and the window the host hid rows with (ADR-67)
+
+Two rows refused the session list; `no-pane-chrome` was one, and it named the pane's
+**border** — one status dot per session, right-aligned in the top title, and `▲ N` / `▼ N`
+when rows are clipped. Both are painted in cells the border owns, so neither is expressible
+as either shape `PaneChrome` had: a hint row and a search band are subtractions from the
+pane's content area, and this costs no row at all.
+
+**The row named two things, and they closed by different mechanisms.** That is the finding,
+and it is why the change is one paragraph longer than the row is.
+
+The dots are a third chrome shape, `PaneChrome::StatusDots`, painted onto the block before
+it is rendered — the first shape that subtracts nothing, asserted as such rather than
+argued, because "chrome" until now meant "a subtraction". It carries statuses and a spinner
+frame rather than resolved cells: a status becomes a glyph and a colour in exactly one
+place, shared with the rows themselves.
+
+The indicators are **not chrome**. A chrome shape is resolved *before* the pane is painted —
+that is what lets the search band be subtracted from the seat first — and the clipped
+counts do not exist until after, since they are outputs of the paint. So they are read off
+that paint and drawn for every pane the host paints, which makes them a fact about the
+host's own frame in the same class as its colour. The consequence is stated rather than
+discovered: the tasks column, the automations band and the file tree gain indicators they
+did not have, and so does a user's own pane. The alternative was "the tasks column hides
+rows silently, the session list says how many", with no principle behind the difference.
+
+**Nothing was declared, and that is the half worth asserting.** `PaneDecl` still names no
+border, chrome, badge or indicator: a pane cannot ask for either surface and cannot suppress
+it, because both follow from the pane declaring it *is* thurbox's session list (ADR-51) —
+like its keyboard, its focus rule, its hint row and its search bar. A manifest field would
+let a pane that is nobody's reproduction request thurbox's session summary on its own frame.
+
+**What is left on this pane.** One row: `no-pending-spawn-row` — the placeholder a spawning
+session renders as, inside the repo group it will land in, at an index
+`ui::project_list::pending_spawn_slot` computes over `App::pending_spawn`.

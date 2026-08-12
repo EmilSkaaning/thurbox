@@ -741,13 +741,13 @@ pub(crate) enum ScrollTarget {
 /// Chrome the kernel draws in a seated pane's place, as a **closed set of shapes**.
 ///
 /// A handed-over pane may have chrome its plugin cannot draw — a hint row naming
-/// rebindable chords, an input bar showing kernel state. The kernel keeps drawing it,
-/// in the position it had, and the plugin's tree is laid out in what remains
-/// (ADR-53/57). Described as data rather than as a painter the seat invokes, so what a
-/// seat may draw stays enumerable: with a closure, "the kernel draws whatever it likes
-/// inside a plugin pane" would be the rule.
+/// rebindable chords, an input bar showing kernel state, a summary painted on the
+/// pane's own frame. The kernel keeps drawing it, in the position it had, and the
+/// plugin's tree is laid out in what remains (ADR-53/57/67). Described as data rather
+/// than as a painter the seat invokes, so what a seat may draw stays enumerable: with a
+/// closure, "the kernel draws whatever it likes inside a plugin pane" would be the rule.
 ///
-/// The two shapes differ in *where*, which the seat resolves before it draws the pane's
+/// The shapes differ in *where*, which the seat resolves before it draws the pane's
 /// frame — see [`App::pane_chrome`] for when each appears.
 #[cfg(feature = "plugins")]
 pub(crate) enum PaneChrome {
@@ -757,6 +757,22 @@ pub(crate) enum PaneChrome {
     /// A bordered band of three rows **below** the frame: the file viewer's search bar,
     /// where the native pane always drew it.
     SearchBar(crate::ui::search_bar::SearchBar),
+    /// One dot per session, right-aligned **on** the frame's top border: the session
+    /// list's status strip (ADR-67).
+    ///
+    /// The first shape that subtracts **nothing** — it lands in cells the border already
+    /// owns, so the pane's content area, and therefore its row hitboxes, are exactly
+    /// what they would be without it.
+    ///
+    /// Statuses and a frame index rather than resolved glyphs and colours: both
+    /// resolutions live in `ui` and are shared with the rows themselves, so carrying
+    /// cells here would be a second place a status becomes a colour. The spinner index
+    /// travels with them because a working session's dot is a frame of the same
+    /// animation its row's glyph is, and the two must not tick apart.
+    StatusDots {
+        statuses: Vec<SessionStatus>,
+        spinner_frame: usize,
+    },
 }
 
 /// One scrollbar rendered this frame: its geometry plus the scroll state it
@@ -8628,13 +8644,13 @@ impl App {
     }
 
     /// The chrome the kernel draws in a seated pane's place, if that pane has any
-    /// (ADR-53, widened by ADR-58).
+    /// (ADR-53, widened by ADR-58 and ADR-67).
     ///
     /// **Data rather than a closure**, so what a seat may draw stays enumerable: a
     /// painter argument would make "the kernel paints whatever it likes inside a
     /// plugin pane" the rule. `None` for a pane with no chrome.
     ///
-    /// It stays the kernel's because a plugin could not draw it honestly, and for two
+    /// It stays the kernel's because a plugin could not draw it honestly, and for three
     /// different reasons:
     ///
     /// - the tasks pane's hints are *rebindable* chords, which no published section
@@ -8645,11 +8661,14 @@ impl App {
     /// - the file viewer's search bar is *kernel state*: the kernel owns the `/` key,
     ///   so it owns the query, the caret and the match count, and `Capability::Files`
     ///   deliberately publishes none of the three.
+    /// - the session list's dots are painted on the pane's own **frame**, which is the
+    ///   host's surface. A pane able to paint there could paint on any frame's title,
+    ///   which is a far larger grant than a summary strip needs.
     ///
     /// Each shape keeps the condition its native counterpart had, which is why this
     /// takes `&self`: the hint row followed **focus** (resolved by the caller, which is
-    /// the only thing here that varies with it) while the bar follows its own sub-mode,
-    /// visible whenever a search is running or a query is committed.
+    /// the only thing here that varies with it), the bar follows its own sub-mode, and
+    /// the dots follow only whether there are sessions to report.
     #[cfg(feature = "plugins")]
     pub(crate) fn pane_chrome(&self, context: crate::session::KeyContext) -> Option<PaneChrome> {
         use crate::session::KeyContext;
@@ -8672,6 +8691,13 @@ impl App {
                     })
                 })
             }
+            KeyContext::SessionList => {
+                let statuses = self.ordered_session_statuses();
+                (!statuses.is_empty()).then(|| PaneChrome::StatusDots {
+                    statuses,
+                    spinner_frame: self.spinner_frame(),
+                })
+            }
             // The review's find bar and its compose box are the same *kind* of
             // thing as the file viewer's bar — kernel state on a kernel key — but
             // neither is seat chrome: the bar sits inside the diff's own frame and
@@ -8679,13 +8705,45 @@ impl App {
             // from a seat cannot express. Recorded as `no-anchored-overlay` /
             // `no-in-pane-text-field` in `tests/code_review_pane_handover_gap.rs`
             // rather than approximated here.
-            KeyContext::SessionList
-            | KeyContext::Automations
+            KeyContext::Automations
             | KeyContext::CodeReview
             | KeyContext::ReviewFiles
             | KeyContext::Global
             | KeyContext::Terminal => None,
         }
+    }
+
+    /// Every session's status in **render order** — one dot per session, as the
+    /// session list's frame carries them.
+    ///
+    /// Reuses the order the view cached when its inputs have not moved, exactly as
+    /// [`Self::build_session_list_snapshot`] does and for the same reason: the chrome
+    /// is resolved once per frame, and regrouping there would undo the cache the
+    /// ordering signature exists to keep (ADR-P3).
+    #[cfg(feature = "plugins")]
+    fn ordered_session_statuses(&self) -> Vec<SessionStatus> {
+        if self.sessions.is_empty() {
+            return Vec::new();
+        }
+        let all: Vec<&SessionInfo> = self.sessions.iter().map(|s| &s.info).collect();
+        let signature = self.session_order_signature();
+        let computed;
+        let order = match self
+            .cached_session_order
+            .as_ref()
+            .filter(|(cached, _)| *cached == signature)
+        {
+            Some((_, order)) => order,
+            None => {
+                computed = crate::session::session_list::compute_session_order(&all);
+                &computed
+            }
+        };
+        order
+            .order
+            .iter()
+            .filter_map(|&i| all.get(i).map(|info| info.status))
+            .collect()
     }
 
     /// Whether a **kernel** surface has taken `slot` for as long as it is present, so

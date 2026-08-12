@@ -4470,3 +4470,61 @@ native column; omitting it would put an unbounded list on the wire.
 row: all five of the code review's blockers keep their verdicts, and
 `the_reproduction_claims_neither_the_seat_nor_the_keyboard` asserts the manifest names
 neither the seat nor a key context — so the port cannot become a handover by omission.
+
+## ADR-67: A seat may draw on the pane's frame, and the host says what its own window hid
+
+**Context.** `tests/session_list_pane_handover_gap.rs` refuses the session list on two
+rows, and `no-pane-chrome` is the pane's **frame**: one status dot per session,
+right-aligned in the block's top title, and `▲ N` / `▼ N` when rows are clipped. Both are
+painted in cells the border owns. `PaneChrome` (ADR-53, widened by ADR-58) describes
+chrome the kernel draws *inside* a seat — a hint row on the frame's bottom line, a
+bordered band below the frame — and both of those are subtractions from the pane's content
+area. Neither shape fits something that costs no row at all.
+
+**Decision, and it is two decisions because the row named two things as one.**
+
+`PaneChrome::StatusDots { statuses, spinner_frame }` is a third shape, painted onto the
+block before it is rendered, and the first that subtracts **nothing**: the split in
+`paint_plugin_pane` runs unchanged, so the pane's content area and its row hitboxes are
+bit-for-bit what they were. `border_chrome_costs_the_pane_no_content_row` asserts that
+directly, because "chrome" has until now meant "a subtraction" and a reader will assume it
+still does. It carries statuses and a frame index rather than resolved glyphs and colours:
+`status_glyph`/`status_color` live in `ui` and are shared with the rows themselves, so
+cells here would be a second place a status becomes a colour. The spinner index travels
+with them because a working session's dot is a frame of the same animation its row's glyph
+is, and the two must not tick apart.
+
+**The clipped-row indicators are not chrome at all**, and that is the finding. A chrome
+shape is resolved from kernel state *before* the pane is painted — that is what lets
+`SearchBar` subtract its band from the seat first. The clipped counts do not exist until
+after: they are outputs of `render_tree_rows`, the last thing `paint_plugin_pane` does. A
+`PaneChrome::ClippedRows` would have to be built from data its constructor cannot have, or
+the paint would have to run twice. They are a fact about the host's own paint of its own
+frame, in the same class as the frame's colour — the window is `ui::visible_item_window`,
+the frame is `focus_block`, both are the kernel's, and a plugin is told neither.
+
+**So the host draws them for every pane it paints**, from the counts it already returned.
+The consequence is named rather than discovered: the tasks column, the automations band
+and the file tree gain indicators they did not have. Making it conditional would mean "the
+tasks column hides rows silently, the session list says how many" with no principle behind
+the difference, and `ui::draw_clipped_indicators`'s own doc already anticipated this
+generalisation. A *user's* pane gets the same treatment thurbox's own do.
+
+**Why not.**
+
+| Alternative | Why not |
+|---|---|
+| Publish the dots and let the pane draw a summary row | Not where the native pane draws it. A row of dots inside the frame costs a content row and moves every row below it — the "a handover changes which code draws the pane's content and nothing else about the pane" rule, broken. |
+| A `PaneDecl` field (`border_status`, `chrome = [...]`) | Inverts who decides. The chrome follows from a pane declaring it *is* thurbox's session list (ADR-51), like the keyboard, the focus rule, the hint row and the search bar — all resolved by the kernel from the context. A field would let a pane that is nobody's reproduction request thurbox's session summary on its own frame. |
+| A painter closure on the seat | The reason `PaneChrome` was data in the first place (ADR-53): with a closure, "the kernel draws whatever it likes inside a plugin pane" is the rule and there is nothing to enumerate. |
+| Fold it into the handover | Same argument as ADR-63 and ADR-64: a handover's claim is that which code draws a pane changed and nothing else did, and a commit that also adds a host shape gives a reviewer two things to attribute. |
+
+**What did not change.** The native session list still draws its own dots and its own
+indicators, because it is still what thurbox draws;
+`the_native_pane_is_still_what_thurbox_draws` is what fails if that order is reversed. No
+capability, no module binding, no manifest field, and nothing new on the wire — the dots
+are resolved from the same `SessionInfo` list the rows are, on the kernel side of the
+seam.
+
+**What is left.** One row: `no-pending-spawn-row`, the placeholder a spawning session
+renders as, inside the repo group it will land in.

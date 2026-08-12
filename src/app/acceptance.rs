@@ -396,6 +396,39 @@ impl Harness {
             .pane_keyboard_taken(crate::session::KeyContext::FileViewer)
     }
 
+    /// Seat a pane in the session list's seat, declaring that keyboard — the shape
+    /// `src/plugin/bundled/session-list/plugin.toml` would take on a handover.
+    ///
+    /// `rows` list children, so a caller can make the list overflow a short pane and
+    /// see what the host's window clipped. The tree is the harness's, not the bundled
+    /// plugin's: these tests are about the **seat** — its frame, its chrome and its
+    /// hitboxes — and a Luau VM here would make them tests of that plugin instead.
+    #[cfg(feature = "plugins")]
+    fn seat_session_list_pane(&mut self, rows: usize) -> &mut Self {
+        use crate::session::plugin_manifest::PaneSlot;
+        use crate::session::view_tree::ViewNode;
+        use crate::session::KeyContext;
+
+        let mut pane = crate::plugin::PluginPane::loading(
+            "session-list",
+            "sessions",
+            "Sessions",
+            PaneSlot::Left,
+            true,
+        );
+        pane.key_context = Some(KeyContext::SessionList);
+        pane.apply(Ok(ViewNode::selectable_list(
+            (0..rows)
+                .map(|i| ViewNode::text(format!("row {i}")))
+                .collect(),
+            Some(rows.saturating_sub(1)),
+        )));
+        let mut panes = self.app.plugin_panes.clone();
+        panes.push(pane);
+        self.app.set_plugin_panes(panes);
+        self
+    }
+
     /// Feed one key event, exactly as the real event loop converts a crossterm
     /// `KeyPress` into an [`AppMessage`].
     fn key(&mut self, code: KeyCode, mods: KeyModifiers) -> &mut Self {
@@ -1157,6 +1190,145 @@ fn session_list_renders_seeded_sessions() {
     assert!(
         frame.contains("session-1"),
         "second session name should render"
+    );
+}
+
+// ── Seat chrome: the pane's frame ────────────────────────────────────────────
+
+/// The left column's rect, which every frame test below reads its cells out of.
+#[cfg(feature = "plugins")]
+fn left_seat(h: &Harness) -> ratatui::layout::Rect {
+    h.app
+        .layout_for(ratatui::layout::Rect::new(0, 0, STD_COLS, STD_ROWS))
+        .left_panel
+        .expect("the left column is carved at this size")
+}
+
+/// One symbol per cell of buffer row `y`, over `rect`'s columns.
+#[cfg(feature = "plugins")]
+fn row_text(buf: &ratatui::buffer::Buffer, rect: ratatui::layout::Rect, y: u16) -> String {
+    (rect.x..rect.x + rect.width)
+        .map(|x| buf[(x, y)].symbol())
+        .collect()
+}
+
+/// A pane that declares it is thurbox's session list carries the list's status
+/// strip on its **top border** — one dot per session, in that session's colour
+/// (ADR-65).
+///
+/// The colour is asserted, not only the glyph: an uncoloured strip is the failure
+/// mode this chrome exists to avoid, and `Harness::render` keeps symbols alone.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_seated_session_list_carries_its_status_dots_on_the_border() {
+    use crate::session::SessionStatus;
+
+    let mut h = Harness::standard(3);
+    // One of each of the three states a user reads at a glance, so a strip that
+    // resolved every dot the same way cannot pass.
+    let states = [
+        SessionStatus::Idle,
+        SessionStatus::Blocked,
+        SessionStatus::Done,
+    ];
+    for (session, status) in h.app.sessions.iter_mut().zip(states) {
+        session.info.status = status;
+    }
+    h.seat_session_list_pane(3);
+    let rect = left_seat(&h);
+    let buf = h.render_buffer();
+
+    // Right-aligned, like the native pane's: the last dot sits one column in from
+    // the frame's right edge, and the strip reads in render order.
+    let first = rect.x + rect.width - 1 - states.len() as u16;
+    for (i, status) in states.into_iter().enumerate() {
+        let cell = &buf[(first + i as u16, rect.y)];
+        assert_eq!(
+            cell.symbol(),
+            status.icon(),
+            "the top border should carry the sessions' status glyphs, in order: {:?}",
+            row_text(&buf, rect, rect.y)
+        );
+        assert_eq!(
+            cell.fg,
+            crate::ui::status_color(status),
+            "each dot carries its own status colour"
+        );
+    }
+}
+
+/// With nothing to report the border is bare, exactly as the native pane drew it.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_seated_session_list_with_no_sessions_carries_no_dots() {
+    let mut h = Harness::standard(0);
+    h.seat_session_list_pane(1);
+    let rect = left_seat(&h);
+    let buf = h.render_buffer();
+
+    let top = row_text(&buf, rect, rect.y);
+    assert!(
+        !top.contains(crate::session::SessionStatus::Idle.icon()),
+        "no sessions, no strip: {top:?}"
+    );
+}
+
+/// Border chrome subtracts **nothing**. The same tree in the same seat paints into
+/// the same rows whether or not the dots are there — which is the property that
+/// makes this the first chrome shape a pane's content area does not pay for.
+#[cfg(feature = "plugins")]
+#[test]
+fn border_chrome_costs_the_pane_no_content_row() {
+    // Two harnesses differing only in whether the seated pane declares the
+    // session list's keyboard, which is what the chrome follows.
+    let content = |declare: bool| {
+        let mut h = Harness::standard(3);
+        h.seat_session_list_pane(60);
+        if !declare {
+            let mut panes = h.app.plugin_panes.clone();
+            panes[0].key_context = None;
+            h.app.set_plugin_panes(panes);
+        }
+        let rect = left_seat(&h);
+        let buf = h.render_buffer();
+        (rect.y + 1..rect.y + rect.height - 1)
+            .map(|y| row_text(&buf, rect, y))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        content(true),
+        content(false),
+        "the dots must not push the pane's content by a row"
+    );
+}
+
+/// A pane whose list overflows says how many rows it hid, on the frame the host
+/// drew — for every pane the host paints, not only the one whose gate named it.
+#[cfg(feature = "plugins")]
+#[test]
+fn a_plugin_panes_frame_reports_the_rows_the_host_clipped() {
+    let mut h = Harness::standard(1);
+    // Far more rows than the column has, with the cursor last, so the host's
+    // window opens at the bottom and clips above.
+    h.seat_session_list_pane(60);
+    let rect = left_seat(&h);
+    let buf = h.render_buffer();
+
+    let top = row_text(&buf, rect, rect.y);
+    assert!(
+        top.contains('\u{25b2}'),
+        "the rows above the window should be counted on the top border: {top:?}"
+    );
+
+    // And a list that fits reports nothing on either border.
+    let mut h = Harness::standard(1);
+    h.seat_session_list_pane(2);
+    let rect = left_seat(&h);
+    let buf = h.render_buffer();
+    let bottom = row_text(&buf, rect, rect.y + rect.height - 1);
+    assert!(
+        !row_text(&buf, rect, rect.y).contains('\u{25b2}') && !bottom.contains('\u{25bc}'),
+        "a list that fits hides nothing, so it claims nothing: {bottom:?}"
     );
 }
 

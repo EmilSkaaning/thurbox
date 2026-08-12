@@ -610,11 +610,12 @@ impl App {
     /// nobody's reproduction gets none, since the kernel has nothing to say in a place
     /// it draws nothing.
     ///
-    /// **Focus gates the hint row and not the bar**, because that is the condition each
-    /// had before its handover: the tasks pane's footer appeared with the pane's focus,
-    /// while the file viewer's search bar stayed on screen with a committed query and a
-    /// muted border however focus moved (ADR-58). A handover keeps a pane's conditions,
-    /// so the difference is here rather than smoothed away.
+    /// **Focus gates the hint row and nothing else**, because that is the condition each
+    /// shape had before its handover: the tasks pane's footer appeared with the pane's
+    /// focus, while the file viewer's search bar stayed on screen with a committed query
+    /// and a muted border however focus moved (ADR-58), and the session list's dots were
+    /// on its border whether or not the list was focused. A handover keeps a pane's
+    /// conditions, so the difference is here rather than smoothed away.
     #[cfg(feature = "plugins")]
     fn plugin_pane_chrome(
         &self,
@@ -696,7 +697,28 @@ impl App {
         // painted `Inactive` before ADR-51 — invisible while every pane was a hidden
         // copy, and wrong for a pane that is the interface's task list, whose border
         // is how a user sees where `j` is going.
-        let block = focus_block(&title, focus);
+        let mut block = focus_block(&title, focus);
+        // The third shape, and the one that subtracts nothing: it lands in cells the
+        // border already owns (ADR-67). Resolved here rather than carried resolved,
+        // because a status becomes a glyph and a colour in exactly one place.
+        if let Some(super::PaneChrome::StatusDots {
+            statuses,
+            spinner_frame,
+        }) = &chrome
+        {
+            let spinner =
+                crate::ui::SPINNER_FRAMES[spinner_frame % crate::ui::SPINNER_FRAMES.len()];
+            let dots: Vec<Span> = statuses
+                .iter()
+                .map(|&status| {
+                    Span::styled(
+                        crate::ui::status_glyph(status, spinner).to_string(),
+                        Style::default().fg(crate::ui::status_color(status)),
+                    )
+                })
+                .collect();
+            block = block.title_top(Line::from(dots).right_aligned());
+        }
         let mut inner = block.inner(rect);
         frame.render_widget(block, rect);
 
@@ -717,6 +739,7 @@ impl App {
                     crate::ui::search_bar::render_search_bar(frame, band, &search);
                 }
             }
+            // The dots were already painted onto the block, and take no content row.
             _ => {}
         }
 
@@ -729,14 +752,25 @@ impl App {
             .unwrap_or_default();
         match pane.tree() {
             Some(tree) => {
-                crate::ui::plugin_pane::render_tree_rows(
+                let painted = crate::ui::plugin_pane::render_tree_rows(
                     tree,
                     inner,
                     &palette,
                     &frames,
                     frame.buffer_mut(),
-                )
-                .rows
+                );
+                // How many items the *host's* window left off screen, on the host's own
+                // frame (ADR-67). Not a chrome shape: the counts do not exist until the
+                // paint has run, so nothing resolved before it could carry them — and a
+                // plugin is told neither the window nor the frame, so hiding rows
+                // silently is the host's defect to fix for every pane it paints.
+                crate::ui::draw_clipped_indicators(
+                    frame.buffer_mut(),
+                    rect,
+                    painted.clipped_above,
+                    painted.clipped_below,
+                );
+                painted.rows
             }
             None => {
                 // Never rendered: say which, rather than showing an empty box the
