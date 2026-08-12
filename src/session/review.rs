@@ -513,9 +513,118 @@ pub fn pair_hunk(hunk: &DiffHunk) -> Vec<SidePair> {
     pairs
 }
 
+// ── The changed-files tree ───────────────────────────────────────────────────
+
+/// One row of the changed-files tree: a directory header, or a file leaf
+/// carrying its index into the review's file list.
+///
+/// The index rather than the file, so a row survives being published to a pane
+/// that never sees a [`DiffFile`] — and so a click on a row resolves to the
+/// file the *review* knows, whatever order the tree put it in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileTreeRow {
+    /// A directory header, at `depth` levels of indentation.
+    Folder {
+        /// Indentation level; the first segment of a path sits at zero.
+        depth: usize,
+        /// The segment's own name, without its parents.
+        name: String,
+    },
+    /// A changed file, indented one level past its deepest folder.
+    File {
+        /// Indentation level, which is how many directories precede it.
+        depth: usize,
+        /// The file's position in the review's `files`, preserved across the
+        /// sort so a row still names the file it came from.
+        index: usize,
+    },
+}
+
+/// Group a review's files into a folder tree: directories as headers, files
+/// indented beneath, in path order.
+///
+/// A **model**, in the layer that owns the diff's data (ADR-60's rule: the
+/// grouping a pane draws is not the drawing). Two readers need the same
+/// answer — the pane that paints the changed-files list, and the publication a
+/// pane reproducing it reads — and a second implementation of the sort would
+/// diverge on the first path whose ordering is not obvious.
+///
+/// Multi-repo paths (`<repo>/<path>`) nest the repo as the top-level folder
+/// with no special case, because a repo prefix is a path segment like any other.
+pub fn file_tree_rows(files: &[DiffFile]) -> Vec<FileTreeRow> {
+    let mut entries: Vec<(usize, Vec<&str>)> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (i, f.path.split('/').collect()))
+        .collect();
+    // Sort by path segments so sibling files group under a shared directory.
+    entries.sort_by(|a, b| a.1.cmp(&b.1));
+
+    let mut rows = Vec::new();
+    let mut prev_dirs: Vec<&str> = Vec::new();
+    for (idx, segs) in &entries {
+        let dirs = &segs[..segs.len().saturating_sub(1)];
+        // Emit a folder header for each directory segment that differs from the
+        // previous file's path (the standard sorted-paths → tree fold).
+        let common = dirs
+            .iter()
+            .zip(prev_dirs.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        for (d, seg) in dirs.iter().enumerate().skip(common) {
+            rows.push(FileTreeRow::Folder {
+                depth: d,
+                name: (*seg).to_string(),
+            });
+        }
+        rows.push(FileTreeRow::File {
+            depth: dirs.len(),
+            index: *idx,
+        });
+        prev_dirs = dirs.to_vec();
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_tree_groups_dirs_and_keeps_indices() {
+        let mk = |p: &str| DiffFile {
+            path: p.into(),
+            old_path: None,
+            status: FileStatus::Modified,
+            hunks: Vec::new(),
+        };
+        // Out of path order on purpose — the tree sorts + groups by directory.
+        let files = vec![mk("src/b.rs"), mk("top.rs"), mk("src/ui/a.rs")];
+        let tree = file_tree_rows(&files);
+        // Folder headers appear for `src` and `src/ui`; the top-level file has no
+        // folder. Each file row carries its ORIGINAL index for click→jump.
+        let folders: Vec<(usize, &str)> = tree
+            .iter()
+            .filter_map(|r| match r {
+                FileTreeRow::Folder { depth, name } => Some((*depth, name.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert!(folders.contains(&(0, "src")));
+        assert!(folders.contains(&(1, "ui")));
+        let file_indices: Vec<usize> = tree
+            .iter()
+            .filter_map(|r| match r {
+                FileTreeRow::File { index, .. } => Some(*index),
+                _ => None,
+            })
+            .collect();
+        // All three original indices present (order is by sorted path).
+        assert_eq!(file_indices.len(), 3);
+        assert!(
+            file_indices.contains(&0) && file_indices.contains(&1) && file_indices.contains(&2)
+        );
+    }
 
     #[test]
     fn classification_round_trips_and_cycles() {

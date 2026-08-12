@@ -4352,3 +4352,68 @@ earlier.
 
 **What is left.** Two rows, both vocabulary, both about the pane's own frame and its one
 row for a record that does not exist yet: `no-pane-chrome` and `no-pending-spawn-row`.
+
+## ADR-65: The code review's second pane converges its window, and its folder tree becomes a model
+
+**Context.** `tests/code_review_pane_handover_gap.rs` refuses this pane on five rows, and
+the first names a surface that is not the diff: the **changed-files list**, drawn into the
+file-viewer column with its own focus, its own keys and a diff that follows its selection.
+Before that row can be worked, two things `migration/handover` forbids doing *inside* a
+handover have to be done outside one — converging a window, and relocating a model the
+deleted module also holds.
+
+The window was the pane's own arithmetic rather than a widget's: `render_files_list`
+computed `start = anchor - (height - 1)`, clamped, which pins the current file to the
+**last** visible row once the list overflows. Nothing else in thurbox scrolls that way.
+
+**Decision.** The pane paints its list as a `ViewNode` through
+`ui::plugin_pane::render_tree_rows`, the renderer every plugin pane and (since ADR-63) the
+session list go through: the window is `ui::visible_item_window`, the hitboxes are the
+painter's row rects, and the selection appearance is carried by the row's own runs rather
+than decided while painting the window. `build_file_tree`/`TreeRow` move to
+`session::review` as `file_tree_rows`/`FileTreeRow`.
+
+**The behaviour that changed, stated.** The list opens `min(height / 4, 3)` rows above the
+current file and clamps at the tail, so the files *after* it are visible — where before it
+showed only the files above. The unscrolled frame is unchanged cell for cell, which the
+retained pre-port span builders assert as buffer equality (colour and modifier included) at
+a width that fits and one that cuts a directory name short.
+
+**Why the requirement was broadened rather than merely applied.** The existing rule is
+titled "a pane whose window is its widget's", and this pane never held a `ListState`. What
+makes a window a convergence problem is that it is **not the kernel's** — not that a
+ratatui widget owns it — so the rule now says so, and says that the *size* of the change is
+not a reason to fold it into the handover. A one-call convergence inside a handover costs
+exactly what a large one does: every moved cell acquires two candidate causes, and the
+recording taken at handover time is the only evidence that survives the deletion.
+
+**Why each pane of a two-pane surface converges alone.** This is the first surface drawn as
+two panes to reach this step, and only one of them moved. The spec now states that
+explicitly, with the guard that matters: converging one pane is **not** progress on the rows
+refusing the others, and the change says so. All five gate rows keep their verdicts —
+including `no-second-seat-for-the-changed-files-list`, since a seat contested by two kernel
+surfaces is not made uncontested by changing how one of them scrolls.
+
+**Why the model goes to `session::review`.** `migration/handover` decides it rather than the
+author: a model that performs no effects and is a pure function of data the pure-data layer
+already owns is relocated into that layer — which is what refused `FileViewerState` the same
+move (it calls `read_dir`) and grants it to this one. `FileTreeRow` keeps `TreeRow`'s
+**index** rather than a `DiffFile` reference, which is what will let the rows cross to a
+reader holding no diff without the type growing a lifetime.
+
+**Rejected: fold a folder header into the file below it.** The session list folds a repo
+header into the session it heads (ADR-63) so one index names the same row in both panes. A
+folder header precedes *several* files, so folding would either duplicate it or give the
+first file a two-line row its siblings lack — and a click on a directory would then select
+a file where today it selects nothing. One list child per tree row preserves the native
+numbering, and the hitbox filter drops the folder rows exactly as the span loop did.
+
+**Rejected: teach the shared rule this pane's behaviour.** The move ADR-63 refused, with one
+further reason here: the two panes' rules disagree in opposite directions — a widget holds
+its offset, this pane pinned the cursor to the bottom — so a helper taught both would be
+three behaviours behind a flag, which is not a shared rule.
+
+**What this is not.** No pane was handed over, nothing was published, and no capability
+moved. `file_tree_rows` is now reachable by the publication layer and nothing publishes it,
+because a pane drawing this list needs the rows *and* a seat, and the seat is the refused
+row.

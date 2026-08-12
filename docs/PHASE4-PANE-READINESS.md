@@ -3409,3 +3409,53 @@ anything.
 does not exist yet: `no-pane-chrome` (the one-dot-per-session strip and the clipped-row
 indicators, drawn on a frame the host owns) and `no-pending-spawn-row` (the placeholder
 for a session still being created, and the slot it lands in).
+
+## 40. The review's second pane converges its window, and its tree becomes a model (ADR-65)
+
+The code review is refused on five rows, and the first of them is about the **changed-files
+list** rather than the diff. Working that row means a plugin drawing that list — and the
+specification names two things a handover may not do on the way there. This is both of
+them, for that pane, outside a handover.
+
+**The window was the pane's own arithmetic.** `render_files_list` computed its slice inline
+(`start = anchor - (height - 1)`, clamped), pinning the file the diff's cursor is in to the
+**last** visible row once the column overflowed. Nothing else thurbox draws scrolls that
+way: `ui::visible_item_window` opens `min(height / 4, 3)` rows above the cursor, and four
+native surfaces plus every plugin list use it.
+
+So the pane paints its rows as a `ViewNode::List` through `ui::plugin_pane::render_tree_rows`
+— the move ADR-63 made for the session list — and the three things that hung off the inline
+arithmetic come off that one paint: which rows are drawn, each file row's click hitbox, and
+(in shape rather than owner) which row wears the selection appearance. That last one is
+built into the row now instead of being decided while painting the window, which is what
+lets a drawer that is never told the window mark the same row.
+
+**The behaviour that changed, stated.** The files *after* the current one are visible where
+before only the ones above it were. The unscrolled frame does not move, and that is
+asserted rather than claimed: the pre-port span builders are retained in the test module and
+the two paints are compared as **buffers**, so colour and modifier are inside the equality —
+at a width that fits and one narrow enough that `ellipsize` has to land where `truncate`
+landed.
+
+**The requirement broadened.** `A pane's window is converged before its handover` was
+written around a widget's stored offset. This pane never held a `ListState`, and the rule
+now says what actually makes a window a convergence problem: that it is not the kernel's.
+It also says that a small convergence is not thereby foldable into the handover — one call
+costs a reviewer exactly what a large one does, because the recording taken at handover time
+is the only evidence that survives the deletion, and it must move for one reason.
+
+**And the multi-pane case is now written down.** This is the first surface drawn as two
+panes to reach this step. Converging one of them is not progress on the rows refusing the
+other, so the rule requires the change to say so — and all five gate rows keep their
+verdicts here, `no-second-seat-for-the-changed-files-list` included: a seat contested by two
+kernel surfaces is not made uncontested by changing how one of them scrolls.
+
+**The model moved by the rule, not by preference.** `build_file_tree` is a pure function of
+`session::review`'s own `DiffFile`, so it goes there as `file_tree_rows` — the same rule
+that refused `FileViewerState` the same move because it calls `read_dir`. `FileTreeRow`
+keeps the file's **index** rather than a reference, which is what will let these rows cross
+to a reader that holds no diff.
+
+**What is left on this pane.** All five: the contested second seat, the resolved width its
+three layouts divide against, the click that means a column, the overlay anchored to a row,
+and the compose box's multi-line body.

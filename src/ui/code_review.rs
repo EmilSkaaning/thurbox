@@ -9,6 +9,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::code_review::{CodeReviewState, ComposeState, ReviewButton, ReviewRow};
+use crate::session::motion::FrameTable;
 use crate::session::overlay::{Align, CrossExtent, Overlay};
 use crate::session::pane_context as pc;
 use crate::session::review::{
@@ -50,12 +51,22 @@ fn class_color(c: Classification) -> Color {
 /// Theme color for a file's status glyph (M/A/D/R): added green, deleted red,
 /// modified yellow, renamed accent — so the status reads at a glance.
 fn status_color(s: crate::session::review::FileStatus) -> Color {
+    crate::ui::plugin_pane::token_color(status_token(s), &crate::ui::theme::current())
+}
+
+/// The colour **role** a file's status glyph is drawn in.
+///
+/// The token rather than the colour, in one place, because both of this pane's
+/// rows carry the same glyph — the diff's file header and the changed-files
+/// list's row — and a second mapping is how the two come to disagree about what
+/// a rename looks like.
+fn status_token(s: crate::session::review::FileStatus) -> Token {
     use crate::session::review::FileStatus::*;
     match s {
-        Added => Theme::diff_added(),
-        Deleted => Theme::diff_removed(),
-        Modified => Theme::status_working(),
-        Renamed => Theme::accent(),
+        Added => Token::DiffAdded,
+        Deleted => Token::DiffRemoved,
+        Modified => Token::StatusWorking,
+        Renamed => Token::Accent,
     }
 }
 
@@ -1198,140 +1209,124 @@ pub(crate) fn render_files_list(
         hint_row,
     );
     let list = Rect::new(inner.x, inner.y, inner.width, inner.height - 1);
-    let height = list.height as usize;
-    if height == 0 {
+    if list.height == 0 {
         return Vec::new();
     }
 
-    // Render the files as a folder tree (directories as headers, files indented
-    // beneath). `current_file()` is `None` on the summary section.
-    let tree = build_file_tree(&state.files);
-    let total = tree.len();
-    let current_opt = state.current_file();
-    let anchor = current_opt
+    let rows = crate::session::review::file_tree_rows(&state.files);
+    let tree = files_list_tree(state, &rows);
+    let palette = crate::ui::theme::current();
+    // Painted through the renderer a plugin pane's tree goes through, so the
+    // window, the row rects and every cell inside a row are resolved once —
+    // here and in whatever else draws this list (ADR-63's move, applied to the
+    // review's second pane).
+    let painted = crate::ui::plugin_pane::render_tree_rows(
+        &tree,
+        list,
+        &palette,
+        &FrameTable::default(),
+        frame.buffer_mut(),
+    );
+    painted
+        .rows
+        .into_iter()
+        .filter_map(|hit| {
+            // The painter numbers rows from one, in list space. A folder header
+            // is a row of the list and not a file, so it keeps its place in that
+            // numbering and yields no hitbox — clicking a directory jumps
+            // nowhere, exactly as it did when the rows were spans.
+            match rows.get(hit.index - 1)? {
+                crate::session::review::FileTreeRow::File { index, .. } => Some(RowHitbox {
+                    rect: hit.rect,
+                    index: *index,
+                }),
+                crate::session::review::FileTreeRow::Folder { .. } => None,
+            }
+        })
+        .collect()
+}
+
+/// The changed-files list as a view tree: one child per tree row, with the row
+/// the diff's cursor is in named so the **kernel** windows the list.
+///
+/// The cursor is a *file*, not a row of this list: `current_file` is the file the
+/// diff's own cursor sits in, and is `None` on the summary section — where this
+/// list highlights nothing and the window opens at the top, which is what naming
+/// the first row as the anchor does.
+pub(crate) fn files_list_tree(
+    state: &CodeReviewState,
+    rows: &[crate::session::review::FileTreeRow],
+) -> ViewNode {
+    use crate::session::review::FileTreeRow;
+    let current = state.current_file();
+    let children = rows
+        .iter()
+        .map(|row| match row {
+            FileTreeRow::Folder { depth, name } => folder_row_tree(*depth, name),
+            FileTreeRow::File { depth, index } => {
+                file_row_tree(state, *index, *depth, current == Some(*index))
+            }
+        })
+        .collect();
+    let anchor = current
         .and_then(|ci| {
-            tree.iter()
-                .position(|r| matches!(r, TreeRow::File { index, .. } if *index == ci))
+            rows.iter()
+                .position(|r| matches!(r, FileTreeRow::File { index, .. } if *index == ci))
         })
         .unwrap_or(0);
-    let start = anchor
-        .saturating_sub(height.saturating_sub(1))
-        .min(total.saturating_sub(height));
-    let end = (start + height).min(total);
-    let w = list.width as usize;
-
-    let mut lines: Vec<Line> = Vec::with_capacity(end - start);
-    let mut hitboxes: Vec<RowHitbox> = Vec::new();
-    for (row, ti) in (start..end).enumerate() {
-        let line = match &tree[ti] {
-            TreeRow::Folder { depth, name } => folder_row_line(*depth, name, w),
-            TreeRow::File { depth, index } => {
-                hitboxes.push(RowHitbox {
-                    rect: Rect::new(list.x, list.y + row as u16, list.width, 1),
-                    index: *index,
-                });
-                file_row_line(state, *index, *depth, current_opt == Some(*index))
-            }
-        };
-        lines.push(line);
+    ViewNode::List {
+        children,
+        selected: Some(anchor),
+        scrollbar: false,
     }
-    frame.render_widget(Paragraph::new(lines), list);
-    hitboxes
 }
 
 /// A directory header row in the changed-files tree.
-fn folder_row_line<'a>(depth: usize, name: &str, width: usize) -> Line<'a> {
-    let text = format!("{}{name}/", "  ".repeat(depth));
-    Line::from(Span::styled(
-        truncate(&text, width),
-        Style::default()
-            .fg(Theme::text_muted())
-            .add_modifier(Modifier::BOLD),
-    ))
+///
+/// The indent travels inside the yielding run because the native row truncated
+/// the indented string as one — so a deeply nested directory loses its name's
+/// tail rather than its indentation.
+fn folder_row_tree(depth: usize, name: &str) -> ViewNode {
+    ViewNode::styled(
+        format!("{}{name}/", "  ".repeat(depth)),
+        TextStyle {
+            token: Some(Token::Muted),
+            bold: true,
+            ellipsize: true,
+            ..TextStyle::default()
+        },
+    )
 }
 
 /// A file row in the changed-files tree: indented name + colored status glyph
-/// and `+`/`-` counts (dimmed under the selection highlight on the current row).
-fn file_row_line<'a>(
-    state: &CodeReviewState,
-    index: usize,
-    depth: usize,
-    current: bool,
-) -> Line<'a> {
+/// and `+`/`-` counts (the selection appearance owns the whole row on the file
+/// the diff's cursor is in).
+fn file_row_tree(state: &CodeReviewState, index: usize, depth: usize, current: bool) -> ViewNode {
     let f = &state.files[index];
     let mark = if state.reviewed_files.contains(&f.path) {
         "✓ "
     } else {
         "  "
     };
-    let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
-    let base = if current {
-        Style::default()
-            .fg(Theme::selection_fg())
-            .bg(Theme::selection_bg())
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Theme::text_primary())
+    let name = f.path.rsplit('/').next().unwrap_or(&f.path);
+    let base = TextStyle {
+        bold: current,
+        selected: current,
+        ..TextStyle::default()
     };
-    // Tint the glyph + counts with diff colors, except on the selected row where
-    // the highlight bg owns the line.
-    let tint = |c: Color| if current { base } else { base.fg(c) };
-    Line::from(vec![
-        Span::styled(format!("{}{mark}", "  ".repeat(depth)), base),
-        Span::styled(f.status.glyph().to_string(), tint(status_color(f.status))),
-        Span::styled(format!(" {name}  "), base),
-        Span::styled(format!("+{}", f.added_count()), tint(Theme::diff_added())),
-        Span::styled(
-            format!(" -{}", f.deleted_count()),
-            tint(Theme::diff_removed()),
-        ),
+    // Tint the glyph + counts with diff colours, except on the selected row
+    // where the selection appearance owns the line.
+    let tint = |token: Token| TextStyle {
+        token: (!current).then_some(token),
+        ..base
+    };
+    ViewNode::Line(vec![
+        ViewNode::styled(format!("{}{mark}", "  ".repeat(depth)), base),
+        ViewNode::styled(f.status.glyph(), tint(status_token(f.status))),
+        ViewNode::styled(format!(" {name}  "), base),
+        ViewNode::styled(format!("+{}", f.added_count()), tint(Token::DiffAdded)),
+        ViewNode::styled(format!(" -{}", f.deleted_count()), tint(Token::DiffRemoved)),
     ])
-}
-
-/// A row in the changed-files folder tree: a directory header or a file leaf
-/// (carrying its diff-file index for click→jump).
-enum TreeRow {
-    Folder { depth: usize, name: String },
-    File { depth: usize, index: usize },
-}
-
-/// Build a folder tree from the diff files: group by directory (so files in the
-/// same folder sit together under one header), preserving each file's original
-/// diff-file index for hit-testing. Multi-repo paths (`<repo>/<path>`) nest the
-/// repo as the top-level folder automatically.
-fn build_file_tree(files: &[crate::session::review::DiffFile]) -> Vec<TreeRow> {
-    let mut entries: Vec<(usize, Vec<&str>)> = files
-        .iter()
-        .enumerate()
-        .map(|(i, f)| (i, f.path.split('/').collect()))
-        .collect();
-    // Sort by path segments so sibling files group under a shared directory.
-    entries.sort_by(|a, b| a.1.cmp(&b.1));
-
-    let mut rows = Vec::new();
-    let mut prev_dirs: Vec<&str> = Vec::new();
-    for (idx, segs) in &entries {
-        let dirs = &segs[..segs.len().saturating_sub(1)];
-        // Emit a folder header for each directory segment that differs from the
-        // previous file's path (the standard sorted-paths → tree fold).
-        let common = dirs
-            .iter()
-            .zip(prev_dirs.iter())
-            .take_while(|(a, b)| a == b)
-            .count();
-        for (d, seg) in dirs.iter().enumerate().skip(common) {
-            rows.push(TreeRow::Folder {
-                depth: d,
-                name: seg.to_string(),
-            });
-        }
-        rows.push(TreeRow::File {
-            depth: dirs.len(),
-            index: *idx,
-        });
-        prev_dirs = dirs.to_vec();
-    }
-    rows
 }
 
 /// The compose box's anchor declaration: a full-width band attached to the
@@ -1975,6 +1970,195 @@ mod tests {
         );
     }
 
+    /// A review whose files span several directories, for the changed-files list.
+    fn files_state(paths: &[&str]) -> CodeReviewState {
+        let mut s = demo_state();
+        s.files = paths
+            .iter()
+            .map(|p| DiffFile {
+                path: (*p).into(),
+                old_path: None,
+                status: FileStatus::Modified,
+                hunks: vec![DiffHunk {
+                    old_start: 1,
+                    new_start: 1,
+                    header: String::new(),
+                    lines: vec![DiffLine {
+                        kind: DiffLineKind::Add,
+                        old_no: None,
+                        new_no: Some(1),
+                        text: "x".into(),
+                    }],
+                }],
+            })
+            .collect();
+        s.rebuild_rows();
+        s
+    }
+
+    /// Paint the changed-files list and read the cells back, one string per row.
+    fn files_frame(state: &CodeReviewState, w: u16, h: u16) -> Vec<String> {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| {
+            let _ = render_files_list(f, Rect::new(0, 0, w, h), state, FocusLevel::Active);
+        })
+        .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The pre-port span builders for the changed-files list, retained as the
+    /// oracle that pins its tree to what the pane drew before it: these are the
+    /// code this module shipped until the rows became view-tree nodes, and
+    /// `the_changed_files_tree_paints_what_the_span_builder_painted` asserts the
+    /// two agree cell for cell.
+    fn legacy_folder_row_line<'a>(depth: usize, name: &str, width: usize) -> Line<'a> {
+        let text = format!("{}{name}/", "  ".repeat(depth));
+        Line::from(Span::styled(
+            truncate(&text, width),
+            Style::default()
+                .fg(Theme::text_muted())
+                .add_modifier(Modifier::BOLD),
+        ))
+    }
+
+    fn legacy_file_row_line<'a>(
+        state: &CodeReviewState,
+        index: usize,
+        depth: usize,
+        current: bool,
+    ) -> Line<'a> {
+        let f = &state.files[index];
+        let mark = if state.reviewed_files.contains(&f.path) {
+            "✓ "
+        } else {
+            "  "
+        };
+        let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
+        let base = if current {
+            Style::default()
+                .fg(Theme::selection_fg())
+                .bg(Theme::selection_bg())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Theme::text_primary())
+        };
+        let tint = |c: Color| if current { base } else { base.fg(c) };
+        Line::from(vec![
+            Span::styled(format!("{}{mark}", "  ".repeat(depth)), base),
+            Span::styled(f.status.glyph().to_string(), tint(status_color(f.status))),
+            Span::styled(format!(" {name}  "), base),
+            Span::styled(format!("+{}", f.added_count()), tint(Theme::diff_added())),
+            Span::styled(
+                format!(" -{}", f.deleted_count()),
+                tint(Theme::diff_removed()),
+            ),
+        ])
+    }
+
+    /// Paint the same rows twice — once through the view tree the pane now
+    /// builds, once through the spans it used to — and compare the buffers.
+    fn render_files_both(
+        state: &CodeReviewState,
+        width: u16,
+    ) -> (ratatui::buffer::Buffer, ratatui::buffer::Buffer) {
+        let rows = crate::session::review::file_tree_rows(&state.files);
+        let height = rows.len() as u16;
+        let area = Rect::new(0, 0, width, height);
+
+        let mut tree_term = Terminal::new(TestBackend::new(width, height)).unwrap();
+        tree_term
+            .draw(|f| {
+                let tree = files_list_tree(state, &rows);
+                crate::ui::plugin_pane::render_tree_rows(
+                    &tree,
+                    area,
+                    &crate::ui::theme::current(),
+                    &FrameTable::default(),
+                    f.buffer_mut(),
+                );
+            })
+            .unwrap();
+
+        let current = state.current_file();
+        let mut legacy_term = Terminal::new(TestBackend::new(width, height)).unwrap();
+        legacy_term
+            .draw(|f| {
+                let lines: Vec<Line> = rows
+                    .iter()
+                    .map(|row| match row {
+                        crate::session::review::FileTreeRow::Folder { depth, name } => {
+                            legacy_folder_row_line(*depth, name, width as usize)
+                        }
+                        crate::session::review::FileTreeRow::File { depth, index } => {
+                            legacy_file_row_line(state, *index, *depth, current == Some(*index))
+                        }
+                    })
+                    .collect();
+                f.render_widget(Paragraph::new(lines), area);
+            })
+            .unwrap();
+
+        (
+            tree_term.backend().buffer().clone(),
+            legacy_term.backend().buffer().clone(),
+        )
+    }
+
+    /// The changed-files list is drawn by the shared painter now; what it draws
+    /// is what its spans drew — every cell, every colour, at a width that fits
+    /// and one that cuts a folder name short.
+    #[test]
+    fn the_changed_files_tree_paints_what_the_span_builder_painted() {
+        let mut state = files_state(&["src/b.rs", "top.rs", "src/ui/a.rs", "src/ui/z.rs"]);
+        state.reviewed_files.insert("top.rs".into());
+        for width in [30u16, 12] {
+            let (tree, legacy) = render_files_both(&state, width);
+            assert_eq!(
+                tree, legacy,
+                "the changed-files list must paint what its spans painted (width {width})"
+            );
+        }
+    }
+
+    /// The window is the kernel's shared rule now, which is a **behaviour
+    /// change**: the pane used to keep the current file on the last visible row
+    /// once the list overflowed, and now opens a margin above it like every other
+    /// list thurbox draws.
+    #[test]
+    fn the_changed_files_window_is_the_shared_rule() {
+        let paths: Vec<String> = (0..12).map(|i| format!("src/f{i:02}.rs")).collect();
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let mut state = files_state(&refs);
+        state.selected = state
+            .rows
+            .iter()
+            .position(|r| matches!(r, ReviewRow::FileHeader(9)))
+            .expect("the tenth file has a header row");
+
+        let frame = files_frame(&state, 30, 8);
+        // One `src/` header + twelve files, five content rows: the shared rule
+        // opens `min(height / 4, 3)` rows above the cursor and clamps at the
+        // tail, so f09 sits third of five rather than last.
+        let visible: Vec<&str> = frame[1..6].iter().map(String::as_str).collect();
+        assert!(
+            visible[2].contains("f09.rs"),
+            "the current file should sit a margin below the window's top: {visible:?}"
+        );
+        assert!(
+            visible[4].contains("f11.rs"),
+            "the window should clamp at the list's tail: {visible:?}"
+        );
+    }
+
     #[test]
     fn renders_changed_files_list_without_panic() {
         let state = demo_state();
@@ -1985,43 +2169,6 @@ mod tests {
             assert_eq!(rows.len(), 1, "one changed file → one clickable row");
         })
         .unwrap();
-    }
-
-    #[test]
-    fn file_tree_groups_dirs_and_keeps_indices() {
-        use crate::session::review::{DiffFile, FileStatus};
-        let mk = |p: &str| DiffFile {
-            path: p.into(),
-            old_path: None,
-            status: FileStatus::Modified,
-            hunks: Vec::new(),
-        };
-        // Out of path order on purpose — the tree sorts + groups by directory.
-        let files = vec![mk("src/b.rs"), mk("top.rs"), mk("src/ui/a.rs")];
-        let tree = build_file_tree(&files);
-        // Folder headers appear for `src` and `src/ui`; the top-level file has no
-        // folder. Each file row carries its ORIGINAL index for click→jump.
-        let folders: Vec<(usize, &str)> = tree
-            .iter()
-            .filter_map(|r| match r {
-                TreeRow::Folder { depth, name } => Some((*depth, name.as_str())),
-                _ => None,
-            })
-            .collect();
-        assert!(folders.contains(&(0, "src")));
-        assert!(folders.contains(&(1, "ui")));
-        let file_indices: Vec<usize> = tree
-            .iter()
-            .filter_map(|r| match r {
-                TreeRow::File { index, .. } => Some(*index),
-                _ => None,
-            })
-            .collect();
-        // All three original indices present (order is by sorted path).
-        assert_eq!(file_indices.len(), 3);
-        assert!(
-            file_indices.contains(&0) && file_indices.contains(&1) && file_indices.contains(&2)
-        );
     }
 
     #[test]
