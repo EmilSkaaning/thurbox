@@ -33,10 +33,14 @@ verification and platform auto-detection.
 
 ```bash
 # Custom directory
-INSTALL_DIR=/usr/local/bin curl -fsSL https://raw.githubusercontent.com/Thurbeen/thurbox/main/scripts/install.sh | sh
+# `export` is required: in `VAR=x curl … | sh` the assignment applies to
+# curl, and the `sh` on the right of the pipe never sees it.
+export INSTALL_DIR=/usr/local/bin
+curl -fsSL https://raw.githubusercontent.com/Thurbeen/thurbox/main/scripts/install.sh | sh
 
 # Pin a version
-VERSION=v1.0.0 curl -fsSL https://raw.githubusercontent.com/Thurbeen/thurbox/main/scripts/install.sh | sh
+export VERSION=v1.0.0
+curl -fsSL https://raw.githubusercontent.com/Thurbeen/thurbox/main/scripts/install.sh | sh
 ```
 
 **Windows (PowerShell) — recommended:**

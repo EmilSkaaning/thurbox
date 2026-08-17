@@ -261,7 +261,10 @@ ARM64 Windows installs the x86_64 build (runs under x64 emulation).
 - Colorized output (auto-disabled when stderr is not a TTY, `NO_COLOR` is set,
   or `TERM=dumb`); platforms Linux/macOS × x86_64/aarch64
 - No external deps beyond standard tools (curl/wget, tar, sha256sum/shasum)
-- Env vars: `VERSION=v1.0.0`, `INSTALL_DIR=/path` (default `~/.local/bin`)
+- Env vars: `VERSION=v1.0.0`, `INSTALL_DIR=/path` (default `~/.local/bin`).
+  **`export` them** for the pipe-to-shell form: in `VAR=x curl … | sh` the
+  assignment applies to `curl`, so the `sh` on the right never sees it (the
+  script's own `VERSION=… $0` hint is fine — that one is not piped)
 - Non-interactive (safe pipe-to-shell), cleanup via `trap`
 - Tested by `scripts/install.bats` (bats-core, ~28 tests; CI `install-script` job)
 

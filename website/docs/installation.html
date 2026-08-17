@@ -37,10 +37,14 @@ breadcrumb: 'Installation'
           </ul>
 
           <h3>Custom install directory</h3>
-          <pre data-wrap><code class="language-bash">INSTALL_DIR=/usr/local/bin curl -fsSL https://raw.githubusercontent.com/Thurbeen/thurbox/main/scripts/install.sh | sh</code></pre>
+          <pre data-wrap><code class="language-bash"># export is required: in `VAR=x curl ... | sh` the assignment applies to curl,
+# so the sh on the right of the pipe never sees it.
+export INSTALL_DIR=/usr/local/bin
+curl -fsSL https://raw.githubusercontent.com/Thurbeen/thurbox/main/scripts/install.sh | sh</code></pre>
 
           <h3>Specific version</h3>
-          <pre data-wrap><code class="language-bash">VERSION=v1.0.0 curl -fsSL https://raw.githubusercontent.com/Thurbeen/thurbox/main/scripts/install.sh | sh</code></pre>
+          <pre data-wrap><code class="language-bash">export VERSION=v1.0.0
+curl -fsSL https://raw.githubusercontent.com/Thurbeen/thurbox/main/scripts/install.sh | sh</code></pre>
 
           <h3>Windows (PowerShell)</h3>
           <div class="info-box warning">
