@@ -341,7 +341,13 @@ fn check() -> Result<CommandOutput, String> {
 
 fn list() -> Result<CommandOutput, String> {
     let (dir, _chosen) = resolve()?;
-    let host = crate::kernel::host::LuaHost::new(&dir);
+    // `host_at`, not a bare host: `build` aborts the whole load on the first
+    // plugin that fails, so loading a pane the user turned off *because* it was
+    // broken left `plugins` empty and reported every other pane as `failed` with
+    // no slot and no capabilities — defeating the listing in exactly the
+    // recovery the switch exists for. The `disabled` closure below then agrees
+    // with the host it is describing, as it does in `check`.
+    let host = host_at(&dir);
     let sources = crate::kernel::bundled::sources(&dir);
     let registry = crate::kernel::registry::Registry::load();
     // The name each managed file answers to. `name` below is what the pane calls
@@ -377,14 +383,11 @@ fn list() -> Result<CommandOutput, String> {
         // Trust is a decision the user made in a running interface; from here it
         // is read, not judged — so this reports what was recorded and nothing
         // about whether the file has changed since.
-        &|path| {
-            let absolute = dir.join(path);
-            match registry.is_trusted(&absolute.to_string_lossy()) {
-                true => crate::kernel::inventory::Trust::Trusted,
-                false => crate::kernel::inventory::Trust::Untrusted,
-            }
+        &|path| match registry.is_trusted(&crate::kernel::bundled::absolute_key(&dir, path)) {
+            true => crate::kernel::inventory::Trust::Trusted,
+            false => crate::kernel::inventory::Trust::Untrusted,
         },
-        &|path| registry.is_disabled(&dir.join(path).to_string_lossy()),
+        &|path| registry.is_disabled(&crate::kernel::bundled::absolute_key(&dir, path)),
     );
 
     let table = super::output::table(
@@ -547,6 +550,11 @@ fn entry_rows(reports: &[crate::kernel::packages::EntryReport]) -> (Vec<String>,
             report.outcome.as_str(),
             report.file
         ));
+        // Named, because a kept file is one the entry no longer accounts for: it
+        // is still on disk and still loaded, and its spec entry has just gone.
+        if !report.kept.is_empty() {
+            lines.push(format!("      kept {}", report.kept.join(", ")));
+        }
         rows.push(json!({
             "file": report.file,
             "name": report.name,
@@ -554,6 +562,7 @@ fn entry_rows(reports: &[crate::kernel::packages::EntryReport]) -> (Vec<String>,
             "version": report.version,
             "from": report.from,
             "outcome": report.outcome.as_str(),
+            "kept": report.kept,
         }));
     }
     (lines, rows)
@@ -563,7 +572,13 @@ fn sync() -> Result<CommandOutput, String> {
     let dir = install_dir()?;
     let reports = crate::kernel::packages::sync(&dir)?;
     let (lines, rows) = entry_rows(&reports);
-    let changed = reports.iter().any(|report| report.outcome.changed());
+    // A withdrawal that kept a file reports `kept` rather than `withdrawn`, and
+    // `Kept` on its own means "nothing moved" — but the entry it belonged to is
+    // gone from the spec and the lock, and a pane beside it may well have been
+    // taken back. So a non-empty `kept` counts as a change too.
+    let changed = reports
+        .iter()
+        .any(|report| report.outcome.changed() || !report.kept.is_empty());
 
     let human = if reports.is_empty() {
         format!("{}\n  nothing installed", dir.display())
@@ -607,6 +622,19 @@ fn update(name: Option<&str>) -> Result<CommandOutput, String> {
 fn remove(name: &str) -> Result<CommandOutput, String> {
     let (dir, _chosen) = resolve()?;
     let report = crate::kernel::packages::remove(&dir, name)?;
+    // The outcome, not the verb: `withdraw` leaves a file the user changed where
+    // it is, so saying "removed" would claim a pane is gone while it is still on
+    // disk, still loaded and still claiming its keys — with its spec entry now
+    // removed, so nothing later would ever mention it again.
+    let mut human = format!(
+        "{} {} ({})",
+        report.outcome.as_str(),
+        report.file,
+        report.src
+    );
+    if !report.kept.is_empty() {
+        human.push_str(&format!("\n  kept {}", report.kept.join(", ")));
+    }
     Ok(CommandOutput::new(
         json!({
             "dir": dir.display().to_string(),
@@ -614,9 +642,10 @@ fn remove(name: &str) -> Result<CommandOutput, String> {
             "name": report.name,
             "src": report.src,
             "outcome": report.outcome.as_str(),
-            "summary": format!("removed {}", report.file),
+            "kept": report.kept,
+            "summary": format!("{} {}", report.outcome.as_str(), report.file),
         }),
-        format!("removed {} ({})", report.file, report.src),
+        human,
     ))
 }
 

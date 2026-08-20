@@ -334,6 +334,46 @@ fn restoring_brings_a_removed_pane_back() {
     );
 }
 
+/// A shipped doc is delivered, tombstoned and restorable like any other file.
+///
+/// `ui/` ships four `.md` files an agent reads before it edits a pane, and
+/// delivery treats them exactly as it treats the Lua: `sources` lists them and
+/// `remove` writes a tombstone. Restoring one was refused anyway — the door into
+/// the filesystem opened onto `.lua` only — so a doc deleted outside thurbox was
+/// listed as `removed` by the one view that could have put it back.
+#[test]
+fn restoring_brings_a_removed_doc_back() {
+    let dir = interface();
+    bundled::remove(dir.path(), "AGENTS.md").expect("remove");
+    bundled::materialize(dir.path());
+    assert!(
+        !dir.path().join("AGENTS.md").exists(),
+        "a deleted file stays deleted"
+    );
+    assert_eq!(sources(dir.path())["AGENTS.md"], Source::Removed);
+
+    bundled::restore(dir.path(), "AGENTS.md").expect("restore");
+    assert_eq!(
+        sources(dir.path())["AGENTS.md"],
+        Source::Bundled,
+        "restored means shipped, not edited"
+    );
+}
+
+/// Bookkeeping nobody edits stays out of reach of the one door into the
+/// filesystem, which a plugin can ask through (`command("plugin", …)`).
+#[test]
+fn the_records_delivery_keeps_are_not_removable() {
+    let dir = interface();
+    for file in [".bundled.json", "plugins.lock", "ui.json"] {
+        assert!(
+            bundled::remove(dir.path(), file).is_err(),
+            "{file} is not the interface's to delete"
+        );
+        assert!(bundled::restore(dir.path(), file).is_err(), "{file}");
+    }
+}
+
 /// The recovery floor is a state, not a one-way door.
 ///
 /// A user copy that will not load is swapped for the bundled interface so thurbox
@@ -381,6 +421,60 @@ fn a_broken_interface_loads_again_once_it_is_fixed() {
     assert!(host.error.is_none(), "{:?}", host.error);
 
     let _ = fs::remove_dir_all(&floor);
+}
+
+/// `plugin list` reads the interface the way the interface does — including the
+/// set the user turned off.
+///
+/// It built a bare host instead, and `build` aborts the whole load on the first
+/// plugin that will not compile: a pane turned off *because* it was broken was
+/// still compiled, so `plugins` came back empty and every other pane in the
+/// listing read `failed`, with no slot and no capabilities. The listing is the
+/// tool for exactly that recovery, so it broke where it was needed.
+#[test]
+fn the_headless_listing_honours_the_panes_the_user_turned_off() {
+    let home = tempfile::tempdir().expect("tempdir");
+    std::env::set_var("THURBOX_CONFIG_DIR", home.path());
+    let ui = home.path().join("ui");
+    fs::create_dir_all(ui.join("plugins")).expect("mkdir");
+    std::env::set_var("THURBOX_UI_DIR", &ui);
+    assert!(bundled::materialize(&ui).errors.is_empty());
+
+    let broken = ui.join("plugins").join("95_broken.lua");
+    fs::write(
+        &broken,
+        "return {
+",
+    )
+    .expect("write");
+    // Keyed the way the interface keys it — `bundled::absolute_key`, which is
+    // what `App::apply_switch` writes and both readers look up. Joining the
+    // components instead produced an all-backslash key on Windows that matched
+    // nothing, so the pane came back `failed` (it does not compile) rather than
+    // `disabled`, and the test passed on Linux only.
+    Registry::load()
+        .set_disabled(&bundled::absolute_key(&ui, "plugins/95_broken.lua"), true)
+        .expect("turn it off");
+
+    let listing = thurbox::cli::plugins::run(thurbox::cli::plugins::Action::List).expect("list");
+    let state = |file: &str| -> String {
+        listing.json["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .find(|row| row["file"] == file)
+            .map(|row| row["state"].as_str().unwrap_or_default().to_string())
+            .unwrap_or_else(|| panic!("{file} missing from {}", listing.json))
+    };
+    assert_eq!(state("plugins/95_broken.lua"), "disabled");
+    assert_ne!(
+        state("plugins/10_sessions.lua"),
+        "failed",
+        "the pane that loads is not blamed for the one nobody loads: {}",
+        listing.json
+    );
+    std::env::remove_var("THURBOX_CONFIG_DIR");
+    std::env::remove_var("THURBOX_UI_DIR");
 }
 
 /// Turning a pane off must not leave its column reserved and empty.

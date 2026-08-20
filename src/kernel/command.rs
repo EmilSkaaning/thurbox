@@ -703,6 +703,16 @@ impl Phase {
     }
 }
 
+/// Commands running at once before the bus starts refusing.
+///
+/// The Lua-side queue is unbounded and every non-local command becomes its own
+/// OS thread, so a pane looping on `command` could spawn without limit — while
+/// `RunStore` next door states the opposite as a bound ("twenty asks are slow,
+/// not a fork bomb"). High enough that no honest interaction reaches it: the
+/// commands that take real time are one per session, and the rest are applied
+/// on the loop without ever reaching the bus.
+const MAX_IN_FLIGHT: usize = 32;
+
 /// A command that has been accepted but whose effect is not yet visible.
 #[derive(Debug, Clone)]
 pub struct InFlight {
@@ -794,8 +804,30 @@ impl CommandBus {
             phase: Phase::Queued,
             error: None,
         };
+        let mut refused = false;
         if let Ok(mut inflight) = self.inflight.lock() {
+            refused = inflight
+                .iter()
+                .filter(|entry| entry.phase != Phase::Failed)
+                .count()
+                >= MAX_IN_FLIGHT;
             inflight.push(entry);
+        }
+        // Admission, not queuing: holding one back until another finishes would
+        // reintroduce exactly the head-of-line blocking on a down host that the
+        // thread-per-command shape below exists to prevent. Refused through the
+        // ordinary completion channel, so the message band reports it and the
+        // entry expires like any other failure — a silently dropped command is
+        // indistinguishable from a slow one.
+        if refused {
+            self.finish_outcome(
+                id,
+                Some(format!(
+                    "too many commands in flight ({MAX_IN_FLIGHT}); this one was not started"
+                )),
+                None,
+            );
+            return id;
         }
 
         let inflight = self.inflight.clone();
@@ -1959,6 +1991,44 @@ mod tests {
         assert!(
             bus.take_created().is_empty(),
             "a creation must steer the selection once, not every tick"
+        );
+    }
+
+    #[test]
+    fn the_bus_refuses_past_its_in_flight_ceiling_instead_of_spawning() {
+        // Every non-local command becomes its own OS thread and the Lua-side
+        // queue that feeds them is unbounded, so a pane looping on `command`
+        // had no ceiling at all. The refusal travels the ordinary completion
+        // path: the entry is drawable, then reported, then expires — which is
+        // what stops it looking like a command that is merely slow.
+        let mut bus = CommandBus::new();
+        let mut ids = Vec::new();
+        for _ in 0..MAX_IN_FLIGHT {
+            ids.push(bus.dispatch(Command::Restore {
+                session: "s1".into(),
+                best_effort: false,
+            }));
+        }
+        let refused = bus.dispatch(Command::Restore {
+            session: "s1".into(),
+            best_effort: false,
+        });
+        bus.poll();
+
+        let entry = bus
+            .inflight()
+            .iter()
+            .find(|entry| entry.id == refused)
+            .expect("the refused row is still drawable")
+            .clone();
+        assert_eq!(entry.phase, Phase::Failed);
+        assert!(
+            entry
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("too many commands in flight")),
+            "the refusal must say why: {:?}",
+            entry.error
         );
     }
 

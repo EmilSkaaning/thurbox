@@ -14,7 +14,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
-use thurbox::kernel::convert::{to_lua, to_node};
+use thurbox::kernel::convert::{to_lua, to_node_decorated};
 use thurbox::kernel::node::{Identity, Node, Run};
 
 fn styled_tree() -> Node {
@@ -46,10 +46,15 @@ fn styled_tree() -> Node {
 }
 
 /// The round trip a decorator sits inside: Node → Lua → Node.
+///
+/// `to_node_decorated` rather than `to_node` because that is the entry point
+/// `LuaHost::decorate` uses, and it is the one that accepts back the resolved
+/// program id `to_lua` emits — the plain path resolves a program name against
+/// the plugin that wrote it, so it rejects an id it did not mint.
 fn round_trip(node: &Node) -> Node {
     let lua = mlua::Lua::new();
     let value = to_lua(&lua, node).expect("to_lua");
-    to_node(&value, "plugins/90_test.lua").expect("to_node")
+    to_node_decorated(&value, "plugins/90_test.lua").expect("to_node_decorated")
 }
 
 #[test]
@@ -115,6 +120,13 @@ fn an_unstyled_run_stays_unstyled() {
 /// scrolled paragraph jumped back to the top, an input lost its colour, and a
 /// plugin-fed surface — where a review diff's syntax colouring lives — was
 /// flattened to plain text.
+///
+/// Two of them only show up on shapes this test deliberately uses rather than
+/// the simplest one that renders: the frame title is **two differently-styled
+/// runs** (the creation wizard writes one, and a title flattened to a string
+/// comes back in a single colour), and one child is a **program** surface (whose
+/// resolved id the plain read path refuses, so the pane a decorator wrapped
+/// became an error panel).
 #[test]
 fn every_field_survives_the_trip_out_and_back() {
     use thurbox::kernel::node::{Align, Axis, Borders, Frame, Size, SurfaceSource};
@@ -131,7 +143,18 @@ fn every_field_survives_the_trip_out_and_back() {
             max: Some(9),
         },
         frame: Some(Frame {
-            title: Some(vec![thurbox::kernel::node::Run::plain("Panel")]),
+            title: Some(vec![
+                Run {
+                    text: "Panel".into(),
+                    style: Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                },
+                Run {
+                    text: " idle".into(),
+                    style: Style::default().fg(Color::DarkGray),
+                },
+            ]),
             borders: Borders::All,
             border_style: Style::default().fg(Color::Magenta),
             style: Style::default().bg(Color::Indexed(17)),
@@ -175,6 +198,16 @@ fn every_field_survives_the_trip_out_and_back() {
                         style: Style::default().fg(Color::Red),
                     },
                 ]]),
+            },
+            Node::Surface {
+                identity: Identity::default(),
+                size: Default::default(),
+                frame: None,
+                scroll: 0,
+                // The id as the kernel resolved it, which is what a decorator is
+                // handed: it names the plugin that started the program, so it
+                // must survive the trip rather than be re-stamped or refused.
+                source: SurfaceSource::Program("program:plugins/91_watch.lua#watch".into()),
             },
         ],
     };

@@ -27,6 +27,7 @@
 -- *kernel* — a path that does not exist, a folder with no repositories — comes
 -- back as a failed command and the band reports it, as it does for every command.
 
+local fuzzy = require("lib.fuzzy")
 local textinput = require("lib.textinput")
 local theme = require("lib.theme")
 local widgets = require("lib.widgets")
@@ -53,17 +54,18 @@ local function agents()
   return (thurbox and thurbox.agents) or {}
 end
 
+--- The spinner frame for this paint, off the flow's own clock. Named here
+--- because three waits use it and none of them should own the arithmetic —
+--- `widgets.spinner_frame` does, so every animation in the interface steps
+--- together.
+local function spinner(flow)
+  return widgets.spinner_frame(flow.elapsed)
+end
+
 --- Is a repository-memory write still running?
 ---
 --- v1 renders `Add Repo Path ⠋ checking…` while it validates a typed path on a
 --- host. The same state is readable here: the command is in flight.
---- The spinner frame for this paint. One definition, so three waits cannot
---- animate at different rates.
-local function spinner(flow)
-  local frame = math.floor((flow.elapsed or 0) * 8) % #theme.spinner + 1
-  return theme.spinner[frame]
-end
-
 local function bookmark_pending()
   for _, item in ipairs((thurbox and thurbox.commands) or {}) do
     if item.kind == "bookmark" and item.phase ~= "failed" then
@@ -164,28 +166,6 @@ end
 
 -- ── The repo step's row model ──────────────────────────────────────────────
 
---- v1's fuzzy match, reduced to what the picker uses: a subsequence match,
---- case-insensitive, returning the matched character positions so they can be
---- accented the way v1 accents them.
-local function fuzzy(query, text)
-  if query == "" then
-    return {}
-  end
-  local positions = {}
-  local at = 1
-  local lower = text:lower()
-  for _, code in utf8.codes(query:lower()) do
-    local char = utf8.char(code)
-    local found = string.find(lower, char, at, true)
-    if not found then
-      return nil
-    end
-    positions[#positions + 1] = found
-    at = found + #char
-  end
-  return positions
-end
-
 --- The rows to draw, in order: every published row, minus the children of a
 --- collapsed parent, minus anything the search excludes.
 ---
@@ -202,13 +182,13 @@ local function rows_for(flow)
     -- and would include every row the search excludes.
     local matched
     if searching then
-      matched = fuzzy(query, row.path)
+      matched = fuzzy.match(query, row.path)
       -- A labelled row is findable by its label too, and the label is what the
       -- reader sees: typing `interface` must reach the interface directory even
       -- though that word appears nowhere in its path. Highlighting stays over the
       -- path, so a label-only hit shows as an unhighlighted match rather than
       -- accenting characters at positions that mean nothing there.
-      if not matched and row.label and fuzzy(query, row.label) then
+      if not matched and row.label and fuzzy.match(query, row.label) then
         matched = {}
       end
     else
@@ -295,8 +275,15 @@ end
 
 -- ── Rendering: the pieces every step shares ────────────────────────────────
 
---- The float's width, and the columns a list row inside it actually gets: the
---- modal's own border, then the border of the panel the list sits in.
+--- The float's width in **columns**, and the columns a list row inside it
+--- actually gets: the modal's own border, then the border of the panel the list
+--- sits in.
+---
+--- Declared as `float.cols`, not `float.width` — `width` is a *percentage*
+--- (`Float::width_pct`), so the two readings coincided only at an 80-column
+--- terminal: narrower gave a float smaller than the row budget spent below,
+--- wider gave a roomy float with its content still truncated to 56. `float_rect`
+--- clamps `cols` to the screen, so a narrow terminal still fits.
 local MODAL_COLS = 60
 local ROW_COLS = MODAL_COLS - 4
 
@@ -341,7 +328,7 @@ local function modal(title, rows_height, children, flow)
     title_runs[#title_runs + 1] = { text = crumbs .. " ", style = { fg = theme.muted } }
   end
   return {
-    float = { width = MODAL_COLS, rows = rows_height },
+    float = { cols = MODAL_COLS, rows = rows_height },
     type = "box",
     frame = {
       title = title_runs,
@@ -399,7 +386,12 @@ end
 --- the row is spent either way and the modal does not change height as messages
 --- come and go.
 local function message_row(flow)
-  local text = flow.message
+  -- Truncated to the same budget every other row in this float spends. The row
+  -- is one line and the float is a fixed width, so a longer message was clipped
+  -- mid-word by the painter with nothing to mark it — and two of the messages
+  -- below were long enough to hit it. Marked, so the next one that overruns is
+  -- visible rather than silently short.
+  local text = flow.message and widgets.truncate(flow.message, ROW_COLS - 1)
   return {
     type = "text",
     len = 1,
@@ -481,25 +473,14 @@ local function repo_row(entry, selected, flow, is_cursor)
     spans[#spans + 1] = { text = row.label .. "  ", style = style }
   end
   -- Matched characters accented, as v1 accents them; the rest keeps the row's
-  -- own style so the cursor row still reads as the cursor row.
+  -- own style so the cursor row still reads as the cursor row. `fuzzy.spans`
+  -- does the cutting, which is also what keeps the accents on the characters the
+  -- search pane says matched — a second highlighter here answered in byte
+  -- offsets and could disagree with the positions it was drawing.
   if #entry.matched > 0 then
-    local last = 0
-    for _, at in ipairs(entry.matched) do
-      if at > last + 1 then
-        spans[#spans + 1] = { text = string.sub(row.path, last + 1, at - 1), style = style }
-      end
-      -- To the next character boundary, not the next byte: slicing a
-      -- multi-byte character in half would render as rubbish (v1 fixed the
-      -- same bug in its own highlighter).
-      local finish = (utf8.offset(row.path, 2, at) or (#row.path + 1)) - 1
-      spans[#spans + 1] = {
-        text = string.sub(row.path, at, finish),
-        style = { fg = theme.accent_bright, bold = true },
-      }
-      last = finish
-    end
-    if last < #row.path then
-      spans[#spans + 1] = { text = string.sub(row.path, last + 1), style = style }
+    local hit = { fg = theme.accent_bright, bold = true }
+    for _, span in ipairs(fuzzy.spans(row.path, entry.matched, style, hit)) do
+      spans[#spans + 1] = span
     end
   else
     -- Middle-truncated: the leaf is what identifies a repository, and it is the
@@ -1180,7 +1161,7 @@ return {
       local entry = current_row(flow)
       if entry then
         if entry.row.parent then
-          flow.message = "Child of a parent bookmark — delete the parent header instead"
+          flow.message = "Child of a parent bookmark — delete the header instead"
         else
           command("bookmark", { host = flow.host, repo = entry.row.path, action = "remove" })
           flow.selected[entry.row.path] = nil
@@ -1202,7 +1183,7 @@ return {
       -- Works from any focus, as v1's does, because it acts on the typed path.
       local path = (flow.input.value or ""):match("^%s*(.-)%s*$")
       if path == "" then
-        flow.message = "Type a folder path, then ctrl+p to import its repos as a parent"
+        flow.message = "Type a folder path, then ctrl+p to import its repos"
       else
         command("bookmark", { host = flow.host, repo = path, action = "parent" })
         textinput.clear(flow.input)
@@ -1295,8 +1276,7 @@ return {
         -- there is no obvious name for a branch that does not exist yet.
         if value == "" and flow.step == "name" then
           value = suggested_name(flow)
-          field.value = value
-          field.cursor = #value
+          textinput.set(field, value)
         end
         if value == "" then
           flow.message = flow.step == "name" and "Session name cannot be empty"
@@ -1442,12 +1422,11 @@ return {
       save(after_repos(flow))
       ask(load())
       return true
-    elseif name == "up" or name == "down" then
-      local count = math.max(1, #rows_for(flow))
-      flow.cursor = math.max(1, math.min((flow.cursor or 1) + (name == "down" and 1 or -1), count))
-      save(flow)
-      return true
     end
+    -- No arrow arm here: the arrows are claimed at the top of `on_key` for every
+    -- step, and the only escape from that claim is the browse dropdown — which
+    -- has `focus == "input"` and so never reaches this far. A second arm clamped
+    -- its own way and could not be exercised.
     return false
   end,
 

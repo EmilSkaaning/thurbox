@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 
 use thurbox::cli::plugins::{run, Action};
 
+mod common;
+
+use common::git_command;
+
 /// Point the interface directory at a fresh tempdir, with the bundled interface
 /// delivered — a plugin `require`s `lib/`, so a bare directory is not one yet.
 fn interface(dir: &Path) -> PathBuf {
@@ -299,6 +303,50 @@ fn a_module_may_not_be_delivered_outside_its_own_namespace() {
     );
 }
 
+#[test]
+fn a_pane_may_not_be_redirected_into_the_module_namespace() {
+    // The manifest half of this rule was always enforced; `--as` reached the
+    // destination without going through a manifest, so a pane could be delivered
+    // into `lib/` — where the loader never reads it (`is_nested_pane` is false for
+    // `lib/…`), the inventory classifies it as a module, and nothing reports a
+    // fault. An install that succeeds and draws nothing, with no symptom anywhere.
+    let home = tempfile::tempdir().expect("tempdir");
+    let ui = interface(home.path());
+    let theme = ui.join("lib/theme.lua");
+    let before = std::fs::read_to_string(&theme).expect("read");
+
+    // The degenerate shape: one `.lua` file, whose destination is `--as` alone.
+    let single = home.path().join("solo.lua");
+    std::fs::write(&single, "return {}\n").expect("write");
+    let error = run(Action::Install {
+        src: single.display().to_string(),
+        as_file: Some("lib/theme.lua".into()),
+        pin: None,
+    })
+    .expect_err("should refuse");
+    assert!(error.contains("plugins/"), "says where it belongs: {error}");
+
+    // And a package's pane, whose manifest proposed a legitimate destination.
+    let src = package(home.path(), "atlas", "v1", "atlas");
+    let error = run(Action::Install {
+        src: src.display().to_string(),
+        as_file: Some("lib/atlas/pane.lua".into()),
+        pin: None,
+    })
+    .expect_err("should refuse");
+    assert!(error.contains("plugins/"), "{error}");
+
+    assert_eq!(
+        std::fs::read_to_string(&theme).expect("read"),
+        before,
+        "the shipped module is untouched"
+    );
+    assert!(
+        !ui.join("plugins.toml").exists(),
+        "and nothing is recorded either"
+    );
+}
+
 // ── converging ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -362,7 +410,7 @@ fn syncing_takes_back_what_the_spec_no_longer_lists() {
 
     let report = run(Action::Sync).expect("sync");
     assert_eq!(
-        report.json["entries"][0]["outcome"], "removed",
+        report.json["entries"][0]["outcome"], "withdrawn",
         "{:?}",
         report.json
     );
@@ -512,6 +560,72 @@ fn removing_works_without_the_source_and_refuses_an_unknown_name() {
     assert!(checked.failure.is_none(), "{:?}", checked.json);
 }
 
+/// What `withdraw` KEPT must be what the command reports.
+///
+/// Both callers used to discard the report and say `removed` unconditionally, so
+/// `plugin remove atlas` claimed a pane was gone while the edited file was still
+/// on disk, still loaded and still claiming its keys — with its spec entry now
+/// removed, so no later `sync` could ever explain it.
+#[test]
+fn a_file_the_user_changed_is_reported_as_kept_rather_than_removed() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let ui = interface(home.path());
+    let src = package(home.path(), "atlas", "v1", "atlas");
+    install(&src);
+
+    let pane = ui.join("plugins/75_atlas.lua");
+    std::fs::write(&pane, "return { name = \"mine\" }\n").expect("edit");
+
+    let removed = run(Action::Remove {
+        name: "atlas".into(),
+    })
+    .expect("remove");
+    assert_eq!(removed.json["outcome"], "kept", "{:?}", removed.json);
+    assert!(
+        pane.is_file(),
+        "the edit outlives the entry that delivered it"
+    );
+    assert!(
+        removed.json["kept"]
+            .to_string()
+            .contains("plugins/75_atlas.lua"),
+        "and the file that is still there is named: {:?}",
+        removed.json
+    );
+    assert!(
+        removed.human.contains("kept"),
+        "including for a reader: {}",
+        removed.human
+    );
+}
+
+#[test]
+fn syncing_reports_what_it_could_not_take_back() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let ui = interface(home.path());
+    let src = package(home.path(), "atlas", "v1", "atlas");
+    install(&src);
+    std::fs::write(ui.join("lib/atlas/util.lua"), "return {}\n").expect("edit the module");
+    std::fs::write(ui.join("plugins.toml"), "").expect("empty the spec");
+
+    let report = run(Action::Sync).expect("sync");
+    let entry = &report.json["entries"][0];
+    assert_eq!(entry["outcome"], "kept", "{:?}", report.json);
+    assert!(
+        entry["kept"].to_string().contains("lib/atlas/util.lua"),
+        "{:?}",
+        report.json
+    );
+    assert!(
+        ui.join("lib/atlas/util.lua").is_file(),
+        "a changed module is the user's, entry or no entry"
+    );
+    assert!(
+        !ui.join("plugins/75_atlas.lua").exists(),
+        "what was untouched is still taken back"
+    );
+}
+
 // ── a plugin that carries more than Lua ────────────────────────────────────
 
 /// Build a throwaway plugin **repository**: a pane in a nested directory, a module
@@ -546,16 +660,7 @@ fn plugin_repo(root: &Path, marker: &str) -> PathBuf {
     std::fs::write(repo.join("bin/payload.bin"), [0x00u8, 0xff, 0xfe, 0x01]).expect("payload");
 
     let git = |args: &[&str]| {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(&repo)
-            // The pre-commit hook exports these; without scrubbing them a test's git
-            // call lands in the real repository.
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .status()
-            .expect("git");
+        let status = git_command(&repo, args).status().expect("git");
         assert!(status.success(), "git {args:?}");
     };
     git(&["init", "--initial-branch=main"]);
@@ -567,17 +672,9 @@ fn plugin_repo(root: &Path, marker: &str) -> PathBuf {
     repo
 }
 
-/// Run git in `repo`, scrubbing the location variables the pre-commit hook exports
-/// — without which a test's git call lands in the real repository.
+/// Run git in `repo`, returning its stdout.
 fn git_in(repo: &Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .output()
-        .expect("git");
+    let out = git_command(repo, args).output().expect("git");
     assert!(
         out.status.success(),
         "git {args:?}: {}",
@@ -995,14 +1092,8 @@ fn a_cloned_repository_takes_its_pane_from_its_own_manifest() {
     )
     .expect("manifest");
     let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&repo)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .status()
-            .expect("git");
+        let status = git_command(&repo, args).status().expect("git");
+        assert!(status.success(), "git {args:?}");
     };
     git(&["add", "-A"]);
     git(&["commit", "-m", "manifest"]);
@@ -1041,14 +1132,8 @@ fn a_repository_with_several_panes_and_no_manifest_says_so() {
     )
     .expect("second pane");
     for args in [vec!["add", "-A"], vec!["commit", "-m", "two"]] {
-        std::process::Command::new("git")
-            .args(&args)
-            .current_dir(&repo)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .status()
-            .expect("git");
+        let status = git_command(&repo, &args).status().expect("git");
+        assert!(status.success(), "git {args:?}");
     }
 
     // Guessing which is the entry point would be a silent wrong answer.

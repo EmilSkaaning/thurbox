@@ -227,8 +227,8 @@ struct Stat {
     ///
     /// Recorded rather than dropped: a miss nobody remembers is asked again on
     /// every single refresh, which is a thread and a `git` process per
-    /// non-repository session forever — and *every remote session* is a miss, its
-    /// worktree being on another machine entirely.
+    /// non-repository session forever. (A remote session is never asked at all —
+    /// see `attach_git_stats`.)
     state: Option<GitState>,
     at: Instant,
 }
@@ -466,6 +466,16 @@ impl SnapshotStore {
         let mut wanted: Vec<(String, PathBuf)> = Vec::new();
         for row in &mut self.current.sessions {
             row.git = self.git.known.get(&row.id).and_then(|stat| stat.state);
+            // A remote session's worktree is a path on its OWN machine, and
+            // `git::worktree_stats` runs the LOCAL git: it either fails or — since
+            // every host defaults to the same `worktrees_dir` — reports another
+            // machine's checkout on this row. `DiffStore::request` resolves the
+            // host for the same reason; there is no host-aware `worktree_stats`
+            // to resolve one for, so the row stays `None`, which already reads as
+            // "not computed" rather than "clean".
+            if crate::session::is_remote_backend(&row.backend) {
+                continue;
+            }
             if let Some(cwd) = row.cwd.clone() {
                 wanted.push((row.id.clone(), cwd));
             }
@@ -988,13 +998,9 @@ fn remote_host_of(backend: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Best-effort repo label: the worktree's repo directory name, else the cwd's.
-///
-/// Shared with the reorder command so a move stays inside the group the list
-/// actually draws.
-/// Every repository a session spans, in member order — mirroring v1's
-/// `session_member_dirs`: one entry per worktree (or the cwd when there are
-/// none), then each attached directory that is not already a worktree.
+/// Every repository a session spans, in member order: one entry per worktree (or
+/// the cwd when there are none), then each attached directory that is not already
+/// a worktree.
 ///
 /// Names come from the path's last component rather than `git::repo_display_name`
 /// deliberately: that helper resolves the name from the git *remote*, which
@@ -1033,6 +1039,10 @@ fn session_members(
     members
 }
 
+/// Best-effort repo label: the worktree's repo directory name, else the cwd's.
+///
+/// Shared with the reorder command so a move stays inside the group the list
+/// actually draws.
 pub(crate) fn repo_name(cwd: &Option<PathBuf>, repo_path: Option<&PathBuf>) -> Option<String> {
     repo_path
         .or(cwd.as_ref())
@@ -1055,6 +1065,126 @@ pub fn parse_id(raw: &str) -> Option<SessionId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One session's cached answer, aged by `age`, mirroring `repos::tests::held`.
+    fn stat_at(age: Duration) -> Stat {
+        Stat {
+            state: None,
+            at: Instant::now() - age,
+        }
+    }
+
+    /// A row with only the fields the git-stat path reads.
+    fn row(id: &str, backend: &str, cwd: Option<&str>) -> SessionRow {
+        SessionRow {
+            id: id.to_string(),
+            name: id.to_string(),
+            agent: "claude".to_string(),
+            status: "idle".to_string(),
+            cwd: cwd.map(PathBuf::from),
+            repo: None,
+            repos: Vec::new(),
+            member_dirs: Vec::new(),
+            branch: None,
+            base_branch: None,
+            backend: backend.to_string(),
+            backend_id: None,
+            remote_host: None,
+            agent_session_id: None,
+            parent_id: None,
+            display_order: None,
+            worktree_count: 0,
+            git: None,
+            shell_backend_id: None,
+            hook_state: None,
+        }
+    }
+
+    /// A `GitStats` that has never touched the world: its channel is `None`
+    /// until `request` actually starts a worker, which is how these tests see
+    /// whether one did.
+    fn asked(stats: &GitStats) -> bool {
+        stats.channel.is_some()
+    }
+
+    #[test]
+    fn a_fresh_stat_is_not_computed_again() {
+        // Shelling out to `git` per refresh, per session, is what the age is for.
+        let mut stats = GitStats::default();
+        stats
+            .known
+            .insert("s1".to_string(), stat_at(Duration::ZERO));
+        stats.request("s1", PathBuf::from("/definitely/not/a/repo"));
+        assert!(stats.inflight.is_empty());
+        assert!(!asked(&stats), "no worker was started");
+    }
+
+    #[test]
+    fn a_stat_older_than_the_ttl_is_computed_again() {
+        // Answered once, a session's diffstat froze at whatever it was the first
+        // time it was looked at and never moved again.
+        let mut stats = GitStats::default();
+        stats.known.insert("s1".to_string(), stat_at(GIT_STAT_TTL));
+        stats.request("s1", PathBuf::from("/definitely/not/a/repo"));
+        assert!(stats.inflight.contains("s1"));
+        assert!(asked(&stats));
+    }
+
+    #[test]
+    fn a_stat_in_flight_is_never_asked_for_twice() {
+        // The refresh runs every 400ms and `git` does not; without the marker a
+        // slow repository accumulates a thread per refresh.
+        let mut stats = GitStats::default();
+        stats.inflight.insert("s1".to_string());
+        stats
+            .known
+            .insert("s1".to_string(), stat_at(GIT_STAT_TTL * 10));
+        stats.request("s1", PathBuf::from("/definitely/not/a/repo"));
+        assert_eq!(stats.inflight.len(), 1);
+        assert!(!asked(&stats), "the run already out is the only one");
+    }
+
+    #[test]
+    fn a_session_that_is_gone_loses_its_stat() {
+        let mut stats = GitStats::default();
+        stats
+            .known
+            .insert("s1".to_string(), stat_at(Duration::ZERO));
+        stats
+            .known
+            .insert("s2".to_string(), stat_at(Duration::ZERO));
+        let present: std::collections::HashSet<&str> = ["s2"].into_iter().collect();
+        stats.retain(&present);
+        assert!(!stats.known.contains_key("s1"));
+        assert!(stats.known.contains_key("s2"));
+    }
+
+    #[test]
+    fn a_remote_session_is_never_stat_ed_with_the_local_git() {
+        // Its worktree is a path on another machine, and every host's default
+        // `worktrees_dir` is the same path — so the local `git` either fails or
+        // reports somebody else's checkout on this row. `None` already reads as
+        // "not computed", which is the honest answer here.
+        let database = Database::open_in_memory().expect("in-memory database opens");
+        let mut store = SnapshotStore::with_database(database);
+        store.current.sessions = vec![
+            row("local", "local-tmux", Some("/definitely/not/a/repo")),
+            row("remote", "ssh:devbox", Some("/definitely/not/a/repo")),
+            row("wsl", "wsl:ubuntu", Some("/definitely/not/a/repo")),
+        ];
+
+        store.attach_git_stats();
+
+        assert!(store.git.inflight.contains("local"));
+        assert!(!store.git.inflight.contains("remote"));
+        assert!(!store.git.inflight.contains("wsl"));
+        assert!(store
+            .current
+            .sessions
+            .iter()
+            .filter(|row| row.id != "local")
+            .all(|row| row.git.is_none()));
+    }
 
     #[test]
     fn an_unreported_session_is_idle() {

@@ -10,9 +10,21 @@
 //! state, distinct from "no changes" — a diff that is merely slow must not look
 //! like a clean worktree.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::time::{Duration, Instant};
+
+/// How long a computed diff is trusted before it is computed again.
+///
+/// Every other worker store here caches an *age*, not a value, and this one
+/// cached a value: computed once per session per process, so a pane watching an
+/// agent that is still writing code showed the diff it first saw. `Command::Diff`
+/// was the only way back, and nothing else ever evicted — so a selection the loop
+/// asks for every frame pinned up to [`MAX_DIFF_BYTES`] for the life of the
+/// process. Matches `snapshot::GIT_STAT_TTL`, which shells out to git on the same
+/// cadence for the same rows.
+pub const DIFF_TTL: Duration = Duration::from_secs(5);
 
 /// Largest diff read, in bytes. Beyond this the cap is *reported*, because a
 /// silently truncated diff is a review that quietly omits things.
@@ -65,9 +77,33 @@ struct Computed {
     diff: Diff,
 }
 
+/// One session's last diff, when it landed, and whether a run is under way.
+struct Held {
+    diff: Diff,
+    /// `None` while nothing has landed yet — freshness is a property of an
+    /// answer, and a computation still running has not produced one.
+    at: Option<Instant>,
+    /// A computation for this session is on a thread.
+    ///
+    /// Tracked separately because `Diff::Pending` cannot answer it: a refresh
+    /// deliberately leaves the previous diff readable, so the entry still reads
+    /// `Ready` while the next run is in flight. Without the marker every frame's
+    /// ask would start another `git` — and the loop asks every frame.
+    inflight: bool,
+}
+
+impl Held {
+    /// Whether a fresh computation should start for this entry.
+    ///
+    /// `map_or(true, …)` rather than `is_none_or`, which is above the 1.75 MSRV.
+    fn due(&self) -> bool {
+        !self.inflight && self.at.map_or(true, |at| at.elapsed() >= DIFF_TTL)
+    }
+}
+
 /// Computes and caches diffs, one per session.
 pub struct DiffStore {
-    diffs: HashMap<String, Diff>,
+    diffs: HashMap<String, Held>,
     tx: Sender<Computed>,
     rx: Receiver<Computed>,
 }
@@ -84,14 +120,14 @@ impl DiffStore {
 
     /// What is known about `session`, if anything has been asked for.
     pub fn get(&self, session: &str) -> Option<&Diff> {
-        self.diffs.get(session)
+        self.diffs.get(session).map(|held| &held.diff)
     }
 
-    /// Ask for a session's diff, unless it is already known or in flight.
+    /// Ask for a session's diff, unless one is in flight or the last is fresh.
     ///
     /// Idempotent by design: this is called from the loop with whatever session
-    /// is selected, so it happens every frame and must cost nothing after the
-    /// first.
+    /// is selected, so it happens every frame and must cost nothing until the
+    /// answer it holds is [`DIFF_TTL`] old.
     pub fn request(
         &mut self,
         session: &str,
@@ -99,10 +135,19 @@ impl DiffStore {
         base: Option<String>,
         backend: &str,
     ) {
-        if self.diffs.contains_key(session) {
+        if self.diffs.get(session).is_some_and(|held| !held.due()) {
             return;
         }
-        self.diffs.insert(session.to_string(), Diff::Pending);
+
+        // The previous diff stays readable until the new one lands, so a pane does
+        // not blink back to `Pending` every time it renews — only a session nobody
+        // has asked about before starts out pending.
+        let entry = self.diffs.entry(session.to_string()).or_insert(Held {
+            diff: Diff::Pending,
+            at: None,
+            inflight: false,
+        });
+        entry.inflight = true;
 
         // The worktree is a path on the session's OWN machine. Running the local
         // `git` against a remote path either fails or, on an unlucky collision,
@@ -129,7 +174,14 @@ impl DiffStore {
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
         while let Ok(done) = self.rx.try_recv() {
-            self.diffs.insert(done.session, done.diff);
+            self.diffs.insert(
+                done.session,
+                Held {
+                    diff: done.diff,
+                    at: Some(Instant::now()),
+                    inflight: false,
+                },
+            );
             changed = true;
         }
         changed
@@ -138,12 +190,33 @@ impl DiffStore {
     /// Seed a diff directly, so a test can render a known one without git.
     #[doc(hidden)]
     pub fn set_for_test(&mut self, session: &str, diff: Diff) {
-        self.diffs.insert(session.to_string(), diff);
+        self.diffs.insert(
+            session.to_string(),
+            Held {
+                diff,
+                at: Some(Instant::now()),
+                inflight: false,
+            },
+        );
     }
 
-    /// Forget a session's diff, so the next request recomputes it.
+    /// Forget a session's diff, so the next request recomputes it now rather
+    /// than when its age runs out.
     pub fn invalidate(&mut self, session: &str) {
         self.diffs.remove(session);
+    }
+
+    /// Forget sessions that are no longer in the snapshot, so the cache tracks
+    /// what exists rather than everything that ever did.
+    ///
+    /// A diff is by far the largest thing any worker store holds — up to
+    /// [`MAX_DIFF_BYTES`] of `Vec<String>` per session — and the default
+    /// interface has no pane that reads one, so without this every session ever
+    /// selected kept its body until the process ended. Mirrors
+    /// `snapshot::GitStats::retain`; an answer that lands for a session pruned
+    /// here is pruned again on the next call.
+    pub fn retain(&mut self, present: &HashSet<&str>) {
+        self.diffs.retain(|id, _| present.contains(id.as_str()));
     }
 }
 
@@ -317,6 +390,77 @@ mod tests {
         );
         ask(&mut store);
         assert_eq!(store.get("s1"), Some(&Diff::Pending), "and recomputes");
+    }
+
+    /// An entry as it would be after `age` with a run either out or finished,
+    /// mirroring `repos::tests::held`.
+    fn held(age: Option<Duration>, inflight: bool) -> Held {
+        Held {
+            diff: Diff::Pending,
+            at: age.map(|age| Instant::now() - age),
+            inflight,
+        }
+    }
+
+    #[test]
+    fn a_settled_diff_is_computed_again_once_it_is_old() {
+        // Without an age a diff is computed once per session per process, so a
+        // pane watching an agent still writing code shows what it first saw.
+        assert!(!held(Some(Duration::ZERO), false).due());
+        assert!(held(Some(DIFF_TTL), false).due());
+    }
+
+    #[test]
+    fn a_diff_in_flight_is_never_asked_for_twice() {
+        // However long it takes: the loop asks every frame, so without the marker
+        // a slow diff starts a fresh `git` per frame for as long as it runs.
+        assert!(!held(None, true).due());
+        assert!(!held(Some(DIFF_TTL * 10), true).due());
+        assert!(held(None, false).due(), "and nothing running is due");
+    }
+
+    #[test]
+    fn a_stale_diff_stays_readable_while_the_next_one_runs() {
+        // A pane must not blink back to `Pending` every five seconds.
+        let mut store = DiffStore::new();
+        let ready = Diff::Ready {
+            files: Vec::new(),
+            body: vec!["+one".to_string()],
+            truncated: false,
+            raw_bytes: 4,
+            untracked_omitted: 0,
+        };
+        store.set_for_test("s1", ready.clone());
+        store.diffs.get_mut("s1").expect("seeded").at = Some(Instant::now() - DIFF_TTL);
+
+        store.request(
+            "s1",
+            PathBuf::from("/definitely/not/a/repo"),
+            None,
+            "local-tmux",
+        );
+
+        assert!(
+            store.diffs["s1"].inflight,
+            "the stale answer was recomputed"
+        );
+        assert_eq!(store.get("s1"), Some(&ready), "and the old one still reads");
+    }
+
+    #[test]
+    fn a_session_that_is_gone_loses_its_diff() {
+        // A diff is the largest thing any worker store holds, and the loop asks
+        // for one per selection — so without eviction every session ever selected
+        // kept up to MAX_DIFF_BYTES until the process ended.
+        let mut store = DiffStore::new();
+        store.set_for_test("s1", Diff::Pending);
+        store.set_for_test("s2", Diff::Pending);
+
+        let present: HashSet<&str> = ["s2"].into_iter().collect();
+        store.retain(&present);
+
+        assert!(store.get("s1").is_none(), "the gone session was dropped");
+        assert!(store.get("s2").is_some(), "the live one was kept");
     }
 
     #[test]

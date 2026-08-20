@@ -15,9 +15,12 @@ use super::node::{
 
 /// Deepest tree accepted. Guards against a plugin building a cyclic or
 /// pathological structure and taking the render thread down with it.
-const MAX_DEPTH: usize = 64;
+///
+/// Reachable from the rest of the kernel because the persistence path bounds
+/// itself by the same ceiling (`host::MAX_PERSISTED_DEPTH`): two spellings of
+/// one number are two numbers as soon as either moves.
+pub(crate) const MAX_DEPTH: usize = 64;
 
-/// Convert a plugin's returned value into a node tree.
 /// Read a plugin's returned tree.
 ///
 /// `owner` is the path of the plugin that produced it, needed because a
@@ -25,10 +28,53 @@ const MAX_DEPTH: usize = 64;
 /// writes `program = "watch"` and the kernel resolves the owner, so naming another
 /// plugin's pane is impossible by construction rather than refused by a check.
 pub fn to_node(value: &Value, owner: &str) -> Result<Node, String> {
+    to_node_with(
+        value,
+        &Owner {
+            path: owner,
+            resolved_program_ok: false,
+        },
+    )
+}
+
+/// Read a tree on its way *back* from a decorator.
+///
+/// The same conversion, except a `program` surface may already carry the
+/// resolved id [`to_lua`] emitted (`program:<plugin>#<name>`) instead of the
+/// bare name a plugin authors. Without that an identity decorator over a pane
+/// holding a program surface fails conversion — [`validate_program_name`] allows
+/// no `:`, `/` or `#` — and the pane it wrapped becomes an error panel.
+///
+/// A separate entry point rather than a relaxation of [`to_node`], because the
+/// resolved form names an owner: accepting one from every plugin would let any
+/// pane paint a surface belonging to another, which stamping the owner exists to
+/// prevent.
+///
+/// [`validate_program_name`]: super::terminal::validate_program_name
+pub fn to_node_decorated(value: &Value, owner: &str) -> Result<Node, String> {
+    to_node_with(
+        value,
+        &Owner {
+            path: owner,
+            resolved_program_ok: true,
+        },
+    )
+}
+
+/// Whose tree this is, and how far its `program` surfaces are trusted.
+struct Owner<'a> {
+    /// Path of the plugin a bare program name resolves against.
+    path: &'a str,
+    /// Whether an already-resolved program id is accepted verbatim. True only
+    /// on the decoration path, where the id was minted by the kernel itself.
+    resolved_program_ok: bool,
+}
+
+fn to_node_with(value: &Value, owner: &Owner) -> Result<Node, String> {
     convert(value, "root", 0, owner)
 }
 
-fn convert(value: &Value, path: &str, depth: usize, owner: &str) -> Result<Node, String> {
+fn convert(value: &Value, path: &str, depth: usize, owner: &Owner) -> Result<Node, String> {
     if depth > MAX_DEPTH {
         return Err(format!(
             "{path}: tree nested deeper than {MAX_DEPTH} levels"
@@ -46,7 +92,7 @@ fn convert(value: &Value, path: &str, depth: usize, owner: &str) -> Result<Node,
     }
 }
 
-fn convert_table(table: &Table, path: &str, depth: usize, owner: &str) -> Result<Node, String> {
+fn convert_table(table: &Table, path: &str, depth: usize, owner: &Owner) -> Result<Node, String> {
     let size = read_size(table, path)?;
     let identity = read_identity(table, path)?;
     let frame = read_frame(table, path)?;
@@ -63,6 +109,7 @@ fn convert_table(table: &Table, path: &str, depth: usize, owner: &str) -> Result
         None => {
             if table.contains_key("cells").unwrap_or(false)
                 || table.contains_key("session").unwrap_or(false)
+                || table.contains_key("program").unwrap_or(false)
             {
                 "surface"
             } else if table.contains_key("value").unwrap_or(false)
@@ -129,14 +176,22 @@ fn convert_table(table: &Table, path: &str, depth: usize, owner: &str) -> Result
             let source = if let Some(session) = opt_string(table, "session", path)? {
                 SurfaceSource::Session(session)
             } else if let Some(program) = opt_string(table, "program", path)? {
-                // Resolved against the plugin that drew it. The name is checked
-                // here so a bad one is a conversion error naming its path, rather
-                // than a pane that never appears.
-                super::terminal::validate_program_name(&program)
-                    .map_err(|e| format!("{path}.program: {e}"))?;
-                SurfaceSource::Program(
-                    super::terminal::ProgramKey::new(owner, &program).surface_id(),
-                )
+                let id =
+                    if owner.resolved_program_ok && super::terminal::is_program_surface(&program) {
+                        // Already resolved — this came back from a decorator, which
+                        // was handed the id `to_lua` wrote. Re-resolving it would
+                        // make the decorator the owner of a pane the plugin it
+                        // decorated started, and validating it would reject it.
+                        program
+                    } else {
+                        // Resolved against the plugin that drew it. The name is
+                        // checked here so a bad one is a conversion error naming its
+                        // path, rather than a pane that never appears.
+                        super::terminal::validate_program_name(&program)
+                            .map_err(|e| format!("{path}.program: {e}"))?;
+                        super::terminal::ProgramKey::new(owner.path, &program).surface_id()
+                    };
+                SurfaceSource::Program(id)
             } else {
                 let raw: Value = table
                     .raw_get("cells")
@@ -170,7 +225,7 @@ fn read_children(
     table: &Table,
     path: &str,
     depth: usize,
-    owner: &str,
+    owner: &Owner,
 ) -> Result<Vec<Node>, String> {
     // Children live under `children`, or in the array part of the table so a
     // plugin can write `{ a, b, c }` without the extra key.
@@ -545,12 +600,6 @@ fn lua_err(path: &str, key: &str, error: &mlua::Error) -> String {
     format!("{path}.{key}: {error}")
 }
 
-/// Convert a [`Node`] back into the Lua table a plugin would have written.
-///
-/// Needed only by decoration: a decorator receives another plugin's rendered
-/// tree, so the tree has to cross back into Lua. Round-tripping through the
-/// same shape `to_node` accepts means a decorator can return the table it was
-/// given, modified or not, and it converts back cleanly.
 /// A `Style` as the same table shape a plugin would have written, so the value
 /// a decorator receives is indistinguishable from one it could author.
 ///
@@ -589,6 +638,44 @@ fn style_to_lua(lua: &mlua::Lua, style: &Style) -> Result<Option<Table>, String>
     Ok(any.then_some(table))
 }
 
+/// One line as the `{ { text =, style = }, … }` table [`read_runs`] accepts.
+///
+/// The style MUST round-trip. A decorator is handed the tree and returns one,
+/// so anything dropped here is dropped from the pane -- and a decorator that
+/// returns its input untouched (the common case, when its query is empty) would
+/// silently strip every colour the pane drew. That is exactly what happened:
+/// the session list rendered colourless because search decorates its slot.
+fn runs_to_lua(lua: &mlua::Lua, runs: &[Run]) -> Result<Table, String> {
+    let line = lua.create_table().map_err(|e| e.to_string())?;
+    for (span, run) in runs.iter().enumerate() {
+        let entry = lua.create_table().map_err(|e| e.to_string())?;
+        entry
+            .set("text", run.text.clone())
+            .map_err(|e| e.to_string())?;
+        if let Some(style) = style_to_lua(lua, &run.style)? {
+            entry.set("style", style).map_err(|e| e.to_string())?;
+        }
+        line.set(span + 1, entry).map_err(|e| e.to_string())?;
+    }
+    Ok(line)
+}
+
+/// A block of lines, each one a list of runs.
+fn lines_to_lua(lua: &mlua::Lua, lines: &[Vec<Run>]) -> Result<Table, String> {
+    let out = lua.create_table().map_err(|e| e.to_string())?;
+    for (index, runs) in lines.iter().enumerate() {
+        out.set(index + 1, runs_to_lua(lua, runs)?)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(out)
+}
+
+/// Convert a [`Node`] back into the Lua table a plugin would have written.
+///
+/// Needed only by decoration: a decorator receives another plugin's rendered
+/// tree, so the tree has to cross back into Lua. Round-tripping through the
+/// same shape `to_node` accepts means a decorator can return the table it was
+/// given, modified or not, and it converts back cleanly.
 pub fn to_lua(lua: &mlua::Lua, node: &Node) -> Result<Value, String> {
     let table = lua.create_table().map_err(|e| e.to_string())?;
     let set = |key: &str, value: Value| -> Result<(), String> {
@@ -629,8 +716,13 @@ pub fn to_lua(lua: &mlua::Lua, node: &Node) -> Result<Value, String> {
     }
     if let Some(frame) = node.frame() {
         let spec = lua.create_table().map_err(|e| e.to_string())?;
-        if let Some(text) = frame.title_text() {
-            spec.set("title", text).map_err(|e| e.to_string())?;
+        // Runs, not `title_text()`: a title is often two facts with two styles
+        // — the agent pane's is a session's name and its status — and flattening
+        // it here hands a decorator one string, so an identity decorator repaints
+        // the whole title in one colour. `read_frame` reads runs back.
+        if let Some(runs) = &frame.title {
+            spec.set("title", runs_to_lua(lua, runs)?)
+                .map_err(|e| e.to_string())?;
         }
         spec.set(
             "borders",
@@ -659,29 +751,9 @@ pub fn to_lua(lua: &mlua::Lua, node: &Node) -> Result<Value, String> {
             scroll,
             ..
         } => {
-            let out = lua.create_table().map_err(|e| e.to_string())?;
-            for (index, runs) in lines.iter().enumerate() {
-                let line = lua.create_table().map_err(|e| e.to_string())?;
-                for (span, run) in runs.iter().enumerate() {
-                    let entry = lua.create_table().map_err(|e| e.to_string())?;
-                    entry
-                        .set("text", run.text.clone())
-                        .map_err(|e| e.to_string())?;
-                    // The style MUST round-trip. A decorator is handed the
-                    // tree and returns one, so anything dropped here is
-                    // dropped from the pane -- and a decorator that returns
-                    // its input untouched (the common case, when its query is
-                    // empty) would silently strip every colour the pane drew.
-                    // That is exactly what happened: the session list rendered
-                    // colourless because search decorates its slot.
-                    if let Some(style) = style_to_lua(lua, &run.style)? {
-                        entry.set("style", style).map_err(|e| e.to_string())?;
-                    }
-                    line.set(span + 1, entry).map_err(|e| e.to_string())?;
-                }
-                out.set(index + 1, line).map_err(|e| e.to_string())?;
-            }
-            table.set("text", out).map_err(|e| e.to_string())?;
+            table
+                .set("text", lines_to_lua(lua, lines)?)
+                .map_err(|e| e.to_string())?;
             set(
                 "align",
                 string_value(
@@ -756,22 +828,9 @@ pub fn to_lua(lua: &mlua::Lua, node: &Node) -> Result<Value, String> {
                     // line: a plugin-fed surface is where a review diff's syntax
                     // colouring lives, and joining the text throws all of it away
                     // the moment any decorator touches the pane.
-                    let out = lua.create_table().map_err(|e| e.to_string())?;
-                    for (index, runs) in lines.iter().enumerate() {
-                        let line = lua.create_table().map_err(|e| e.to_string())?;
-                        for (span, run) in runs.iter().enumerate() {
-                            let entry = lua.create_table().map_err(|e| e.to_string())?;
-                            entry
-                                .set("text", run.text.clone())
-                                .map_err(|e| e.to_string())?;
-                            if let Some(style) = style_to_lua(lua, &run.style)? {
-                                entry.set("style", style).map_err(|e| e.to_string())?;
-                            }
-                            line.set(span + 1, entry).map_err(|e| e.to_string())?;
-                        }
-                        out.set(index + 1, line).map_err(|e| e.to_string())?;
-                    }
-                    table.set("cells", out).map_err(|e| e.to_string())?;
+                    table
+                        .set("cells", lines_to_lua(lua, lines)?)
+                        .map_err(|e| e.to_string())?;
                 }
             }
         }
@@ -813,6 +872,10 @@ mod tests {
         assert_eq!(node_of("{ children = {} }").unwrap().kind(), "box");
         assert_eq!(node_of("{ value = \"x\" }").unwrap().kind(), "input");
         assert_eq!(node_of("{ session = \"abc\" }").unwrap().kind(), "surface");
+        assert_eq!(
+            node_of("{ program = \"watch\" }").unwrap().kind(),
+            "surface"
+        );
     }
 
     #[test]
@@ -957,6 +1020,49 @@ mod tests {
         assert_eq!(size.len, Some(3));
         assert_eq!(size.min, Some(1));
         assert_eq!(size.max, Some(9));
+    }
+
+    /// The decoration path is the only one that may name a program by its
+    /// resolved id, because that id names an owner: a plugin handed one has been
+    /// handed a pane belonging to somebody else, and the ordinary path resolves
+    /// against the plugin doing the drawing instead.
+    #[test]
+    fn a_resolved_program_id_is_accepted_only_from_a_decorator() {
+        let lua = Lua::new();
+        let value: Value = lua
+            .load("return { program = \"program:plugins/90_watch.lua#watch\" }")
+            .eval()
+            .expect("test source should evaluate");
+
+        let error = to_node(&value, "plugins/91_other.lua").unwrap_err();
+        assert!(error.contains("must be letters"), "{error}");
+
+        match to_node_decorated(&value, "plugins/91_other.lua").expect("decorated converts") {
+            Node::Surface {
+                source: SurfaceSource::Program(id),
+                ..
+            } => assert_eq!(id, "program:plugins/90_watch.lua#watch"),
+            other => panic!("expected a program surface, got {}", other.kind()),
+        }
+    }
+
+    /// A decorator's own bare name still resolves against the decorator, so
+    /// letting the resolved form through does not cost it the ability to draw a
+    /// pane of its own.
+    #[test]
+    fn a_decorator_still_owns_the_program_names_it_writes() {
+        let lua = Lua::new();
+        let value: Value = lua
+            .load("return { program = \"watch\" }")
+            .eval()
+            .expect("test source should evaluate");
+        match to_node_decorated(&value, "plugins/91_other.lua").expect("decorated converts") {
+            Node::Surface {
+                source: SurfaceSource::Program(id),
+                ..
+            } => assert_eq!(id, "program:plugins/91_other.lua#watch"),
+            other => panic!("expected a program surface, got {}", other.kind()),
+        }
     }
 
     #[test]

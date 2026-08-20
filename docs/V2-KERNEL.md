@@ -340,12 +340,11 @@ thurbox from a checkout and an unoptimised Lua VM is felt in the UI.
 
 ## The gap to v1
 
-Two lists, and they answer different questions. `tests/v2_parity.rs` holds the
-**rendering** divergences — what v2 draws differently — and asserts their exact
-count, so adding one without recording it fails. `openspec/changes/v2-parity-gaps/`
-holds the **behavioural** ones, found by auditing each v1 pane against its
-plugin; it is the longer and more serious list, and Tier 0 of it is what
-`v2-retire-v1` is really waiting on.
+`openspec/changes/v2-parity-gaps/` is the one list, and it is where every gap is
+tracked: the **behavioural** ones, found by auditing each v1 pane against its
+plugin, and the **rendering** divergences beside them. It is tiered by how much
+a v2 without the entry hurts, Tier 0 being the entries `v2-retire-v1` was waiting
+on.
 
 ## Decisions
 

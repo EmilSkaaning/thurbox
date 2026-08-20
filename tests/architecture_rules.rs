@@ -38,7 +38,7 @@ const MODULE_RULES: &[ModuleRules] = &[
         allowed: &[],
         allowed_path_only: &[],
     },
-    // Side-effect layer (PTY/tmux). Never ui, git, or app.
+    // Side-effect layer (PTY/tmux). Never `git`.
     ModuleRules {
         name: "agent",
         allowed: &["session", "paths", "shell"],
@@ -97,8 +97,8 @@ const MODULE_RULES: &[ModuleRules] = &[
     // session engine to build the snapshot plugins render from (`storage` +
     // `sync` for the rows, `session` for the types, `paths` for the DB and
     // plugin directories). Never `ui` or `app` — it is their replacement, not
-    // their peer — and never `git`/`agent` directly: side effects reach it as
-    // commands, not as calls from a render path.
+    // their peer — and never `agent` by `use`: side effects reach it as commands
+    // or, where a render path genuinely needs one, as a fully-qualified call.
     ModuleRules {
         name: "kernel",
         allowed: &[
@@ -136,8 +136,8 @@ const MODULE_RULES: &[ModuleRules] = &[
     },
     // Leaf side-effect module: OS desktop notifications. Knows about
     // `session` (for `SessionId`) and `paths` (for the DB path the click
-    // callback writes to); never reaches into agent / ui / app / storage
-    // beyond a single SQL statement on its own short-lived connection.
+    // callback writes to); never reaches into agent or storage beyond a single
+    // SQL statement on its own short-lived connection.
     ModuleRules {
         name: "notifications",
         allowed: &["session", "paths"],
@@ -145,7 +145,7 @@ const MODULE_RULES: &[ModuleRules] = &[
     },
     // Leaf side-effect module: clipboard writes (native + OSC 52). Knows
     // `session` only for the `ClipboardProvider` setting; writes to the tty
-    // and never reaches into agent / ui / app / storage.
+    // and never reaches into agent or storage.
     ModuleRules {
         name: "clipboard",
         allowed: &["session"],
@@ -153,10 +153,10 @@ const MODULE_RULES: &[ModuleRules] = &[
     },
 ];
 
-/// Modules exempt from the allowlist: `app` is the coordinator (imports
-/// everything by design); `bin`, `lib`, and `main` are crate roots, not
-/// architecture modules.
-// `main` is the coordinator, as `app` was before v1 was retired.
+/// Modules exempt from the allowlist, all three of them crate roots rather than
+/// architecture modules: `main` is the coordinator and imports everything by
+/// design (the role `app` held before v1 was retired), and `bin` / `lib` are the
+/// other two entry points.
 const EXEMPT: &[&str] = &["bin", "lib", "main"];
 
 /// A single architecture violation: a forbidden crate-module reference.
@@ -542,56 +542,18 @@ fn assert_module_clean(name: &str) {
     );
 }
 
+/// Every rule in [`MODULE_RULES`] is enforced, by construction.
+///
+/// One loop rather than a test per module: the hand-written list stopped at
+/// `notifications` while entries for `kernel` and `clipboard` sat in
+/// [`MODULE_RULES`] with nothing asserting them — a declared boundary that no
+/// test checked, which is how three violations of the kernel's own rule
+/// accumulated. A new entry cannot go unenforced now.
 #[test]
-fn session_module_purity() {
-    assert_module_clean("session");
-}
-
-#[test]
-fn agent_module_isolation() {
-    assert_module_clean("agent");
-}
-
-#[test]
-fn git_module_independence() {
-    assert_module_clean("git");
-}
-
-#[test]
-fn storage_module_isolation() {
-    assert_module_clean("storage");
-}
-
-#[test]
-fn sync_module_isolation() {
-    assert_module_clean("sync");
-}
-
-#[test]
-fn usage_module_isolation() {
-    assert_module_clean("usage");
-}
-
-#[test]
-fn session_ops_module_isolation() {
-    assert_module_clean("session_ops");
-}
-
-#[test]
-fn cli_module_isolation() {
-    assert_module_clean("cli");
-}
-
-#[test]
-fn util_modules_are_leaves() {
-    for name in ["paths", "shell", "workspace"] {
-        assert_module_clean(name);
+fn every_rule_is_enforced() {
+    for rules in MODULE_RULES {
+        assert_module_clean(rules.name);
     }
-}
-
-#[test]
-fn notifications_module_isolation() {
-    assert_module_clean("notifications");
 }
 
 /// Every module under `src/` must be governed: either a MODULE_RULES entry

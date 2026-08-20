@@ -89,7 +89,6 @@ impl SurfaceProvider for PlaceholderSurfaces {
     }
 }
 
-/// What a session-backed surface shows when nothing live is behind it.
 /// A centred two-line notice, for a surface with nothing to paint.
 fn render_notice(frame: &mut Frame, area: Rect, title: &str, detail: &str) {
     let mut lines = Vec::new();
@@ -110,6 +109,7 @@ fn render_notice(frame: &mut Frame, area: Rect, title: &str, detail: &str) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+/// What a session-backed surface shows when nothing live is behind it.
 fn render_detached(frame: &mut Frame, area: Rect, session: &str) {
     let mut lines = Vec::new();
     let blank = usize::from(area.height).saturating_sub(3) / 2;

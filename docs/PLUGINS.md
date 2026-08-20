@@ -61,7 +61,7 @@ inventory `plugin list` does, and restores a file you broke. Open settings with
 
 ## Traps
 
-Nine mistakes that are invisible until runtime. Each cost real time in the
+Ten mistakes that are invisible until runtime. Each cost real time in the
 changes that built the bundled panes.
 
 **Reading `state` or `store` hands back a copy.** Mutating it changes nothing —
@@ -106,6 +106,13 @@ symptom is never an error: it is a filter that keeps everything, a count that is
 or a row reported missing that the screen plainly shows. This has cost real time twice,
 once in a bundled pane and once in a plugin written against it. If a table can have a
 hole, iterate its indices (`for i = 1, n`) or do not leave one.
+
+**Declaring one of the kernel's five chords is refused.** `ctrl+q`, `ctrl+h`,
+`ctrl+l`, `f10` and `f12` (`kernel::registry::RESERVED`) are dispatched before the
+registry is consulted, so a plugin claiming one used to load, appear in `F1`, and
+never fire — a no-op with no symptom for whoever wrote it. The declaration is now
+rejected where it is read, naming the file and the chord, so the failure is one
+`plugin check` away instead of a key you keep pressing.
 
 **A pane in a `switch` slot needs one key that goes both ways.** `command("focus",
 { text = "<your pane>", toggle = true })` focuses it, and focuses whatever you came
@@ -200,7 +207,7 @@ that throws costs its own pane and nothing else.
 | `command(kind, opts)` | The only way to change anything. Enqueues and returns |
 | `state` | Private to your plugin. Survives a reload; **not** a restart |
 | `store` | Shared by every plugin — the bus between them. Same lifetime as `state` |
-| `files.list/read` | Directory entries and file text, rooted at a session's directory |
+| `files.list/read` | Directory entries and file text, rooted at a **local** session's directory; a remote session has no root and both calls raise `no directory for session <id>` |
 | `thurbox.settings` | The settings in force: every `[features]` switch, plus the panel breakpoints and scrollback. Read your own switch and decline to draw when it is off — the kernel gates only what it owns |
 | `thurbox.bookmarks/browse/branches` | The creation flow's reads: remembered repositories, a directory listing, a base-branch list — each served only while `store.want_bookmarks`/`want_browse`/`want_branches` asks for it |
 | `require` | Loads **any** `.lua` under the interface directory, and nothing outside it |
@@ -546,6 +553,14 @@ You receive another plugin's rendered tree and return a modified one, matching
 on the `id`/`class`/`role` nodes carry. This is how search highlights matches
 inside panes it does not own. A decorator that throws costs its decoration, not
 the pane.
+
+The tree you receive is the node table as the kernel converts it back, and one
+field is not the shape you wrote: a `frame.title` arrives as a **list of
+`{ text = , style = }` runs**, never a plain string, even for a pane that gave it
+a bare one. Flattening it here would hand you one string for a title that is two
+facts with two styles — the agent pane's is a session's name and its status — so
+an identity decorator would repaint the whole title in one colour. Iterate the
+runs; do not index the title as text.
 
 ## Turning a plugin off
 
@@ -923,7 +938,13 @@ reading:
 
 The third missing surface, the file viewer, has no pane — by nobody having written
 one rather than by anything withheld: `files.list/read` is published, rooted at a
-session's directory.
+session's directory. **A remote session has no root at all**, and both calls raise
+`no directory for session <id>` for one. Not an omission: `files` reads the local
+disk, and since every host's default `worktrees_dir` is the same
+`$HOME/.local/share/thurbox/worktrees`, resolving a remote cwd locally did not fail
+— it handed back another machine's file under the right-looking path. A pane that
+wants remote files has to ask for them the way `kernel::diff` does, on that
+session's own host.
 
 ## Managing panes
 

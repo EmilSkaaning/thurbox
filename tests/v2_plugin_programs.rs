@@ -12,33 +12,16 @@
 //! that is absent until you read the error, and a pane resolved to the wrong owner
 //! looks like nothing at all until two plugins both want `watch`.
 
-use thurbox::kernel::host::{Capability, LuaHost, RenderContext};
+use thurbox::kernel::host::{Capability, LuaHost};
 use thurbox::kernel::terminal::{ProgramKey, Terminals};
 
-/// Build an interface out of `plugins`, each `(file name, source)`.
-fn interface(plugins: &[(&str, &str)]) -> (tempfile::TempDir, std::path::PathBuf) {
-    let home = tempfile::tempdir().expect("tempdir");
-    let ui = home.path().join("ui");
-    thurbox::kernel::bundled::materialize(&ui);
-    for (name, source) in plugins {
-        std::fs::write(ui.join("plugins").join(name), source).expect("write");
-    }
-    (home, ui)
-}
+mod common;
+
+use common::{ctx, index_of, interface, publish};
 
 fn render(host: &LuaHost, name: &str) -> thurbox::kernel::host::Rendered {
-    let index = host.index_of(name).unwrap_or_else(|| panic!("no {name}"));
-    host.render(
-        index,
-        RenderContext {
-            width: 40,
-            height: 10,
-            focused: true,
-            elapsed: 0.0,
-            frame: 0,
-        },
-    )
-    .expect("render")
+    host.render(index_of(host, name), ctx(40, 10, true))
+        .expect("render")
 }
 
 /// A pane that asks for a program and draws its surface.
@@ -144,16 +127,7 @@ fn a_pane_name_that_could_not_be_a_window_is_a_load_error_not_a_missing_pane() {
     let host = LuaHost::new(&ui);
     let index = host.index_of("bad").expect("the plugin itself loads");
     let error = host
-        .render(
-            index,
-            RenderContext {
-                width: 40,
-                height: 10,
-                focused: true,
-                elapsed: 0.0,
-                frame: 0,
-            },
-        )
+        .render(index, ctx(40, 10, true))
         .expect_err("the tree must not convert");
     let text = format!("{error:?}");
     assert!(text.contains("program"), "{text}");
@@ -252,17 +226,19 @@ fn a_program_surface_is_never_resolved_to_a_session() {
 
 // ── not a session ──────────────────────────────────────────────────────────
 
-/// Nothing that enumerates sessions can see a plugin's pane.
+/// No session-facing read claims a program id as one of its own.
 ///
-/// It holds because a pane is never a database row — but it is asserted, because
-/// the machinery underneath is shared with sessions and a leak would be a session
-/// the user cannot delete, restart or explain.
+/// Every answer here is negative with nothing running, which is exactly what is
+/// being pinned: program panes and sessions share one id space and one
+/// `Terminals`, so what must hold is that a program surface id is never
+/// *mistaken* for a session id by any of these reads. Whether a live pane leaks
+/// into the session set needs a real process and is checked by hand — see the
+/// module doc — so this is the half that is checkable without a multiplexer.
 #[test]
-fn a_program_pane_is_absent_from_every_session_enumeration() {
+fn no_session_facing_read_claims_a_program_id() {
     let terminals = Terminals::new();
     let key = ProgramKey::new("plugins/91_watch.lua", "watch");
 
-    // Not attached, not failed, has no shell, and contributes no output generation.
     assert!(!terminals.is_attached(&key.surface_id()));
     assert!(terminals.failure(&key.surface_id()).is_none());
     assert!(!terminals.has_shell(&key.surface_id()));
@@ -293,33 +269,7 @@ fn a_plugin_can_read_the_platform_it_is_running_on() {
     let host = LuaHost::new(&ui);
     assert!(host.error.is_none(), "{:?}", host.error);
 
-    let themes = thurbox::kernel::theme::Themes::load(None);
-    let diffs = thurbox::kernel::diff::DiffStore::new();
-    let repos = thurbox::kernel::repos::RepoStore::with_hosts(Default::default());
-    let snapshot = thurbox::kernel::snapshot::Snapshot::default();
-    let registry = thurbox::kernel::registry::Registry::default();
-    host.publish(&thurbox::kernel::host::Published {
-        snapshot: &snapshot,
-        attach_errors: &Default::default(),
-        inflight: &[],
-        themes: &themes,
-        registry: &registry,
-        diffs: &diffs,
-        links: &Default::default(),
-        content: &Default::default(),
-        meta: &Default::default(),
-        metrics: &Default::default(),
-        status_rows: 0,
-        can_open: true,
-        inventory: &[],
-        ui_dir: &ui.display().to_string(),
-        settings: &Default::default(),
-        repos: &repos,
-        wants: &Default::default(),
-        focus: Some("probe"),
-        hovered: None,
-    })
-    .expect("publish");
+    publish(&host, &thurbox::kernel::snapshot::Snapshot::default());
 
     let drawn = format!("{:?}", render(&host, "probe").node);
     // The values the binary was built for — asserted against the same constants, so

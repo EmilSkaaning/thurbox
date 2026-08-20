@@ -76,32 +76,6 @@ local function patch_spans(spans, style, keep_fg)
   return spans
 end
 
---- First `count` characters, cut on a character boundary.
-local function utf8_sub(text, count)
-  if count <= 0 then
-    return ""
-  end
-  local last = utf8.offset(text, count + 1)
-  if not last then
-    return text
-  end
-  return string.sub(text, 1, last - 1)
-end
-
---- v1's `truncate_ellipsis`: a lone `…` carries nothing, so a budget of 1 or
---- less yields the empty string rather than an ellipsis (widgets.truncate keeps
---- the `…`, which is right for a name and wrong here).
-local function truncate_ellipsis(text, max)
-  local count = widgets.len(text)
-  if count <= max then
-    return text
-  end
-  if max <= 1 then
-    return ""
-  end
-  return utf8_sub(text, max - 1) .. "…"
-end
-
 -- ── Border composition ─────────────────────────────────────────────────────
 --
 -- A border row is built as a cell buffer so segments can be *layered* the way
@@ -430,15 +404,6 @@ local function header_line(label, inner_width)
   return { { text = text, style = { fg = theme.muted } } }
 end
 
-local function status_glyph(status, elapsed)
-  local spec = theme.status(status)
-  if status == "working" then
-    local frame = math.floor((elapsed or 0) * 8) % #theme.spinner + 1
-    return theme.spinner[frame], spec.color
-  end
-  return spec.glyph, spec.color
-end
-
 --- The status text that follows the name. v1 shows the agent's notification (or
 --- the word "Blocked") for a blocked row, and the OSC activity title otherwise;
 --- a row with neither carries no text, because the coloured dot already says
@@ -482,7 +447,7 @@ local function push_status(spans, text, style, inner_width)
   local avail = math.max(0, inner_width - used)
   if avail >= MIN_WIDTH then
     spans[#spans + 1] = { text = SEPARATOR }
-    spans[#spans + 1] = { text = truncate_ellipsis(text, avail), style = style }
+    spans[#spans + 1] = { text = widgets.truncate_hard(text, avail), style = style }
   end
 end
 
@@ -529,7 +494,7 @@ end
 
 local function session_line(item, inner_width, elapsed, is_selected, work)
   local session = item.session
-  local glyph, glyph_color = status_glyph(session.status, elapsed)
+  local glyph, glyph_color = widgets.status_glyph(session.status, elapsed)
   local status_style = { fg = glyph_color }
   -- A blocked row's text is an attention message, so it keeps the dot's colour;
   -- plain activity is muted, leaving the name the row's visual anchor. v1 draws
@@ -649,8 +614,7 @@ local function pending_line(command, inner_width, elapsed)
     glyph, glyph_style = "✗", { fg = theme.role("status_error") }
   else
     -- A spinner only while something is actually running.
-    local frame = math.floor((elapsed or 0) * 8) % #theme.spinner + 1
-    glyph, glyph_style = theme.spinner[frame], { fg = theme.warn }
+    glyph, glyph_style = widgets.spinner_frame(elapsed), { fg = theme.warn }
   end
 
   local label = command.subject or "new session"
@@ -988,6 +952,18 @@ local function move_block(items, at, down)
   return moved
 end
 
+--- The name a block sorts under, or nil for a block that has no session yet.
+---
+--- A placeholder carries `kind = "pending"` and no `session` (see `build_model`),
+--- so reading `.name` through it errored — `table.sort` raised, `draw` cleared
+--- the PluginError next frame, and the observable behaviour was Shift+S doing
+--- nothing at all with no message. The same class of bug is recorded against
+--- `depth` in `build_model`.
+local function sort_key(block)
+  local session = block[1].session
+  return session and (session.name or ""):lower() or nil
+end
+
 --- Sort by name **within each repo group**, preserving group order and the
 --- parent/child nesting: roots sort among themselves, each parent's children
 --- among theirs. v1's `sort_alphabetically_within_groups`.
@@ -1014,8 +990,18 @@ local function sorted_within_groups(items)
       block.position = position
     end
     table.sort(blocks, function(a, b)
-      local left = (a[1].session.name or ""):lower()
-      local right = (b[1].session.name or ""):lower()
+      local left, right = sort_key(a), sort_key(b)
+      -- Placeholders keep the end of the group, where the row they will become
+      -- is already drawn, and stay in their own order among themselves.
+      if not (left and right) then
+        if left then
+          return true
+        end
+        if right then
+          return false
+        end
+        return a.position < b.position
+      end
       if left == right then
         return a.position < b.position
       end
@@ -1231,7 +1217,7 @@ return {
     local dots = {}
     for _, item in ipairs(items) do
       if item.kind == "session" then
-        local glyph, color = status_glyph(item.session.status, ctx.elapsed)
+        local glyph, color = widgets.status_glyph(item.session.status, ctx.elapsed)
         dots[#dots + 1] = { text = glyph, style = { fg = color } }
       end
     end

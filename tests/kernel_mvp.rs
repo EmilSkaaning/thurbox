@@ -24,99 +24,21 @@ use thurbox::kernel::layout::{divide_slot, resolve, SlotMode};
 use thurbox::kernel::node::{Axis, Node, KINDS};
 use thurbox::kernel::paint::{render, PlaceholderSurfaces};
 use thurbox::kernel::registry::Registry;
-use thurbox::kernel::snapshot::{SessionRow, Snapshot};
-use thurbox::kernel::theme::Themes;
+use thurbox::kernel::snapshot::{SessionRow, Snapshot, SnapshotStore};
+use thurbox::storage::Database;
 
-/// The theme every test publishes with: whatever the environment resolves,
-/// which keeps these tests independent of the user's active choice.
-fn themes() -> Themes {
-    Themes::load(None)
-}
+mod common;
 
-/// Publish a snapshot with the defaults every test wants.
-fn publish(host: &LuaHost, snapshot: &Snapshot) {
-    publish_with(host, snapshot, &Default::default(), &[]);
-}
-
-/// Publish with attach errors and in-flight commands spelled out.
-fn publish_with(
-    host: &LuaHost,
-    snapshot: &Snapshot,
-    attach_errors: &std::collections::HashMap<String, String>,
-    inflight: &[thurbox::kernel::command::InFlight],
-) {
-    let themes = themes();
-    let registry = registry(host);
-    let diffs = thurbox::kernel::diff::DiffStore::new();
-    let repos = thurbox::kernel::repos::RepoStore::with_hosts(Default::default());
-    host.publish(&thurbox::kernel::host::Published {
-        snapshot,
-        attach_errors,
-        inflight,
-        themes: &themes,
-        registry: &registry,
-        diffs: &diffs,
-        links: &Default::default(),
-        content: &Default::default(),
-        meta: &Default::default(),
-        metrics: &Default::default(),
-        status_rows: 0,
-        can_open: true,
-        inventory: &[],
-        ui_dir: "ui",
-        settings: &Default::default(),
-        repos: &repos,
-        wants: &Default::default(),
-        focus: None,
-        hovered: None,
-    })
-    .expect("publish");
-}
-
-/// A registry holding whatever the given host's plugins declared.
-fn registry(host: &LuaHost) -> Registry {
-    let mut registry = Registry::default();
-    let (bindings, settings) = host.declarations();
-    registry.declare(bindings, settings);
-    registry
-}
-
-fn ui_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui")
-}
-
-fn host() -> LuaHost {
-    let host = LuaHost::new(ui_dir());
-    assert!(
-        host.error.is_none(),
-        "the bundled plugins must load: {:?}",
-        host.error
-    );
-    host
-}
+use common::{ctx, host, index_of, publish, publish_with, registry, themes, ui_dir};
 
 fn row(name: &str, repo: &str, status: &str) -> SessionRow {
     SessionRow {
-        id: format!("{name}-0000-0000-0000-000000000000"),
-        name: name.to_string(),
-        agent: "claude".to_string(),
         status: status.to_string(),
-        cwd: None,
         repo: Some(repo.to_string()),
         repos: vec![repo.to_string()],
         branch: Some(format!("feat/{name}")),
-        base_branch: None,
-        backend: "local-tmux".to_string(),
-        backend_id: Some("%1".to_string()),
-        agent_session_id: None,
-        remote_host: None,
-        parent_id: None,
-        display_order: None,
         worktree_count: 1,
-        git: None,
-        hook_state: None,
-        shell_backend_id: None,
-        member_dirs: Vec::new(),
+        ..common::session_row(&format!("{name}-0000-0000-0000-000000000000"), name)
     }
 }
 
@@ -135,16 +57,6 @@ fn sample() -> Snapshot {
         row("perf-cache", "thurbox", "done"),
         row("update-deps", "website", "idle"),
     ])
-}
-
-fn ctx(width: u16, height: u16, focused: bool) -> RenderContext {
-    RenderContext {
-        width,
-        height,
-        focused,
-        elapsed: 1.0,
-        frame: 1,
-    }
 }
 
 /// Render one plugin into a rect and return the painted screen as text.
@@ -205,13 +117,6 @@ fn paint_node(node: &Node, width: u16, height: u16) -> Vec<String> {
                 .to_string()
         })
         .collect()
-}
-
-fn index_of(host: &LuaHost, name: &str) -> usize {
-    host.plugins
-        .iter()
-        .position(|plugin| plugin.name == name)
-        .unwrap_or_else(|| panic!("no plugin named {name}"))
 }
 
 #[test]
@@ -507,14 +412,41 @@ fn an_unclaimed_key_is_left_for_the_kernel() {
 
 #[test]
 fn plugin_reads_are_served_from_the_snapshot() {
-    // design.md D5: reads never consult the database, so they cannot block.
-    // Rendering a thousand times touches nothing but the published table.
+    // design.md D5: reads come from the published snapshot, so a plugin cannot
+    // block on SQLite. Asserted by publishing a session that exists in NO
+    // database and watching the pane draw it, then again with the rows an
+    // actual store read — which is empty.
+    //
+    // The previous form rendered a thousand times against a host that owned no
+    // database at all, and asserted nothing: it held whatever the kernel did.
+    let db = Database::open_in_memory().expect("db");
+    let mut store = SnapshotStore::with_database(db);
+    store.refresh();
+    assert!(
+        store.current().sessions.is_empty(),
+        "the fixture database must hold no sessions for this to prove anything"
+    );
+
     let host = host();
-    publish(&host, &sample());
     let index = index_of(&host, "sessions");
-    for _ in 0..1000 {
-        host.render(index, ctx(40, 12, false)).expect("render");
-    }
+
+    publish(&host, store.current());
+    let empty = paint(&host, index, 46, 12).join("\n");
+    assert!(!empty.contains("snap-only"), "{empty}");
+
+    publish(
+        &host,
+        &snapshot(vec![row("snap-only", "thurbox", "working")]),
+    );
+    let drawn = paint(&host, index, 46, 12).join("\n");
+    assert!(
+        drawn.contains("snap-only"),
+        "the pane drew rows the database has never held: {drawn}"
+    );
+
+    // And rendering was not a path back to the database: the store still reads
+    // empty, so nothing the pane did issued a query.
+    assert!(store.current().sessions.is_empty());
 }
 
 #[test]

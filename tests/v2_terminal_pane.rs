@@ -11,47 +11,27 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::Terminal;
 
-use thurbox::kernel::host::{KeyPress, LuaHost, Published, RenderContext};
+use thurbox::kernel::host::{KeyPress, LuaHost};
 use thurbox::kernel::node::{ClickVerb, Node};
 use thurbox::kernel::paint::{render, render_recording, Hit, PlaceholderSurfaces};
-use thurbox::kernel::registry::Registry;
 use thurbox::kernel::snapshot::{SessionRow, Snapshot};
-use thurbox::kernel::theme::Themes;
+
+mod common;
+
+use common::{host, index_of, publish, registry};
 
 /// The plugin under test. It keeps its `agent` name: the name is what
 /// `command("focus", …)`, the footer's focus label and the tests below spell,
 /// and renaming it is a separate edit from merging the views.
 const TERMINAL: &str = "agent";
 
-fn host() -> LuaHost {
-    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui");
-    let host = LuaHost::new(dir);
-    assert!(host.error.is_none(), "{:?}", host.error);
-    host
-}
-
+/// A session with a worktree, so its title carries the branch bracket v1 draws
+/// there — the rest is the shared fixture.
 fn row(name: &str) -> SessionRow {
     SessionRow {
-        id: format!("{name}-0000-0000-0000-000000000000"),
-        name: name.into(),
-        agent: "claude".into(),
-        status: "idle".into(),
-        cwd: None,
-        repo: Some("thurbox".into()),
-        repos: vec!["thurbox".into()],
         branch: Some(format!("feat/{name}")),
-        base_branch: None,
-        backend: "local-tmux".into(),
-        backend_id: Some("%1".into()),
-        remote_host: None,
-        agent_session_id: None,
-        parent_id: None,
-        display_order: None,
         worktree_count: 1,
-        git: None,
-        hook_state: None,
-        shell_backend_id: None,
-        member_dirs: Vec::new(),
+        ..common::session_row(&format!("{name}-0000-0000-0000-000000000000"), name)
     }
 }
 
@@ -62,64 +42,18 @@ fn sample() -> Snapshot {
     }
 }
 
-fn registry(host: &LuaHost) -> Registry {
-    let mut registry = Registry::default();
-    let (bindings, settings) = host.declarations();
-    registry.declare(bindings, settings);
-    registry
-}
-
-fn publish(host: &LuaHost) {
-    let themes = Themes::load(None);
-    let registry = registry(host);
-    let diffs = thurbox::kernel::diff::DiffStore::new();
-    let repos = thurbox::kernel::repos::RepoStore::with_hosts(Default::default());
-    host.publish(&Published {
-        snapshot: &sample(),
-        attach_errors: &Default::default(),
-        inflight: &[],
-        themes: &themes,
-        registry: &registry,
-        diffs: &diffs,
-        links: &Default::default(),
-        content: &Default::default(),
-        meta: &Default::default(),
-        metrics: &Default::default(),
-        status_rows: 0,
-        can_open: true,
-        inventory: &[],
-        ui_dir: "ui",
-        settings: &Default::default(),
-        repos: &repos,
-        wants: &Default::default(),
-        focus: None,
-        hovered: None,
-    })
-    .expect("publish");
-}
-
-fn ctx(width: u16, height: u16) -> RenderContext {
-    RenderContext {
-        width,
-        height,
-        focused: true,
-        elapsed: 0.0,
-        frame: 0,
-    }
-}
-
-fn index_of(host: &LuaHost, name: &str) -> usize {
-    host.plugins
-        .iter()
-        .position(|plugin| plugin.name == name)
-        .unwrap_or_else(|| panic!("no plugin named {name}"))
+/// This pane is only ever rendered focused here: the border style, the title
+/// badge and the tab chips all differ unfocused, and every assertion below is
+/// about the focused frame.
+fn ctx(width: u16, height: u16) -> thurbox::kernel::host::RenderContext {
+    common::ctx(width, height, true)
 }
 
 /// Publish, then let the session list choose a session — the terminal reads its
 /// choice out of `store`, exactly as it does in the binary.
 fn with_a_selection() -> LuaHost {
     let host = host();
-    publish(&host);
+    publish(&host, &sample());
     host.render(index_of(&host, "sessions"), ctx(40, 12))
         .expect("render the list");
     host
@@ -165,6 +99,25 @@ fn column_of(line: &str, needle: &str) -> u16 {
         .find(needle)
         .unwrap_or_else(|| panic!("{needle} is not on the border: {line}"));
     u16::try_from(line[..at].chars().count()).expect("a column")
+}
+
+/// A page key, which the pane answers rather than the registry: paging is this
+/// pane's own policy, so it is declared nowhere and reaches `on_key` raw.
+fn page(name: &str) -> KeyPress {
+    KeyPress {
+        name: name.into(),
+        ..KeyPress::default()
+    }
+}
+
+/// The right border column between the corners. The scrollbar is overlaid there
+/// rather than inset, so it costs the terminal grid no columns — and so a bar
+/// that should not be drawn shows up as a border cell that is not a border.
+fn right_border(painted: &[String]) -> String {
+    painted[1..painted.len() - 1]
+        .iter()
+        .map(|row| row.chars().last().expect("a row reaches its own border"))
+        .collect()
 }
 
 fn session_surface(node: &Node) -> String {
@@ -407,20 +360,59 @@ fn paging_is_the_agent_views_and_the_ptys_everywhere_else() {
     // page key is declined and reaches whatever is running in it instead.
     let host = with_a_selection();
     let index = index_of(&host, TERMINAL);
-    let page = KeyPress {
-        name: "pageup".into(),
-        ..KeyPress::default()
-    };
-    assert!(host.on_key(index, &page).expect("key"), "the agent scrolls");
+    assert!(
+        host.on_key(index, &page("pageup")).expect("key"),
+        "the agent scrolls"
+    );
 
     host.on_action(index, "terminal.shell").expect("select");
     assert!(
-        !host.on_key(index, &page).expect("key"),
+        !host.on_key(index, &page("pageup")).expect("key"),
         "the shell leaves it to the pty"
     );
     // And the title says nothing about a scroll the shell surface cannot honour.
     let line = painted(&tree(&host, 100, 10), 100, 10)[0].clone();
     assert!(!line.contains('↑'), "{line}");
+}
+
+#[test]
+fn paging_back_down_retires_the_scrollbar() {
+    // `pageup` counts past the real scrollback — there is no total to clamp an
+    // offset against — so the depth the bar is scaled against is a high-water
+    // mark. Kept once set, it outlived the scroll it measured: back at the live
+    // screen the bar was still drawn over a screen with nothing above it, thumb
+    // parked at the end of the track. Nothing in the tree says so — the body is
+    // the same `surface` node either way, and the bar is a border column — so
+    // this is asserted in the paint.
+    const W: u16 = 100;
+    const H: u16 = 12;
+    let host = with_a_selection();
+    let index = index_of(&host, TERMINAL);
+
+    assert!(host.on_key(index, &page("pageup")).expect("key"));
+    let scrolled = painted(&tree(&host, W, H), W, H);
+    assert!(
+        scrolled[0].contains("[10↑]"),
+        "the title counts the offset: {}",
+        scrolled[0]
+    );
+    assert!(
+        right_border(&scrolled).contains('█'),
+        "there has to be a bar for retiring it to mean anything: {:?}",
+        right_border(&scrolled)
+    );
+
+    assert!(host.on_key(index, &page("pagedown")).expect("key"));
+    let live = painted(&tree(&host, W, H), W, H);
+    // The `↑` marker is keyed on the offset, not on the mark, so it clears
+    // either way; it is asserted as the companion fact — with the offset back at
+    // zero, nothing on the frame claims a scroll.
+    assert!(!live[0].contains('↑'), "{}", live[0]);
+    let column = right_border(&live);
+    assert!(
+        column.chars().all(|cell| cell == '│'),
+        "at the live screen the border is a border again: {column:?}"
+    );
 }
 
 // ── the chips are click targets ───────────────────────────────────────────

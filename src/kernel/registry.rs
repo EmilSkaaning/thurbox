@@ -643,7 +643,16 @@ pub fn canonical_chord(press: &KeyPress) -> String {
         }
     }
     if key == "backtab" {
+        // Last, and not folded into the loop above: crossterm reports shift+Tab
+        // as its own code, so the shift is in the KEY rather than the modifiers,
+        // and `normalise_chord` spells the result "shift+tab". A cmd+shift+Tab
+        // would be unspellable either way — no terminal delivers it.
         return "shift+tab".to_string();
+    }
+    // Last in the fixed order `normalise_chord` uses, so a chord canonicalises
+    // to one string whichever end it came from.
+    if press.cmd {
+        parts.push("cmd".to_string());
     }
     parts.push(key);
     parts.join("+")
@@ -1003,6 +1012,7 @@ mod tests {
             ctrl,
             alt: false,
             shift,
+            cmd: false,
         }
     }
 

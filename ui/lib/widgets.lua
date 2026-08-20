@@ -120,6 +120,54 @@ function widgets.middle_truncate(text, width)
     .. string.sub(text, offset(text, len - tail) + 1)
 end
 
+--- The FIRST `count` characters, clipped with no marker.
+---
+--- What a left-aligned border title does when it overruns its area: ratatui
+--- truncates the far side and adds nothing. Lives here rather than in the pane
+--- that needed it first, because two panes had a copy each under two names.
+function widgets.keep_left(text, count)
+  if count <= 0 then
+    return ""
+  end
+  if widgets.len(text) <= count then
+    return text
+  end
+  return string.sub(text, 1, offset(text, count))
+end
+
+--- The LAST `count` characters.
+---
+--- What a right-aligned border title does when it overruns: ratatui's
+--- `Line::render_with_alignment` skips from the left, so the title shrinks
+--- toward the right edge. v1's recorded frame shows exactly this — a 42-char
+--- title in a 40-wide pane renders as `╭-osc52 (claude) …`.
+function widgets.keep_right(text, count)
+  if count <= 0 then
+    return ""
+  end
+  local len = widgets.len(text)
+  if len <= count then
+    return text
+  end
+  return string.sub(text, offset(text, len - count) + 1)
+end
+
+--- v1's `ui::truncate_ellipsis`: `width - 1` characters plus `…`, and NOTHING at
+--- `width <= 1` because a lone ellipsis carries no information.
+---
+--- Deliberately not `widgets.truncate`, which returns `"…"` at width 1 — right
+--- for a name that must still show it was cut, wrong for a column that would
+--- rather spend the cell on the next field.
+function widgets.truncate_hard(text, width)
+  if widgets.len(text) <= width then
+    return text
+  end
+  if width <= 1 then
+    return ""
+  end
+  return widgets.keep_left(text, width - 1) .. "…"
+end
+
 --- Pad `text` out to `width` characters.
 function widgets.pad(text, width)
   local short = width - widgets.len(text)
@@ -214,8 +262,13 @@ function widgets.list(opts)
     }
   end
 
-  -- Overflow markers, so a windowed list never silently hides rows.
-  if more_above then
+  -- Overflow markers, so a windowed list never silently hides rows — but never
+  -- over the selection. `window` centres, so a one- or two-row window around a
+  -- middle selection has both flags set and no spare row: replacing the ends
+  -- then hid the very row the user is on (at height 1, twice). Reachable in the
+  -- shipped interface — an 11-row terminal leaves the search strip's list two
+  -- rows. A marker still appears wherever there is a row to spare.
+  if more_above and first ~= selected then
     children[1] = {
       type = "text",
       len = 1,
@@ -223,7 +276,7 @@ function widgets.list(opts)
       role = "overflow",
     }
   end
-  if more_below then
+  if more_below and last ~= selected then
     children[#children] = {
       type = "text",
       len = 1,
@@ -273,15 +326,29 @@ function widgets.hints(pairs_list)
   return { type = "text", len = 1, text = { spans } }
 end
 
---- The animated glyph for a session status.
+--- Which frame of the braille spinner this paint shows.
+---
+--- Eight frames a second off `elapsed`, which is the only monotonic reading a
+--- plugin gets (`ctx.elapsed`; the stdlib ships no `os`). One definition,
+--- because the expression was written out four times across three panes and two
+--- waits animating at different rates read as two different kinds of wait.
+function widgets.spinner_frame(elapsed)
+  local frame = math.floor((elapsed or 0) * 8) % #theme.spinner + 1
+  return theme.spinner[frame]
+end
+
+--- The animated glyph for a session status, and the colour to draw it in.
+---
+--- Returns the two values rather than a span: both call sites wrap the glyph
+--- themselves — one into a padded cell of a row, one into a panel-border dot —
+--- and a ready-made span was the reason this had no callers while every pane
+--- kept its own copy.
 function widgets.status_glyph(status, elapsed)
   local spec = theme.status(status)
-  local glyph = spec.glyph
   if status == "working" then
-    local frame = math.floor((elapsed or 0) * 8) % #theme.spinner + 1
-    glyph = theme.spinner[frame]
+    return widgets.spinner_frame(elapsed), spec.color
   end
-  return { text = glyph, style = { fg = spec.color } }
+  return spec.glyph, spec.color
 end
 
 --- Epoch milliseconds the frame is being drawn for.

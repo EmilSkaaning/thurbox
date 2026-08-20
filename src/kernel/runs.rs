@@ -174,6 +174,11 @@ pub struct RunStore {
     queued: VecDeque<(String, Ask)>,
     running: usize,
     channel: Option<(Sender<Finished>, Receiver<Finished>)>,
+    /// The plugins the interface has, as of the last [`Self::retain_plugins`].
+    ///
+    /// `None` before the first reload, which means "everything is live" — the
+    /// bundled interface asks for runs before anything has ever been pruned.
+    live: Option<std::collections::HashSet<String>>,
 }
 
 impl RunStore {
@@ -255,13 +260,26 @@ impl RunStore {
     /// anything arrived, so the caller can repaint.
     pub fn poll(&mut self, runner: &std::sync::Arc<Runner>) -> bool {
         let mut changed = false;
+        // A finished run always frees its slot, even when its answer is dropped
+        // below — so the queue is drained on that, not on whether anything was
+        // stored.
+        let mut freed = false;
         let finished: Vec<Finished> = match &self.channel {
             Some((_, rx)) => rx.try_iter().collect(),
             None => Vec::new(),
         };
         for done in finished {
             self.running = self.running.saturating_sub(1);
+            freed = true;
             let id = (done.plugin, done.key);
+            // An ask that outlived the reload it was made during belongs to a
+            // plugin that is gone. Inserting its answer puts back the key
+            // `retain_plugins` just dropped, which nothing reads and nothing
+            // evicts — and `is_empty` then keeps the whole `serve_runs` path warm
+            // until the next reload.
+            if self.live.as_ref().is_some_and(|live| !live.contains(&id.0)) {
+                continue;
+            }
             let ttl = self.answers.get(&id).map(|a| a.ttl).unwrap_or(DEFAULT_TTL);
             self.answers.insert(
                 id,
@@ -274,7 +292,7 @@ impl RunStore {
             );
             changed = true;
         }
-        if changed {
+        if freed {
             self.drain_queue(runner);
         }
         changed
@@ -311,6 +329,9 @@ impl RunStore {
     pub fn retain_plugins(&mut self, live: &[String]) {
         self.answers.retain(|(plugin, _), _| live.contains(plugin));
         self.queued.retain(|(plugin, _)| live.contains(plugin));
+        // Kept so `poll` can drop an answer that is still on its way — a run
+        // started before the reload finishes after it.
+        self.live = Some(live.iter().cloned().collect());
     }
 }
 
@@ -465,16 +486,11 @@ pub fn command_for(
             command.arg(program).current_dir(cwd);
             command
         }
-        Some(host) => {
-            // The directory is on the host, so `cd` is part of the script rather
-            // than a `current_dir` on this machine. Quoted, because a worktree
-            // path can contain anything a filesystem allows.
-            let script = format!(
-                "cd {} && {program}",
-                crate::shell::posix_quote(&cwd.to_string_lossy())
-            );
-            crate::git::host_shell_c(host, &script)
-        }
+        // The directory is on the host, so the `cd` belongs in the script rather
+        // than in a `current_dir` on this machine — `host_shell_c_in` owns that,
+        // and the quoting a worktree path needs, so this module does not reach
+        // into `shell` for it.
+        Some(host) => crate::git::host_shell_c_in(host, cwd, program),
     }
 }
 
@@ -526,6 +542,45 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("runs never settled");
+    }
+
+    /// The in-flight ask that crosses an `F10` reload.
+    ///
+    /// Its answer arrives after `retain_plugins` has dropped the plugin, and
+    /// writing it back resurrects a key nothing reads and nothing evicts —
+    /// leaving `is_empty` false, which keeps the loop serving runs for an
+    /// interface that asks for none.
+    #[test]
+    fn an_answer_for_a_plugin_that_is_gone_is_dropped() {
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let held = std::sync::Mutex::new(held);
+        let runner: Arc<Runner> = Arc::new(move |_ask: &Ask| {
+            let _ = held.lock().expect("gate").recv();
+            Run::Done(Output {
+                stdout: "ok\n".into(),
+                stderr: String::new(),
+                status: Some(0),
+                truncated: false,
+                timed_out: false,
+            })
+        });
+
+        let mut store = RunStore::new();
+        store.request("gone", ask("k"), &runner);
+        store.retain_plugins(&["kept".to_string()]);
+        assert!(store.is_empty(), "the reload dropped the pending entry");
+
+        // Only now does the run it started finish.
+        release.send(()).expect("release the run");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && store.running > 0 {
+            store.poll(&runner);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert_eq!(store.running, 0, "the slot was freed anyway");
+        assert!(store.is_empty(), "and the answer was not written back");
+        assert!(store.get("gone", "k").is_none());
     }
 
     #[test]

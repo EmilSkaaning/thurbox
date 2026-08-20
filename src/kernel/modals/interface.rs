@@ -31,7 +31,7 @@ use ratatui::Frame;
 
 use super::chrome::{self, Chrome, Hits};
 use crate::kernel::bundled::Source;
-use crate::kernel::inventory::{Row, State as FileState, Trust as FileTrust};
+use crate::kernel::inventory::{Kind, Row, State as FileState, Trust as FileTrust};
 
 /// The interface's files and where they live, as one argument.
 ///
@@ -284,6 +284,19 @@ impl InterfaceTab {
         let Some(row) = self.current(inventory) else {
             return (None, None);
         };
+        if row.kind == Kind::Spec {
+            // Deleting the spec would orphan every pane it installed, and the
+            // command that takes one back already exists. Said instead of armed,
+            // because a confirmation the delivery gate then refuses is worse than
+            // no offer at all.
+            return (
+                Some(format!(
+                    "{} composes the interface; `thurbox-cli plugin remove` takes a pane back",
+                    row.path
+                )),
+                None,
+            );
+        }
         let path = row.path.clone();
         if self.armed.as_deref() != Some(path.as_str()) {
             self.armed = Some(path);
@@ -478,7 +491,6 @@ impl InterfaceTab {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::inventory::Kind;
 
     fn row(path: &str, source: Source, state: FileState) -> Row {
         Row {
@@ -700,6 +712,60 @@ mod tests {
             .collect();
         assert!(theirs.contains("restorable"), "{theirs}");
         assert_ne!(mine, theirs, "the two must not be worded alike");
+    }
+
+    /// `d` on the spec says why not, rather than arming a removal that the
+    /// delivery gate then refuses — the state this tab exists to end is a view
+    /// that offers an action it cannot perform.
+    #[test]
+    fn deleting_the_spec_is_refused_with_the_command_that_does_it() {
+        let mut spec = row(
+            crate::session::plugin_spec::SPEC_FILE,
+            Source::User,
+            FileState::Present,
+        );
+        spec.kind = Kind::Spec;
+        let mut tab = InterfaceTab::default();
+        let (message, edit) = tab.on_key(&press(KeyCode::Char('d')), &[spec], &Hits::default());
+        assert!(edit.is_none(), "nothing is asked of the loop");
+        assert!(tab.armed().is_none(), "and nothing is armed");
+        let message = message.unwrap_or_default();
+        assert!(message.contains("plugin remove"), "{message}");
+    }
+
+    /// A shipped doc is a file delivery wrote, tombstones and can put back, so
+    /// the tab's `d`/`r` have to reach it: refusing every non-`.lua` path left a
+    /// `README.md` deleted outside thurbox listed as `removed` and unrestorable
+    /// from the one view that lists it.
+    #[test]
+    fn a_shipped_doc_can_be_removed_and_restored_from_the_tab() {
+        let mut doc = row("AGENTS.md", Source::Bundled, FileState::Present);
+        doc.kind = Kind::Doc;
+        let mut tab = InterfaceTab::default();
+        let rows = [doc.clone()];
+        tab.on_key(&press(KeyCode::Char('d')), &rows, &Hits::default());
+        assert_eq!(tab.armed(), Some("AGENTS.md"), "the first `d` arms it");
+        let (_, edit) = tab.on_key(&press(KeyCode::Char('d')), &rows, &Hits::default());
+        assert_eq!(
+            edit,
+            Some(Edit::File {
+                file: "AGENTS.md".into(),
+                kind: crate::kernel::command::PluginEdit::Remove,
+            })
+        );
+
+        let mut gone = doc;
+        gone.source = Source::Removed;
+        gone.state = FileState::Removed;
+        let (message, edit) = tab.on_key(&press(KeyCode::Char('r')), &[gone], &Hits::default());
+        assert_eq!(
+            edit,
+            Some(Edit::File {
+                file: "AGENTS.md".into(),
+                kind: crate::kernel::command::PluginEdit::Restore,
+            }),
+            "{message:?}"
+        );
     }
 
     #[test]

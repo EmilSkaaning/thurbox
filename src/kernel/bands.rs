@@ -128,10 +128,9 @@ pub struct BandState<'a> {
 
 impl BandState<'_> {
     fn colour(&self, role: &str) -> Option<ratatui::style::Color> {
-        self.themes
-            .roles()
-            .get(role)
-            .and_then(|raw| super::node::parse_color(raw))
+        // `Themes::role`, not `roles()`: this is asked once per span, and the
+        // whole-palette accessor builds 31 `String`s each time it is called.
+        self.themes.role(role)
     }
 
     fn style(&self, role: &str) -> Style {

@@ -38,7 +38,7 @@ pub(crate) fn now_millis() -> u64 {
 ///
 /// Nothing is readable at two columns either, so clamping loses nothing a
 /// smaller grid would have shown.
-fn vt_floor(rows: u16, cols: u16) -> (u16, u16) {
+pub(crate) fn vt_floor(rows: u16, cols: u16) -> (u16, u16) {
     (rows.max(2), cols.max(2))
 }
 
@@ -621,13 +621,38 @@ pub struct Session {
     pub shell_pane: Option<ShellPane>,
     /// Session environment variables, passed to shell pane spawns.
     env: HashMap<String, String>,
-    /// True for a **placeholder** session: a persisted remote session whose host
-    /// is currently unreachable, so it has no live backend pane / reader / writer
-    /// (its `input_tx` is a dead channel and its `parser` holds a static "host
-    /// unreachable" notice). Rendered with `SessionStatus::Unreachable` and
-    /// replaced in place by the real adopted session once the host recovers. See
-    /// `App::start_remote_restore` / the remote retry loop.
-    placeholder: bool,
+}
+
+/// One session's panes, ready to be resized from another thread.
+///
+/// A remote session's resize is two control-mode round trips, each blocking on
+/// `COMMAND_TIMEOUT` (10 s). Issued where the size change is *noticed* — inside
+/// the paint — a connection that had gone away without the socket noticing froze
+/// the whole render loop until both timeouts ran out. Rule 5: anything that
+/// touches the world runs on a worker, so the render thread resizes the grids
+/// ([`Session::resize_grids`]) and hands this to one.
+pub struct PaneResize {
+    backend: Arc<dyn SessionBackend>,
+    /// The agent pane, then its companion shell when there is one. Both are told
+    /// the same size because they take turns in the same rect.
+    panes: Vec<String>,
+}
+
+impl PaneResize {
+    /// Push the size to every pane. **Blocking** — call it on a worker.
+    ///
+    /// Each pane is attempted even if an earlier one failed: they are separate
+    /// panes, and skipping the shell because the agent's round trip timed out
+    /// leaves it wrapping at a width nothing will correct until the next rect
+    /// change.
+    pub fn apply(&self, rows: u16, cols: u16) {
+        let (rows, cols) = vt_floor(rows, cols);
+        for pane in &self.panes {
+            if let Err(e) = self.backend.resize(pane, rows, cols) {
+                tracing::warn!("Failed to resize pane {pane}: {e}");
+            }
+        }
+    }
 }
 
 impl Session {
@@ -807,85 +832,7 @@ impl Session {
             attention_ack_at: 0,
             shell_pane: None,
             env,
-            placeholder: false,
         }
-    }
-
-    /// Build a **placeholder** session for a persisted remote session whose host
-    /// is currently unreachable. It carries no live backend pane: the reader /
-    /// writer loops are never spawned, `input_tx` is a dead channel (keystrokes
-    /// are silently dropped), and the `parser` is seeded with a static notice.
-    /// The row renders like any other (grouping/ordering/nesting all key off
-    /// `info`) but shows `SessionStatus::Unreachable` until the host recovers and
-    /// [`Self::adopt`] replaces it in place. `info.status` is forced to
-    /// `Unreachable` here regardless of the caller's value.
-    pub fn placeholder(
-        mut info: SessionInfo,
-        rows: u16,
-        cols: u16,
-        backend: &Arc<dyn SessionBackend>,
-        provider: &Arc<dyn AgentProvider>,
-        env: HashMap<String, String>,
-    ) -> Self {
-        info.status = crate::session::SessionStatus::Unreachable;
-        info.backend_id = None;
-
-        let last_title = Arc::new(Mutex::new(None));
-        let attention_at = Arc::new(AtomicU64::new(0));
-        let notification = Arc::new(Mutex::new(None));
-        let meta_gen = Arc::new(AtomicU64::new(0));
-        let (rows, cols) = vt_floor(rows, cols);
-        let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
-            rows,
-            cols,
-            crate::session::settings::global().scrollback_lines,
-            TermSignals {
-                title: Arc::clone(&last_title),
-                attention_at: Arc::clone(&attention_at),
-                notification: Arc::clone(&notification),
-                meta_gen: Arc::clone(&meta_gen),
-                ..Default::default()
-            },
-        )));
-        let host = info.remote_host.clone().unwrap_or_else(|| "?".into());
-        let notice = format!(
-            "\r\n  \u{2298} Remote host '{host}' unreachable \u{2014} retrying\u{2026}\r\n\r\n  \
-             This session will reconnect automatically when the host comes back.\r\n  \
-             Press restart to retry now, or delete to remove it.\r\n"
-        );
-        if let Ok(mut p) = parser.lock() {
-            p.process(notice.as_bytes());
-        }
-
-        // A dead input channel: the receiver is dropped immediately, so any
-        // keystroke `try_send` fails fast and the byte is discarded.
-        let (input_tx, _dead_rx) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
-
-        Self {
-            info,
-            parser,
-            input_tx,
-            backend_id: String::new(),
-            backend: Arc::clone(backend),
-            provider: Arc::clone(provider),
-            exited: Arc::new(AtomicBool::new(false)),
-            last_output_at: Arc::new(AtomicU64::new(0)),
-            last_title,
-            attention_at,
-            notification,
-            meta_gen,
-            last_synced_meta_gen: u64::MAX,
-            attention_ack_at: 0,
-            shell_pane: None,
-            env,
-            placeholder: true,
-        }
-    }
-
-    /// Whether this is a placeholder for an unreachable remote session (no live
-    /// backend pane). See [`Self::placeholder`].
-    pub fn is_placeholder(&self) -> bool {
-        self.placeholder
     }
 
     /// Blocking read loop feeding the vt100 parser. Runs on a
@@ -961,37 +908,39 @@ impl Session {
         send_to_input_channel(&self.input_tx, data, "Session")
     }
 
-    pub fn resize(&self, rows: u16, cols: u16) {
+    /// Match this session's vt100 grids to a new size.
+    ///
+    /// The half of a resize that touches nothing but this process's memory, and
+    /// so is safe where a rect change is noticed — inside the paint. The panes
+    /// the multiplexer owns are told separately, on a worker: see
+    /// [`Self::pane_resize`].
+    ///
+    /// The shell pane's grid moves with the agent's because the two take turns
+    /// in the same rect.
+    pub fn resize_grids(&self, rows: u16, cols: u16) {
         // A cramped layout (tiny terminal + open panels/strips) can compute a
         // one-cell content area, which vt100 cannot be fed without underflowing
-        // — see [`vt_floor`]. Floored at this boundary for every path below,
-        // including the pane the backend is told about, so the grid and the pane
-        // agree on a size they can both hold.
+        // — see [`vt_floor`]. Floored here and in [`PaneResize::apply`], so the
+        // grid and the pane agree on a size they can both hold.
         let (rows, cols) = vt_floor(rows, cols);
-        // A placeholder has no live pane; only resize its local notice buffer.
-        // Talking to the (possibly-down) backend here would issue a blocking
-        // ssh resize on the UI thread — the freeze we're avoiding.
-        if self.placeholder {
-            if let Ok(mut parser) = self.parser.lock() {
-                parser.screen_mut().set_size(rows, cols);
-            }
-            return;
-        }
-        if let Err(e) = self.backend.resize(&self.backend_id, rows, cols) {
-            tracing::warn!("Failed to resize session: {e}");
-            return;
-        }
         if let Ok(mut parser) = self.parser.lock() {
             parser.screen_mut().set_size(rows, cols);
         }
         if let Some(shell) = &self.shell_pane {
-            if let Err(e) = self.backend.resize(&shell.backend_id, rows, cols) {
-                tracing::warn!("Failed to resize shell pane: {e}");
-                return;
-            }
             if let Ok(mut parser) = shell.parser.lock() {
                 parser.screen_mut().set_size(rows, cols);
             }
+        }
+    }
+
+    /// The multiplexer half of a resize, detached from the session so it can be
+    /// applied somewhere it is allowed to block.
+    pub fn pane_resize(&self) -> PaneResize {
+        let mut panes = vec![self.backend_id.clone()];
+        panes.extend(self.shell_pane.iter().map(|s| s.backend_id.clone()));
+        PaneResize {
+            backend: Arc::clone(&self.backend),
+            panes,
         }
     }
 
@@ -1150,10 +1099,6 @@ impl Session {
 
     /// Kill/destroy the backend session (for Ctrl+X close).
     pub fn kill(&self) {
-        // A placeholder owns no live backend pane (see `placeholder`).
-        if self.placeholder {
-            return;
-        }
         self.kill_shell_pane();
         if let Err(e) = self.backend.kill(&self.backend_id) {
             tracing::warn!("Failed to kill session: {e}");
@@ -1162,11 +1107,6 @@ impl Session {
 
     /// Detach from the backend session without killing it (for Ctrl+Q quit).
     pub fn detach(self) {
-        // A placeholder owns no live backend pane — detaching would issue a
-        // blocking ssh call (possibly to a down host) for nothing.
-        if self.placeholder {
-            return;
-        }
         if let Some(shell) = &self.shell_pane {
             if let Err(e) = self.backend.detach(&shell.backend_id) {
                 tracing::warn!("Failed to detach shell pane: {e}");
@@ -1311,7 +1251,6 @@ impl Session {
             attention_ack_at: 0,
             shell_pane: None,
             env: HashMap::new(),
-            placeholder: false,
         };
         (session, input_rx)
     }

@@ -8,7 +8,8 @@
 //! nowhere to live but a kernel enum variant. Adding a variant here costs a
 //! release; adding a widget in Lua costs a file save.
 //!
-//! `kinds()` is the tripwire — `tests/kernel_node_catalog.rs` pins it at four.
+//! [`KINDS`] is the tripwire — `kernel_mvp`'s
+//! `the_kernel_still_exposes_exactly_four_node_kinds` pins it at four.
 //!
 //! Lua never holds a ratatui object. A plugin returns a plain table, this
 //! module translates it, and that indirection is exactly why throwing the VM

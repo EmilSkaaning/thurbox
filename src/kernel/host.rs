@@ -21,7 +21,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Instant;
 
 use mlua::{Function, Lua, StdLib, Table, Value, VmState};
 use ratatui::layout::Rect;
@@ -30,7 +29,10 @@ use super::command::{Args, Command, ExtraMember, InFlight};
 use super::convert;
 use super::layout::{Region, SlotMode};
 use super::node::{Node, Size};
-use super::registry::{binding_from, Binding, Pill, Registry, Setting, Value as SettingValue};
+use super::registry::{
+    binding_from, normalise_chord, Binding, Pill, Registry, Setting, Value as SettingValue,
+    RESERVED,
+};
 use super::snapshot::Snapshot;
 use super::theme::Themes;
 
@@ -283,6 +285,16 @@ pub struct KeyPress {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
+    /// The Command / Super / Windows key.
+    ///
+    /// Carried although only macOS terminals reliably deliver it, because
+    /// `registry::normalise_chord` accepts `cmd`/`command`/`super`/`win` and
+    /// `canonical_chord` has to be able to answer with the same spelling. While
+    /// this field did not exist, a declared `cmd+j` matched nothing *and* a real
+    /// Cmd+J canonicalised to plain `"j"` — firing whatever `j` was bound to,
+    /// which is worse than not binding it. The kitty flags pushed at startup are
+    /// what make it arrive at all.
+    pub cmd: bool,
 }
 
 /// A click resolved onto a node one plugin painted.
@@ -396,9 +408,10 @@ pub struct Published<'a> {
     pub inventory: &'a [super::inventory::Row],
     /// The directory the interface was loaded from.
     ///
-    /// A `./ui` beside the working directory wins over the user's own copy, so
-    /// edits that "did nothing" are usually edits to a file that is not the one
-    /// running. Reporting it is the whole fix (design D7).
+    /// Two rules pick it ([`super::bundled::resolve`]): `THURBOX_UI_DIR` when
+    /// set, otherwise the user's own copy — and a dev build's copy lives under
+    /// `thurbox-dev`, so edits that "did nothing" are usually edits to a file
+    /// that is not the one running. Reporting it is the whole fix (design D7).
     pub ui_dir: &'a str,
     /// The settings in force — the live half as last read, the restart-only half
     /// as published at startup (`kernel::config`).
@@ -732,9 +745,12 @@ impl LuaHost {
         drop(guard);
 
         let value = result.map_err(|e| fail(clean_error(&e)))?;
-        // The DECORATOR owns what it returns: a program surface it names is one of
-        // its own panes, not one belonging to the plugin whose tree it decorated.
-        convert::to_node(&value, &plugin.path).map_err(fail)
+        // A program surface the decorator NAMES is one of its own panes; one it
+        // hands back by the resolved id `to_lua` wrote still belongs to the plugin
+        // whose tree it decorated, which is the only reason an identity decorator
+        // over a program pane is not an error panel. The render path below keeps
+        // plain `to_node`: a rendering plugin may only name its own programs.
+        convert::to_node_decorated(&value, &plugin.path).map_err(fail)
     }
 
     /// Publish the settings in force.
@@ -986,16 +1002,6 @@ impl LuaHost {
             .collect()
     }
 
-    /// Take the commands plugins issued since the last drain.
-    /// Make `plugin` the current one, and give it exactly the capabilities it
-    /// has been granted.
-    ///
-    /// Capabilities are **installed and removed per call** rather than once at
-    /// load, because every plugin shares one Lua state: a global installed for
-    /// one would be reachable by all. Setting it to nil for a plugin that was
-    /// not granted it is what makes "capabilities are absent rather than
-    /// blocked" true here — `run` is not a function that refuses, it is not a
-    /// function (design D7).
     /// The other half of [`Self::enter`]: withdraw every per-plugin capability.
     ///
     /// For Lua that runs outside any plugin. `enter` installs `run` for the plugin
@@ -1005,7 +1011,75 @@ impl LuaHost {
     fn enter_nothing(&self) {
         self.current.borrow_mut().clear();
         self.current_path.borrow_mut().clear();
+        self.publish_grants(None);
         let _ = self.lua.globals().set("run", Value::Nil);
+    }
+
+    /// The `thurbox` table plugins read from, created if a publish has not built
+    /// one yet — so an answer is readable without depending on the order those
+    /// two happened in.
+    fn read_surface(&self) -> Option<Table> {
+        let globals = self.lua.globals();
+        if let Ok(table) = globals.get::<Table>("thurbox") {
+            return Some(table);
+        }
+        let fresh = self.lua.create_table().ok()?;
+        let _ = globals.set("thurbox", fresh.clone());
+        Some(fresh)
+    }
+
+    /// `thurbox.runs` for one plugin: its own answers, and nothing else's.
+    ///
+    /// Built per call rather than at publish because `thurbox` is one shared
+    /// table — publishing every plugin's runs into it would let any pane read
+    /// another's output. A plugin with no answers, and the no-plugin case, get an
+    /// empty table rather than no table; see [`Self::publish_grants`].
+    fn runs_table(&self, plugin: Option<&Plugin>) -> Option<Table> {
+        let table = self.lua.create_table().ok()?;
+        let held = self.run_answers.borrow();
+        let answers = plugin.and_then(|plugin| held.get(&plugin.path));
+        for (key, run) in answers.into_iter().flatten() {
+            if let Ok(entry) = run_to_lua(&self.lua, run) {
+                let _ = table.set(key.clone(), entry);
+            }
+        }
+        Some(table)
+    }
+
+    /// Write `thurbox.runs` and `thurbox.granted` for the plugin about to be
+    /// called — or empty tables when no plugin is (`enter_nothing`).
+    ///
+    /// **Unconditional**, including for a plugin that declared no capabilities.
+    /// These two keys are written nowhere else and `publish` rebuilds the
+    /// `thurbox` table only once per frame, so skipping the write leaves
+    /// whatever the *previous* plugin in the frame put there — which handed an
+    /// untrusted pane a trusted one's captured output, under the same names it
+    /// would read its own by. Absence is the grant model (design D7); a stale
+    /// value is not absence.
+    fn publish_grants(&self, plugin: Option<&Plugin>) {
+        let Some(surface) = self.read_surface() else {
+            return;
+        };
+        if let Some(runs) = self.runs_table(plugin) {
+            let _ = surface.set("runs", runs);
+        }
+
+        // What this plugin has actually been granted, as `thurbox.granted.<name>`.
+        //
+        // Needed because not every capability can be withheld by absence. `run` is
+        // a global, so a plugin checks `if not run then` and draws an honest hint —
+        // that IS the absence. `program` is asked for through `command`, which
+        // every plugin has, so absence cannot express it and a pane would have no
+        // way to tell "not trusted" from "still starting". This is that answer, and
+        // it grants nothing: it is a boolean about a decision the user already made.
+        if let Ok(table) = self.lua.create_table() {
+            for capability in Capability::ALL {
+                if plugin.is_some_and(|plugin| self.may(plugin, capability)) {
+                    let _ = table.set(capability.as_str(), true);
+                }
+            }
+            let _ = surface.set("granted", table);
+        }
     }
 
     /// May this plugin use `capability`?
@@ -1029,68 +1103,20 @@ impl LuaHost {
             .is_some_and(|plugin| self.may(plugin, capability))
     }
 
+    /// Make `plugin` the current one, and give it exactly the capabilities it
+    /// has been granted.
+    ///
+    /// Capabilities are **installed and removed per call** rather than once at
+    /// load, because every plugin shares one Lua state: a global installed for
+    /// one would be reachable by all. Setting it to nil for a plugin that was
+    /// not granted it is what makes "capabilities are absent rather than
+    /// blocked" true here — `run` is not a function that refuses, it is not a
+    /// function (design D7).
     fn enter(&self, plugin: &Plugin) {
         *self.current.borrow_mut() = plugin.file.clone();
         *self.current_path.borrow_mut() = plugin.path.clone();
         let granted = self.may(plugin, Capability::Run);
-        // Only a plugin that asked for a capability can have answers, so every
-        // other one skips the rest. Worth the check: `enter` runs on every call
-        // to every plugin, and building a table per call for the panes that can
-        // never have runs would be a per-frame allocation for nothing.
-        if plugin.capabilities.is_empty() {
-            let _ = self.lua.globals().set("run", Value::Nil);
-            return;
-        }
-
-        // This plugin's own answers, and nothing else's. Set per call rather
-        // than at publish because `thurbox` is one shared table: publishing
-        // every plugin's runs into it would let any pane read another's output.
-        //
-        // The read surface is created if it does not exist yet, so an answer is
-        // readable without depending on a publish having happened first.
-        let globals = self.lua.globals();
-        let surface = match globals.get::<Table>("thurbox") {
-            Ok(table) => Some(table),
-            // Not `Option::inspect`: that is stable since 1.76 and the MSRV is
-            // 1.75.
-            Err(_) => match self.lua.create_table() {
-                Ok(fresh) => {
-                    let _ = globals.set("thurbox", fresh.clone());
-                    Some(fresh)
-                }
-                Err(_) => None,
-            },
-        };
-        if let (Some(surface), Ok(table)) = (surface, self.lua.create_table()) {
-            if let Some(answers) = self.run_answers.borrow().get(&plugin.path) {
-                for (key, run) in answers {
-                    if let Ok(entry) = run_to_lua(&self.lua, run) {
-                        let _ = table.set(key.clone(), entry);
-                    }
-                }
-            }
-            let _ = surface.set("runs", table);
-        }
-
-        // What this plugin has actually been granted, as `thurbox.granted.<name>`.
-        //
-        // Needed because not every capability can be withheld by absence. `run` is
-        // a global, so a plugin checks `if not run then` and draws an honest hint —
-        // that IS the absence. `program` is asked for through `command`, which
-        // every plugin has, so absence cannot express it and a pane would have no
-        // way to tell "not trusted" from "still starting". This is that answer, and
-        // it grants nothing: it is a boolean about a decision the user already made.
-        if let (Ok(surface), Ok(table)) = (
-            self.lua.globals().get::<Table>("thurbox"),
-            self.lua.create_table(),
-        ) {
-            for capability in Capability::ALL {
-                if self.may(plugin, capability) {
-                    let _ = table.set(capability.as_str(), true);
-                }
-            }
-            let _ = surface.set("granted", table);
-        }
+        self.publish_grants(Some(plugin));
 
         // Resolved out of the VM rather than held in Rust, because a reload
         // replaces the VM and a cached handle would outlive the state it came
@@ -1272,10 +1298,21 @@ impl LuaHost {
         }
         // A file read is rooted at a session's directory, so the roots follow
         // the snapshot rather than being asked for separately.
+        //
+        // A remote session gets none: its cwd is a path on ITS machine, and
+        // `files` reads the local filesystem. Since every host's default
+        // `worktrees_dir` is the same `$HOME/.local/share/thurbox/worktrees`,
+        // reading one locally does not fail cleanly — it hands back another
+        // machine's file under the right-looking path. Left out, both bindings
+        // raise `no directory for session <id>`, which is the honest answer.
+        // Same reasoning as `kernel::diff`, which resolves the host first.
         {
             let mut roots = self.roots.borrow_mut();
             roots.clear();
             for row in &snapshot.sessions {
+                if crate::session::is_remote_backend(&row.backend) {
+                    continue;
+                }
                 if let Some(cwd) = &row.cwd {
                     roots.insert(row.id.clone(), cwd.clone());
                 }
@@ -2281,7 +2318,7 @@ fn load_plugin(lua: &Lua, path: &Path, relative: &str) -> Result<Plugin, String>
         .map_err(|e| format!("{file}.floats: {e}"))?
         .unwrap_or(false);
 
-    let bindings = read_bindings(&def, &name)?;
+    let bindings = read_bindings(&def, &name, &file)?;
     let settings = read_settings(&def, &name)?;
     let pills = read_pills(&def, &name)?;
     let capabilities = read_capabilities(&def, &file)?;
@@ -2377,15 +2414,19 @@ fn read_float(value: &Value) -> Result<Option<Float>, String> {
 ///
 /// Declared as data rather than handled imperatively so the registry can
 /// enumerate, conflict-check and rebind them without ever calling the plugin.
-fn read_bindings(def: &Table, plugin: &str) -> Result<Vec<Binding>, String> {
-    let raw: Value = def.get("keys").map_err(|e| format!("{plugin}.keys: {e}"))?;
+///
+/// `plugin` is the declared name, which the bindings carry; `file` is the file
+/// stem the rest of [`load_plugin`]'s errors name, because the reader of one
+/// has a file to open and a plugin may call itself anything.
+fn read_bindings(def: &Table, plugin: &str, file: &str) -> Result<Vec<Binding>, String> {
+    let raw: Value = def.get("keys").map_err(|e| format!("{file}.keys: {e}"))?;
     let Value::Table(list) = raw else {
         return Ok(Vec::new());
     };
     let mut bindings = Vec::new();
     for (index, entry) in list.sequence_values::<Table>().enumerate() {
-        let entry = entry.map_err(|e| format!("{plugin}.keys[{}]: {e}", index + 1))?;
-        let where_ = format!("{plugin}.keys[{}]", index + 1);
+        let entry = entry.map_err(|e| format!("{file}.keys[{}]: {e}", index + 1))?;
+        let where_ = format!("{file}.keys[{}]", index + 1);
         let chord: String = entry
             .get::<Option<String>>("key")
             .map_err(|e| format!("{where_}.key: {e}"))?
@@ -2411,6 +2452,20 @@ fn read_bindings(def: &Table, plugin: &str) -> Result<Vec<Binding>, String> {
         let group: Option<String> = entry
             .get::<Option<String>>("group")
             .map_err(|e| format!("{where_}.group: {e}"))?;
+        // The kernel's chords are dispatched before the registry is consulted,
+        // so a plugin claiming one used to load, appear in F1, and never fire —
+        // a no-op with no symptom for whoever wrote it. Refused here, where the
+        // declaration is read, for the reason `read_capabilities` refuses an
+        // unknown name: a declaration the kernel cannot honour is a mistake to
+        // report. `Registry::rebind` already refuses the same chords.
+        let normalised = normalise_chord(&chord);
+        if RESERVED.contains(&normalised.as_str()) {
+            return Err(format!(
+                "{where_}: {normalised} is reserved by the kernel and cannot be declared \
+                 (reserved: {})",
+                RESERVED.join(", ")
+            ));
+        }
         bindings.push(binding_from(
             plugin,
             &chord,
@@ -2626,6 +2681,10 @@ fn install_run(
 /// directory listing and a file's text, both rooted at that session's working
 /// directory and refusing anything outside it. It never gets a filesystem.
 /// design.md D2 of v2-navigation-panes.
+///
+/// The roots come from [`LuaHost::publish`], which holds back every remote
+/// session — these read the *local* disk — so both calls raise `no directory
+/// for session` for one.
 fn install_files(lua: &Lua, roots: Roots) -> mlua::Result<()> {
     let files = lua.create_table()?;
 
@@ -2846,7 +2905,7 @@ fn install_store(lua: &Lua, global: &str, store: Shared, _ns: Option<()>) -> mlu
         "__newindex",
         lua.create_function(move |_, (_, key, value): (Table, String, Value)| {
             let mut slot = write.borrow_mut();
-            match from_lua(&value) {
+            match persisted_write(&value) {
                 Some(persisted) => {
                     slot.insert(key, persisted);
                 }
@@ -2894,7 +2953,7 @@ fn install_private(lua: &Lua, state: Private, current: Rc<RefCell<String>>) -> m
         lua.create_function(move |_, (_, key, value): (Table, String, Value)| {
             let ns = write_ns.borrow().clone();
             let mut slot = write.borrow_mut();
-            match from_lua(&value) {
+            match persisted_write(&value) {
                 Some(persisted) => {
                     slot.insert((ns, key), persisted);
                 }
@@ -2927,7 +2986,69 @@ fn to_lua(lua: &Lua, value: &Persisted) -> mlua::Result<Value> {
     })
 }
 
-fn from_lua(value: &Value) -> Option<Persisted> {
+/// Deepest table accepted into `store`/`state`: the render path's ceiling, not a
+/// second number that happens to agree with it.
+///
+/// Without it `store.x = t` where `t[1] = t` recurses until the stack is gone,
+/// and stack exhaustion is an **abort**, not a panic: the terminal-restoring
+/// hook never runs and the shell inherits raw mode from a process that is
+/// already dead. [`convert`] refuses a cyclic tree for the same reason, which is
+/// why the bound is shared rather than restated.
+const MAX_PERSISTED_DEPTH: usize = convert::MAX_DEPTH;
+
+/// How many values one write may convert.
+///
+/// Depth alone does not bound the work: a table holding *two* references to
+/// itself is only one level deeper per step, so the walk fans out 2^64 ways
+/// before any branch reaches the depth ceiling — a frozen render loop rather
+/// than a crash. The count is what makes the walk finite for a cycle of any
+/// shape, and is far above what a plugin's own state reaches.
+const MAX_PERSISTED_VALUES: usize = 100_000;
+
+/// How much of one write's conversion is left, and whether it ran out.
+///
+/// `exceeded` is separate from `remaining` because the two answers differ: a
+/// value can be skipped for being a function, which is not a bound at all. Only
+/// a bound refuses the *whole* write, so an unconvertible field still costs
+/// just that field.
+struct Bounds {
+    remaining: usize,
+    exceeded: bool,
+}
+
+impl Bounds {
+    fn new() -> Self {
+        Self {
+            remaining: MAX_PERSISTED_VALUES,
+            exceeded: false,
+        }
+    }
+}
+
+/// One `store`/`state` write, converted and bounded.
+///
+/// The walk *records* a bound it hit; this is where hitting one refuses the whole
+/// write. [`from_lua`] answers `None` both for a value that cannot be persisted
+/// at all (a function) and for one that ran into a bound, and only the second may
+/// cost more than its own field — a table refused for its depth or its size must
+/// not land as a truncated husk under the key the plugin believes it just set.
+/// Both `__newindex` handlers go through here, and both read `None` as "delete
+/// this key".
+fn persisted_write(value: &Value) -> Option<Persisted> {
+    let mut bounds = Bounds::new();
+    from_lua(value, 0, &mut bounds).filter(|_| !bounds.exceeded)
+}
+
+/// Convert a Lua value into the persisted form, or `None` if it cannot be one.
+///
+/// Called through [`persisted_write`], which owns the bound check the recursion
+/// only records.
+fn from_lua(value: &Value, depth: usize, bounds: &mut Bounds) -> Option<Persisted> {
+    if depth > MAX_PERSISTED_DEPTH || bounds.remaining == 0 {
+        bounds.exceeded = true;
+        return None;
+    }
+    bounds.remaining -= 1;
     match value {
         Value::Nil => None,
         Value::Boolean(b) => Some(Persisted::Bool(*b)),
@@ -2938,7 +3059,12 @@ fn from_lua(value: &Value) -> Option<Persisted> {
             let mut entries = Vec::new();
             for pair in table.pairs::<Value, Value>() {
                 let (key, entry) = pair.ok()?;
-                if let (Some(key), Some(entry)) = (from_lua(&key), from_lua(&entry)) {
+                let key = from_lua(&key, depth + 1, bounds);
+                let entry = from_lua(&entry, depth + 1, bounds);
+                if bounds.exceeded {
+                    return None;
+                }
+                if let (Some(key), Some(entry)) = (key, entry) {
                     entries.push((key, entry));
                 }
             }
@@ -3075,9 +3201,4 @@ fn clean_error(error: &mlua::Error) -> String {
         .unwrap_or(&text)
         .trim()
         .to_string()
-}
-
-/// Wall-clock start, shared by the loop and any plugin animating off `elapsed`.
-pub fn started() -> Instant {
-    Instant::now()
 }

@@ -109,6 +109,7 @@ fn press(chord: &str) -> KeyPress {
             "ctrl" => key.ctrl = true,
             "alt" => key.alt = true,
             "shift" => key.shift = true,
+            "cmd" => key.cmd = true,
             name => {
                 key.name = name.to_string();
                 let mut chars = name.chars();
@@ -430,6 +431,67 @@ fn no_plugin_claims_a_chord_the_kernel_reserves() {
             binding.chord
         );
     }
+}
+
+#[test]
+fn declaring_a_reserved_chord_fails_the_load_instead_of_never_firing() {
+    // The escape route is dispatched before the registry is consulted, so a
+    // pane claiming one of its chords used to load, appear in F1 and in
+    // `bindings()`, and simply never fire — a no-op with no symptom for
+    // whoever wrote it. Refused where the declaration is read, which is what
+    // `plugin check` turns into a non-zero exit.
+    for reserved in RESERVED {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plugins = dir.path().join("plugins");
+        std::fs::create_dir_all(&plugins).expect("mkdir");
+        std::fs::write(
+            plugins.join("50_greedy.lua"),
+            format!(
+                "return {{\n\
+                   name = \"greedy\", slot = \"center\",\n\
+                   keys = {{ {{ key = \"{reserved}\", action = \"greedy.take\", desc = \"take\" }} }},\n\
+                   render = function() return {{ type = \"text\", text = \"mine\" }} end,\n\
+                 }}\n"
+            ),
+        )
+        .expect("write");
+
+        let host = LuaHost::new(dir.path());
+        let error = host
+            .error
+            .as_deref()
+            .unwrap_or_else(|| panic!("declaring {reserved} must be refused"));
+        assert!(
+            error.contains("50_greedy") && error.contains(reserved),
+            "the error names the file and the chord: {error}"
+        );
+        assert!(
+            host.declarations().0.is_empty(),
+            "and nothing of the refused declaration is registered"
+        );
+    }
+}
+
+#[test]
+fn a_chord_the_kernel_does_not_reserve_still_declares() {
+    // The other half: the check is on the reserved list, not on chords that
+    // merely look kernel-ish, so an ordinary F-key pane still loads.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plugins = dir.path().join("plugins");
+    std::fs::create_dir_all(&plugins).expect("mkdir");
+    std::fs::write(
+        plugins.join("50_polite.lua"),
+        "return {\n\
+           name = \"polite\", slot = \"center\",\n\
+           keys = { { key = \"f9\", action = \"polite.take\", desc = \"take\" } },\n\
+           render = function() return { type = \"text\", text = \"mine\" } end,\n\
+         }\n",
+    )
+    .expect("write");
+
+    let host = LuaHost::new(dir.path());
+    assert!(host.error.is_none(), "{:?}", host.error);
+    assert_eq!(host.declarations().0.len(), 1);
 }
 
 #[test]

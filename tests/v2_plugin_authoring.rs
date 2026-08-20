@@ -543,7 +543,7 @@ fn the_listing_tells_a_file_you_installed_from_one_you_wrote() {
     // The spec is part of what the interface is made of, and it is not a pane that
     // failed to load — which is what it would read as without its own kind.
     let spec = row("plugins.toml");
-    assert_eq!(spec["kind"], "manifest", "{spec}");
+    assert_eq!(spec["kind"], "spec", "{spec}");
     assert_ne!(spec["state"], "failed", "{spec}");
 
     // Edited locally, or re-tagged upstream under the same pin. Either way the
@@ -772,4 +772,108 @@ fn the_pane_that_draws_by_default_is_not_warned_about() {
         "the shipped interface must be quiet: {:?}",
         output.json
     );
+}
+
+// ── what a plugin may put in `store` ───────────────────────────────────────
+
+/// Render one plugin from `source` and return the text it drew.
+fn drew(source: &str) -> String {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plugins = dir.path().join("plugins");
+    std::fs::create_dir_all(&plugins).expect("mkdir");
+    std::fs::write(plugins.join("10_probe.lua"), source).expect("write");
+
+    let host = thurbox::kernel::host::LuaHost::new(dir.path());
+    assert!(host.error.is_none(), "{:?}", host.error);
+    let node = host
+        .render(
+            0,
+            thurbox::kernel::host::RenderContext {
+                width: 40,
+                height: 1,
+                focused: false,
+                elapsed: 0.0,
+                frame: 0,
+            },
+        )
+        .unwrap_or_else(|e| panic!("the plugin should render: {e}"))
+        .node;
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 1)).expect("terminal");
+    terminal
+        .draw(|frame| {
+            thurbox::kernel::paint::render(
+                frame,
+                frame.area(),
+                &node,
+                &thurbox::kernel::paint::PlaceholderSurfaces,
+            )
+        })
+        .expect("draw");
+    let buffer = terminal.backend().buffer().clone();
+    (0..40)
+        .map(|x| buffer[(x, 0)].symbol().to_string())
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn a_cyclic_table_written_to_store_is_refused_rather_than_overflowing() {
+    // `store.x = t` where `t[1] = t` used to recurse until the stack was gone,
+    // and stack exhaustion is an ABORT: the terminal-restoring hook never runs
+    // and the shell inherits raw mode from a process that is already dead. The
+    // render path refuses a cyclic tree for the same reason
+    // (`convert::MAX_DEPTH`); this is the persistence path's half of it.
+    let drawn = drew(
+        r#"return {
+             name = "probe", slot = "a",
+             render = function()
+               local t = {}
+               t[1] = t
+               t[2] = t
+               store.cycle = t
+               return { type = "text", text = "survived " .. type(store.cycle) }
+             end,
+           }"#,
+    );
+    assert_eq!(
+        drawn, "survived nil",
+        "the write must not land, and the process must still be here"
+    );
+}
+
+#[test]
+fn a_cyclic_table_written_to_state_is_refused_too() {
+    // `state` goes through the same converter as `store`, so it inherits the
+    // same bounds — worth asserting, since only one of the two was ever the
+    // reported crash.
+    let drawn = drew(
+        r#"return {
+             name = "probe", slot = "a",
+             render = function()
+               local t = {}
+               t.self = t
+               state.cycle = t
+               return { type = "text", text = "survived " .. type(state.cycle) }
+             end,
+           }"#,
+    );
+    assert_eq!(drawn, "survived nil");
+}
+
+#[test]
+fn an_ordinary_nested_table_still_round_trips() {
+    // The bound must not cost a plugin the shallow tables it actually keeps —
+    // a guard that refuses real state is a regression wearing a fix's clothes.
+    let drawn = drew(
+        r#"return {
+             name = "probe", slot = "a",
+             render = function()
+               store.prefs = { filter = { query = "err", case = false } }
+               return { type = "text", text = "kept " .. store.prefs.filter.query }
+             end,
+           }"#,
+    );
+    assert_eq!(drawn, "kept err");
 }

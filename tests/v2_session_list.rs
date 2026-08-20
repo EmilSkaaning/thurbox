@@ -6,43 +6,24 @@
 //! than being overwritten on the next frame. v1 has one `App::select_session` for
 //! that; here it is a value two plugins share, so the rule has to be asserted.
 
-use thurbox::kernel::command::Command;
-use thurbox::kernel::host::{KeyPress, LuaHost, Published, RenderContext};
-use thurbox::kernel::registry::Registry;
+use ratatui::backend::TestBackend;
+use ratatui::Terminal;
+
+use thurbox::kernel::command::{Command, InFlight, Phase};
+use thurbox::kernel::host::{LuaHost, PluginError};
+use thurbox::kernel::paint::{self, PlaceholderSurfaces};
 use thurbox::kernel::snapshot::{GitState, SessionRow, Snapshot};
-use thurbox::kernel::theme::Themes;
+
+mod common;
+
+use common::{ctx, host, index_of, press, publish, publish_with, registry};
 
 const PLUGIN: &str = "sessions";
 
-fn host() -> LuaHost {
-    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui");
-    let host = LuaHost::new(dir);
-    assert!(host.error.is_none(), "{:?}", host.error);
-    host
-}
-
 fn row(id: &str, name: &str) -> SessionRow {
     SessionRow {
-        id: id.into(),
-        name: name.into(),
-        agent: "claude".into(),
-        status: "idle".into(),
         cwd: Some(std::path::PathBuf::from("/src/thurbox")),
-        repo: Some("thurbox".into()),
-        repos: vec!["thurbox".into()],
-        branch: Some("main".into()),
-        base_branch: None,
-        backend: "local-tmux".into(),
-        backend_id: Some("%1".into()),
-        remote_host: None,
-        agent_session_id: None,
-        parent_id: None,
-        display_order: None,
-        worktree_count: 0,
-        git: None,
-        hook_state: None,
-        shell_backend_id: None,
-        member_dirs: Vec::new(),
+        ..common::session_row(id, name)
     }
 }
 
@@ -53,82 +34,35 @@ fn snapshot() -> Snapshot {
     }
 }
 
-fn publish_in(host: &LuaHost, snapshot: &Snapshot) {
-    let themes = Themes::load(None);
-    let mut registry = Registry::default();
-    let (bindings, settings) = host.declarations();
-    registry.declare(bindings, settings);
-    let diffs = thurbox::kernel::diff::DiffStore::new();
-    let repos = thurbox::kernel::repos::RepoStore::with_hosts(Default::default());
-    host.publish(&Published {
-        snapshot,
-        attach_errors: &Default::default(),
-        inflight: &[],
-        themes: &themes,
-        registry: &registry,
-        diffs: &diffs,
-        links: &Default::default(),
-        content: &Default::default(),
-        meta: &Default::default(),
-        metrics: &Default::default(),
-        status_rows: 0,
-        can_open: true,
-        inventory: &[],
-        ui_dir: "ui",
-        settings: &Default::default(),
-        repos: &repos,
-        wants: &Default::default(),
-        focus: None,
-        hovered: None,
-    })
-    .expect("publish");
-}
-
 /// Render the list, which is also what publishes the selection.
 fn render(host: &LuaHost) {
     render_in(host, &snapshot());
 }
 
 fn render_in(host: &LuaHost, snapshot: &Snapshot) {
-    publish_in(host, snapshot);
-    let index = host.index_of(PLUGIN).expect("no sessions plugin");
-    host.render(
-        index,
-        RenderContext {
-            width: 30,
-            height: 12,
-            focused: true,
-            elapsed: 0.0,
-            frame: 0,
-        },
-    )
-    .expect("render");
-}
-
-fn press(host: &LuaHost, chord: &str) {
-    press_in(host, &snapshot(), chord);
+    publish(host, snapshot);
+    host.render(index_of(host, PLUGIN), ctx(30, 12, true))
+        .expect("render");
 }
 
 fn press_in(host: &LuaHost, snapshot: &Snapshot, chord: &str) {
-    publish_in(host, snapshot);
-    let index = host.index_of(PLUGIN).expect("no sessions plugin");
-    let mut key = KeyPress {
-        name: chord.to_string(),
-        ..KeyPress::default()
-    };
-    if chord.chars().count() == 1 {
-        key.ch = chord.chars().next();
-    }
-    let mut registry = Registry::default();
-    let (bindings, settings) = host.declarations();
-    registry.declare(bindings, settings);
-    if let Some(binding) = registry.resolve(&key, Some(PLUGIN)) {
+    publish(host, snapshot);
+    dispatch(host, chord).expect("the pane must survive its own keys");
+}
+
+/// Route a chord the way the binary does — registry first, then raw `on_key` —
+/// and hand back the failure instead of unwrapping it, so a test can assert
+/// that a key does not take the pane down.
+fn dispatch(host: &LuaHost, chord: &str) -> Result<(), PluginError> {
+    let index = index_of(host, PLUGIN);
+    let key = press(chord);
+    if let Some(binding) = registry(host).resolve(&key, Some(PLUGIN)) {
         let action = binding.action.clone();
-        if host.on_action(index, &action).expect("on_action") {
-            return;
+        if host.on_action(index, &action)? {
+            return Ok(());
         }
     }
-    host.on_key(index, &key).expect("on_key");
+    host.on_key(index, &key).map(|_| ())
 }
 
 #[test]
@@ -137,7 +71,7 @@ fn enter_opens_the_selected_session() {
     // shows a session here, so opening is a focus change.
     let host = host();
     render(&host);
-    press(&host, "enter");
+    press_in(&host, &snapshot(), "enter");
     assert_eq!(
         host.drain_commands(),
         vec![Command::Focus {
@@ -165,7 +99,7 @@ fn the_list_publishes_the_session_under_its_cursor() {
     let host = host();
     render(&host);
     assert_eq!(host.shared_string("selected").as_deref(), Some("aaa"));
-    press(&host, "j");
+    press_in(&host, &snapshot(), "j");
     render(&host);
     assert_eq!(host.shared_string("selected").as_deref(), Some("bbb"));
 }
@@ -189,7 +123,7 @@ fn another_pane_can_steer_the_selection() {
 
     // And the cursor really moved with it, rather than the value merely sticking:
     // stepping on lands past the steered row, not past the old one.
-    press(&host, "k");
+    press_in(&host, &snapshot(), "k");
     render(&host);
     assert_eq!(host.shared_string("selected").as_deref(), Some("aaa"));
 }
@@ -225,19 +159,9 @@ fn clean() -> GitState {
 /// Render the confirmation float and return what it drew, so a test can ask
 /// whether a question was put at all — and what it itemised.
 fn confirm_tree(host: &LuaHost, snapshot: &Snapshot) -> String {
-    publish_in(host, snapshot);
-    let index = host.index_of("confirm").expect("no confirm plugin");
+    publish(host, snapshot);
     let rendered = host
-        .render(
-            index,
-            RenderContext {
-                width: 60,
-                height: 12,
-                focused: false,
-                elapsed: 0.0,
-                frame: 0,
-            },
-        )
+        .render(index_of(host, "confirm"), ctx(60, 12, false))
         .expect("render the confirmation");
     format!("{:?}", rendered.node)
 }
@@ -345,5 +269,130 @@ fn a_state_that_could_not_be_read_asks_rather_than_assume_clean() {
     assert!(
         confirm_tree(&host, &snapshot).contains("its state could not be read"),
         "and it says why it is asking"
+    );
+}
+
+/// A creation in flight for the repo the sessions are already in.
+///
+/// The pane learns about one from `thurbox.commands`: a `create` names no
+/// session yet, so it carries the repository as its `subject` and the list
+/// draws a placeholder at the end of that group. Matching the group label is
+/// the whole point — a `subject` nothing groups under produces no placeholder,
+/// and a test with no placeholder pins nothing.
+fn creating(repo: &str) -> Vec<InFlight> {
+    vec![InFlight {
+        id: 1,
+        kind: "create",
+        session: String::new(),
+        subject: Some(repo.to_string()),
+        phase: Phase::Running,
+        error: None,
+    }]
+}
+
+#[test]
+fn sorting_a_group_that_holds_a_creation_in_flight_does_not_take_the_pane_down() {
+    // The placeholder carries no `session`, and the comparator read
+    // `a[1].session.name` unconditionally. With two blocks in the group — the
+    // common case, since creating into a repo that already holds a session
+    // reuses that group — `table.sort` raised, `draw` cleared the PluginError on
+    // the next frame, and the observable behaviour was Shift+S doing nothing at
+    // all with no message.
+    let host = host();
+    let snapshot = Snapshot {
+        // Reverse alphabetical, so a sort that runs is a sort that is visible.
+        sessions: vec![row("bbb", "second"), row("aaa", "first")],
+        ..Snapshot::default()
+    };
+    publish_with(&host, &snapshot, &Default::default(), &creating("thurbox"));
+    host.render(index_of(&host, PLUGIN), ctx(46, 14, true))
+        .expect("render");
+
+    dispatch(&host, "S").expect("Shift+S must not error the pane");
+
+    // And it really sorted: the placeholder keeps the end of the group, where
+    // the row it will become is already drawn, and carries no id of its own.
+    assert_eq!(
+        host.drain_commands(),
+        vec![Command::Order {
+            list: vec!["aaa".into(), "bbb".into()],
+        }],
+        "the sorted order is persisted, without the placeholder in it"
+    );
+}
+
+/// The confirmation as it is PAINTED, one string per row.
+///
+/// Mirrors `draw_floats`: the plugin is probed with the whole screen and its
+/// tree painted into the float rect the kernel sizes for it. `confirm_tree`
+/// above cannot stand in for this — a text node carries its whole string
+/// whatever width it was given, so a slot narrower than its own label reads
+/// correct in the tree and clipped on the screen.
+fn confirm_paint(host: &LuaHost, snapshot: &Snapshot, screen: (u16, u16)) -> Vec<String> {
+    publish(host, snapshot);
+    let (screen_w, screen_h) = screen;
+    let rendered = host
+        .render(index_of(host, "confirm"), ctx(screen_w, screen_h, false))
+        .expect("render the confirmation");
+    let float = rendered
+        .float
+        .expect("a question that is up floats: the kernel has no other way to place it");
+    // `App::float_rect`'s own sizing — cells when the plugin knows them, else a
+    // share of the screen, clamped to what there is. Only the size is needed:
+    // the tree is painted at the origin here, and centring moves no cell within
+    // it.
+    let width = float
+        .cols
+        .unwrap_or((f64::from(screen_w) * float.width_pct / 100.0) as u16)
+        .min(screen_w);
+    let height = float
+        .rows
+        .unwrap_or((f64::from(screen_h) * float.height_pct / 100.0) as u16)
+        .min(screen_h);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    terminal
+        .draw(|frame| paint::render(frame, frame.area(), &rendered.node, &PlaceholderSurfaces))
+        .expect("draw");
+    let buffer = terminal.backend().buffer().clone();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+#[test]
+fn both_pills_are_painted_whole() {
+    // The pill's slot is a fixed `len`, so a label longer than the number beside
+    // it is clipped on the right: `" [ Cancel ]"` is eleven columns and the slot
+    // said ten, which cost every confirmation its closing bracket. Invisible in
+    // the tree, hence the paint — and worth pinning because `70_new_session`'s
+    // footer records having made the identical mistake.
+    let host = host();
+    let mut snapshot = snapshot();
+    snapshot.sessions[0].git = Some(GitState {
+        files_changed: 1,
+        dirty: true,
+        ..clean()
+    });
+    render_in(&host, &snapshot);
+    press_in(&host, &snapshot, "D");
+
+    let painted = confirm_paint(&host, &snapshot, (100, 20));
+    // Anchored on the key hints, which share the row with the pills: anchoring
+    // on a pill's own label would make a clipped pill look like a missing row.
+    let pills = painted
+        .iter()
+        .find(|row| row.contains("esc cancel"))
+        .unwrap_or_else(|| panic!("no pill row was painted: {painted:?}"));
+    assert!(
+        pills.contains("[ Confirm ]"),
+        "the confirm pill lost a bracket: {pills:?}"
+    );
+    assert!(
+        pills.contains("[ Cancel ]"),
+        "the cancel pill lost a bracket: {pills:?}"
     );
 }

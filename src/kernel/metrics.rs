@@ -338,3 +338,75 @@ fn collect(mut collector: Box<sysinfo::System>, subjects: Vec<SampleInput>) -> S
         collector,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn subject(session: &str) -> Subject {
+        Subject {
+            session: session.to_string(),
+            agent_session_id: None,
+            pane: None,
+            agent: "claude".to_string(),
+            host: None,
+        }
+    }
+
+    /// The unbounded-growth guard: [`Metrics::poll`] *merges* each sample, so
+    /// without this a deleted session's numbers are held for the life of the
+    /// process — and rendered on whatever row later reuses the id.
+    #[test]
+    fn a_session_that_is_gone_loses_its_numbers() {
+        let mut metrics = Metrics::new();
+        for id in ["s1", "s2"] {
+            metrics
+                .agents
+                .insert(id.to_string(), AgentMetrics::default());
+            metrics
+                .resources
+                .insert(id.to_string(), SessionResources::default());
+        }
+
+        metrics.forget_gone(&[subject("s2")]);
+
+        assert!(
+            metrics.agent("s1").is_none(),
+            "the gone session was dropped"
+        );
+        assert!(metrics.resources("s1").is_none());
+        assert!(metrics.agent("s2").is_some(), "the live one was kept");
+        assert!(metrics.resources("s2").is_some());
+    }
+
+    /// Account usage is keyed by (agent, host), not by session, so pruning the
+    /// per-session maps must not take it with them.
+    #[test]
+    fn forgetting_sessions_leaves_account_usage_alone() {
+        let mut metrics = Metrics::new();
+        metrics.usage.insert(
+            ("claude".to_string(), None),
+            AgentUsage {
+                note: Some("kept".to_string()),
+                ..Default::default()
+            },
+        );
+
+        metrics.forget_gone(&[]);
+
+        assert!(metrics.usage("claude", None).is_some());
+    }
+
+    /// Absence is a real state: a session whose agent writes no statusline file
+    /// contributes no entry at all, because a defaulted `AgentMetrics` would
+    /// render as an agent that has spent nothing.
+    #[test]
+    fn a_subject_with_no_statusline_file_reports_nothing() {
+        let sample = collect(
+            Box::new(sysinfo::System::new()),
+            vec![("s1".to_string(), None, None)],
+        );
+        assert!(!sample.agents.contains_key("s1"));
+        assert!(!sample.resources.contains_key("s1"));
+    }
+}

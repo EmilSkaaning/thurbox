@@ -1,9 +1,11 @@
 //! Headless session operations — spawn and restart sessions without the TUI.
 //!
-//! Callers (MCP, CLI) use these helpers to drive the same local-tmux-backed
-//! sessions the TUI manages, without requiring the TUI event loop. All
-//! operations are synchronous against the SQLite database and the `tmux -L
-//! thurbox` server.
+//! The callers are `thurbox-cli` and the kernel's command workers: both drive
+//! the same tmux-backed sessions the interface shows, without needing the render
+//! loop. All operations are synchronous against the SQLite database and the
+//! `tmux -L thurbox` server — local, or that server reached over the session's
+//! own transport for a remote backend — which is why the kernel only ever calls
+//! them from a worker (rule 5).
 
 pub mod builtin_hooks;
 pub mod delete;

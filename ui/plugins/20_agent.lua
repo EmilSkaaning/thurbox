@@ -113,57 +113,10 @@ end
 
 -- --- text measurement ------------------------------------------------------
 --
--- `widgets.len`/`pad` are utf8-aware; `#` is not, and every glyph below is
--- multi-byte.
-
---- Keep the FIRST `max` characters, clipping the rest with no marker.
----
---- What a left-aligned border title does when it overruns its area: ratatui
---- truncates the far side and adds nothing.
-local function keep_left(text, max)
-  if max <= 0 then
-    return ""
-  end
-  if widgets.len(text) <= max then
-    return text
-  end
-  local cut = utf8 and utf8.offset(text, max + 1) or (max + 1)
-  return string.sub(text, 1, (cut or (#text + 1)) - 1)
-end
-
---- Keep the LAST `max` characters.
----
---- What a right-aligned border title does when it overruns: ratatui's
---- `Line::render_with_alignment` skips from the left, so the title shrinks
---- toward the right edge. v1's recorded frame shows exactly this — a 42-char
---- title in a 40-wide pane renders as `╭-osc52 (claude) …`.
-local function keep_right(text, max)
-  if max <= 0 then
-    return ""
-  end
-  local count = widgets.len(text)
-  if count <= max then
-    return text
-  end
-  local skip = count - max
-  local at = utf8 and utf8.offset(text, skip + 1) or (skip + 1)
-  return string.sub(text, at or (#text + 1))
-end
-
---- v1's `ui::truncate_ellipsis`: keep `max - 1` characters plus `…`, and return
---- NOTHING at `max <= 1` because a lone ellipsis carries no information.
----
---- Deliberately not `widgets.truncate`, which returns `"…"` at width 1.
-local function truncate_hard(text, max)
-  if widgets.len(text) <= max then
-    return text
-  end
-  if max <= 1 then
-    return ""
-  end
-  local cut = utf8 and utf8.offset(text, max) or max
-  return string.sub(text, 1, (cut or (#text + 1)) - 1) .. "…"
-end
+-- The cuts are `widgets.keep_left`/`keep_right`/`truncate_hard`: utf8-aware,
+-- where `#` is not, and a border title is full of multi-byte glyphs. They were
+-- local to this pane until the session list turned out to carry two of them
+-- under other names.
 
 --- v1's `ui::fit_right_title`: clamp a right-aligned title to what the tab strip
 --- on the left of the same border leaves it — the border minus its two corners,
@@ -174,7 +127,7 @@ local function fit_right_title(title, border_width, reserved_left)
     return title
   end
   local available = math.max(0, (border_width or 0) - 2 - reserved_left - 1)
-  return truncate_hard(title, available)
+  return widgets.truncate_hard(title, available)
 end
 
 -- --- the title -------------------------------------------------------------
@@ -333,11 +286,13 @@ local COLLAPSE_TOGGLE_MIN_WIDTH = 5
 --- border space for the tabs.
 local COLLAPSE_HINT_MIN_WIDTH = 40
 
---- v1 renders a chord compactly: `^Q`, `⇧J`, `F7`. Mirrors `KeyChord::compact`.
+--- Renders a chord compactly: `^Q`, `⇧J`, `F7`.
 ---
---- Duplicated from `90_footer` rather than shared: a plugin is meant to be
---- replaceable on its own, and a `lib` entry read by two panes would make
---- swapping either one a two-file edit.
+--- The twin is `kernel::bands::compact_chord`, which spells the chord bands the
+--- same way — and being Rust the kernel owns, it is not something a plugin can
+--- call. So this is a deliberate re-implementation, and the spelling must be kept
+--- in step: one action reading `^X` on the border and `Ctrl+X` in the band is the
+--- failure to avoid.
 local function compact_chord(chord)
   local modifiers, key = "", chord
   while true do
@@ -527,8 +482,13 @@ local function border_strip(width, border_style, active)
     -- would light.
     local lit = hover.role(toggle)
     local band = lit and theme.role("selection_bg") or nil
-    put(1, keep_left(label, COLLAPSE_CHEVRON_CELLS), { fg = theme.accent, bg = band }, toggle)
-    local hint = keep_right(label, widgets.len(label) - COLLAPSE_CHEVRON_CELLS)
+    put(
+      1,
+      widgets.keep_left(label, COLLAPSE_CHEVRON_CELLS),
+      { fg = theme.accent, bg = band },
+      toggle
+    )
+    local hint = widgets.keep_right(label, widgets.len(label) - COLLAPSE_CHEVRON_CELLS)
     if hint ~= "" then
       put(cursor, hint, { fg = theme.muted, bg = band }, toggle)
     end
@@ -624,7 +584,7 @@ local function chrome(opts)
     for _, run in ipairs(left) do
       left_w = left_w + widgets.len(run.text)
     end
-    title = keep_right(title, math.max(0, inner_w - left_w))
+    title = widgets.keep_right(title, math.max(0, inner_w - left_w))
     top = { { text = set.tl, style = border } }
     for _, run in ipairs(left) do
       top[#top + 1] = run
@@ -636,7 +596,7 @@ local function chrome(opts)
     top[#top + 1] = { text = title, style = opts.title_style }
     top[#top + 1] = { text = set.tr, style = border }
   else
-    title = keep_left(title, inner_w)
+    title = widgets.keep_left(title, inner_w)
     top = {
       { text = set.tl, style = border },
       { text = title, style = opts.title_style },
@@ -926,7 +886,13 @@ return {
       set_scroll(id, scroll, math.max(scroll_max, scroll))
       return true
     elseif key.key == "pagedown" then
-      set_scroll(id, math.max(0, scroll - 10), scroll_max)
+      -- Back at the live screen the mark is retired, not kept: `pageup` counts
+      -- past the real scrollback (there is no total to clamp against), so an
+      -- inflated depth that outlived the scroll left a scrollbar drawn over a
+      -- screen with nothing above it, thumb parked at the end. Zero here means
+      -- the next `pageup` measures again from scratch.
+      local back = math.max(0, scroll - 10)
+      set_scroll(id, back, back > 0 and scroll_max or 0)
       return true
     end
     return false

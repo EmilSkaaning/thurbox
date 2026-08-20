@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 
 use crate::session::theme_config::{ThemeEntry, ThemePalette, ThemePreset};
 use crate::storage::Database;
@@ -31,6 +31,14 @@ pub struct ThemeChoice {
 /// The resolved theme plus everything a picker needs.
 pub struct Themes {
     active: ThemeEntry,
+    /// The active palette, already flattened to role → colour string.
+    ///
+    /// Cached rather than derived per call: [`Self::roles`] builds a 31-entry
+    /// `BTreeMap` of freshly formatted `String`s, and `BandState::colour` asked
+    /// for one role at a time — roughly thirty full rebuilds per painted frame,
+    /// for three bands of text. Rebuilt wherever [`Self::active`] is assigned,
+    /// which is what `set_active` exists to make impossible to forget.
+    roles: BTreeMap<&'static str, String>,
     choices: Vec<ThemeChoice>,
     /// The user's `themes.toml` entries, kept so a palette other than the
     /// active one can be resolved without re-reading the file — the picker's
@@ -76,11 +84,18 @@ impl Themes {
         let active = resolve(wanted.as_deref(), &custom);
 
         Self {
+            roles: palette_roles(&active.palette),
             active,
             choices,
             custom,
             warnings,
         }
+    }
+
+    /// Adopt a resolved theme, keeping the published roles in step with it.
+    fn set_active(&mut self, entry: ThemeEntry) {
+        self.roles = palette_roles(&entry.palette);
+        self.active = entry;
     }
 
     /// Resolve any offered theme to its full entry, palette included.
@@ -117,7 +132,7 @@ impl Themes {
         if !self.choices.iter().any(|choice| choice.name == name) {
             return Err(format!("unknown theme {name:?}"));
         }
-        self.active = resolve(Some(name), &self.custom);
+        self.set_active(resolve(Some(name), &self.custom));
         if let Some(db) = db {
             db.set_active_theme(name)
                 .map_err(|e| format!("persist theme: {e}"))?;
@@ -137,7 +152,7 @@ impl Themes {
         if !self.choices.iter().any(|choice| choice.name == name) {
             return Err(format!("unknown theme {name:?}"));
         }
-        self.active = resolve(Some(name), &self.custom);
+        self.set_active(resolve(Some(name), &self.custom));
         Ok(())
     }
 
@@ -152,8 +167,21 @@ impl Themes {
     /// Colours are emitted as `#rrggbb` (or a palette index) so Lua can hand
     /// them straight back through the node vocabulary without the kernel
     /// needing a second colour type on the boundary.
+    ///
+    /// Cloned rather than borrowed: its one caller in the loop publishes the
+    /// whole table into Lua once per republish, and handing out a borrow of
+    /// `self` there costs more than the copy does. A single role is
+    /// [`Self::role`], which is the cheap path and the one the bands use.
     pub fn roles(&self) -> BTreeMap<&'static str, String> {
-        palette_roles(&self.active.palette)
+        self.roles.clone()
+    }
+
+    /// One role, parsed. The form every caller inside the kernel wants, and the
+    /// one that must not cost a palette rebuild — the bands ask per span.
+    pub fn role(&self, name: &str) -> Option<Color> {
+        self.roles
+            .get(name)
+            .and_then(|raw| super::node::parse_color(raw))
     }
 
     /// How a text selection is painted: the palette's own selection pair.
@@ -163,17 +191,11 @@ impl Themes {
     /// each cell already had — so a selection over styled text came out a
     /// different colour per span and matched no theme.
     pub fn selection_style(&self) -> Style {
-        let roles = self.roles();
-        let colour = |role: &str| {
-            roles
-                .get(role)
-                .and_then(|raw| super::node::parse_color(raw))
-        };
         let mut style = Style::default();
-        if let Some(bg) = colour("selection_bg") {
+        if let Some(bg) = self.role("selection_bg") {
             style = style.bg(bg);
         }
-        if let Some(fg) = colour("selection_fg") {
+        if let Some(fg) = self.role("selection_fg") {
             style = style.fg(fg);
         }
         // A palette defining neither still has to show a selection.
@@ -439,6 +461,38 @@ mod tests {
         themes.select(&other, None).expect("select");
         assert_eq!(themes.active_name(), other);
         assert_ne!(before, themes.roles(), "the palette should have changed");
+    }
+
+    /// The cache the bands read must never lag the active palette — a stale one
+    /// would paint the chrome in the theme you just left.
+    #[test]
+    fn the_cached_roles_follow_a_preview_as_well_as_a_selection() {
+        let mut themes = Themes::load(None);
+        let agrees = |themes: &Themes| {
+            let published = themes.roles();
+            let expected = palette_roles(&themes.active().palette);
+            assert_eq!(published, expected, "the cache drifted from the palette");
+            assert_eq!(
+                themes.role("accent"),
+                published
+                    .get("accent")
+                    .and_then(|raw| super::super::node::parse_color(raw)),
+                "the single-role accessor reads the same cache"
+            );
+        };
+        agrees(&themes);
+
+        let other = themes
+            .choices()
+            .iter()
+            .find(|c| c.name != themes.active_name())
+            .expect("more than one theme")
+            .name
+            .clone();
+        themes.preview(&other).expect("preview");
+        agrees(&themes);
+        themes.select(&other, None).expect("select");
+        agrees(&themes);
     }
 
     #[test]

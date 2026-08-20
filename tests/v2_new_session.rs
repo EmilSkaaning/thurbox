@@ -1,7 +1,8 @@
 //! The new-session flow, against the real bundled plugin.
 //!
-//! What is worth testing here is not the pixels — `tests/v2_parity.rs` owns that
-//! — but the two things v1 got wrong often enough to have grown machinery for:
+//! What is worth testing here is not the pixels — the gap to v1 is tracked in
+//! `openspec/changes/v2-parity-gaps/` — but the two things v1 got wrong often
+//! enough to have grown machinery for:
 //! **which step the flow is on** after each keystroke, and **what the create
 //! command it finally issues actually carries**. Both are observable from
 //! outside: the step from what is drawn, the command from the queue it is pushed
@@ -175,10 +176,17 @@ fn drawn(host: &LuaHost, world: &World) -> String {
     let Some(float) = rendered.float else {
         return String::new();
     };
-    // The flow asks in cells for its height and a share of the screen for its
-    // width, exactly as v1's modals are sized.
+    // Sized the way `App::float_rect` sizes it: cells when the plugin gives them,
+    // else a share of the screen. The flow gives both — `cols`, because the row
+    // budget it middle-truncates against (`ROW_COLS`) is in columns, so asking as
+    // a percentage meant the two agreed only at an 80-column terminal. Reading
+    // `width_pct` here painted a 72-column float the binary never draws, and
+    // every truncation assertion below was made against 16 columns of slack that
+    // do not exist.
     let rows = float.rows.expect("the flow sizes its own height");
-    let width = (120.0 * float.width_pct / 100.0) as u16;
+    let width = float
+        .cols
+        .unwrap_or_else(|| (120.0 * float.width_pct / 100.0) as u16);
     let mut terminal = Terminal::new(TestBackend::new(width, rows)).expect("terminal");
     terminal
         .draw(|frame| {
@@ -764,7 +772,7 @@ fn a_member_of_a_folder_cannot_be_forgotten_on_its_own() {
         host.drain_commands().is_empty(),
         "a child has no memory of its own to forget"
     );
-    assert!(drawn(&host, &world).contains("delete the parent header instead"));
+    assert!(drawn(&host, &world).contains("delete the header instead"));
 }
 
 // ── Through to creation ────────────────────────────────────────────────────

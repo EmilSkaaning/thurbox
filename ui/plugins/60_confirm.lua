@@ -73,6 +73,8 @@ return {
     end
 
     children[#children + 1] = { type = "text", len = 1, text = "" }
+    local confirm = "[ Confirm ]"
+    local cancel = " [ Cancel ]"
     children[#children + 1] = {
       type = "box",
       axis = "horizontal",
@@ -92,16 +94,21 @@ return {
         },
         -- The pills replay the keys they name, so a click and a keystroke cannot
         -- come to mean different things.
+        --
+        -- Measured from the string, never hard-coded: `" [ Cancel ]"` is eleven
+        -- columns and the slot said ten, so the closing bracket was clipped off
+        -- every confirmation — the same mistake `70_new_session`'s footer
+        -- records having made.
         {
           type = "text",
-          len = 11,
-          text = { { { text = "[ Confirm ]", style = { fg = theme.bad, bold = true } } } },
+          len = widgets.len(confirm),
+          text = { { { text = confirm, style = { fg = theme.bad, bold = true } } } },
           role = "key:y",
         },
         {
           type = "text",
-          len = 10,
-          text = { { { text = " [ Cancel ]", style = { fg = theme.muted } } } },
+          len = widgets.len(cancel),
+          text = { { { text = cancel, style = { fg = theme.muted } } } },
           role = "key:esc",
         },
       },
@@ -113,6 +120,13 @@ return {
     end
     return {
       -- Danger-bordered, as v1 frames a destructive confirmation.
+      --
+      -- `width` is a PERCENT of the screen (`Float::width_pct`), and 60 is the
+      -- default it restates. Right here, unlike in the creation flow: this float
+      -- spends no fixed column budget, so it can scale with the terminal. Say
+      -- `cols` instead the moment anything inside it is measured in columns —
+      -- reading one as the other is what made the wizard lay out for 56 columns
+      -- inside a 48-cell float at 80 columns wide.
       float = { width = 60, rows = rows },
       type = "box",
       frame = {

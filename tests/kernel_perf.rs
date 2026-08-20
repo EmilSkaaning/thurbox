@@ -7,18 +7,15 @@
 
 use thurbox::kernel::command::{Args, Command, CommandBus};
 use thurbox::kernel::host::{LuaHost, RenderContext};
-use thurbox::kernel::perf::{Counters, Snapshot as Perf};
-use thurbox::kernel::snapshot::SnapshotStore;
+use thurbox::kernel::perf::Counters;
+use thurbox::kernel::snapshot::{SnapshotStore, REFRESH_INTERVAL};
 use thurbox::storage::Database;
 
+mod common;
+
+/// This file renders nothing focused; the width and height are what vary.
 fn ctx(width: u16, height: u16) -> RenderContext {
-    RenderContext {
-        width,
-        height,
-        focused: false,
-        elapsed: 0.0,
-        frame: 0,
-    }
+    common::ctx(width, height, false)
 }
 
 fn plugin_dir(source: &str) -> tempfile::TempDir {
@@ -103,22 +100,30 @@ fn counters_distinguish_painted_frames_from_skipped_ones() {
 }
 
 #[test]
-fn a_snapshot_read_never_touches_the_database() {
+fn an_idle_store_stops_querying_the_database() {
     // ADR-P6 re-derived: v1 cached hook state behind a `data_version` check to
-    // keep an idle tick off the sessions table. Here the shape makes it
-    // structural — reads come from the snapshot, and refresh is the only thing
-    // that queries.
+    // keep an idle tick off the sessions table. The interval alone would re-read
+    // five tables every 400 ms forever on a database nobody wrote to, so the
+    // property is that a due refresh with no commit behind it does not rebuild.
+    //
+    // This used to time ten thousand `current()` calls against a store that owned
+    // no database at all, and assert only that the clock had not moved much: it
+    // measured a field read, and would have passed with the gate deleted.
     let db = Database::open_in_memory().expect("db");
-    let store = SnapshotStore::with_database(db);
+    let mut store = SnapshotStore::with_database(db);
+    let rows = store.current().sessions.clone();
 
-    let started = std::time::Instant::now();
-    for _ in 0..10_000 {
-        let _ = store.current().sessions.len();
-    }
+    // Past the interval, so `data_version` is the only thing left to stop a
+    // rebuild — and nothing committed.
+    std::thread::sleep(REFRESH_INTERVAL + std::time::Duration::from_millis(50));
     assert!(
-        started.elapsed() < std::time::Duration::from_millis(500),
-        "10k reads took {:?} — they are not coming from memory",
-        started.elapsed()
+        !store.refresh_if_due(),
+        "an idle store rebuilt anyway — the data_version gate is gone"
+    );
+    assert_eq!(
+        store.current().sessions,
+        rows,
+        "and the rows a plugin reads are the ones already in memory"
     );
 }
 
@@ -173,6 +178,4 @@ fn rendering_many_panes_stays_within_a_frame_budget() {
         each < std::time::Duration::from_millis(20),
         "a 200-row pane took {each:?} per render"
     );
-
-    let _ = Perf::default();
 }

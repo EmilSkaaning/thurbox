@@ -221,7 +221,13 @@ local function restore(snapshot)
     store.selected = snapshot.selected
   end
   if snapshot.sessions_shown ~= nil then
-    store["panels.sessions"] = snapshot.sessions_shown
+    -- Through `panels`, never `store` by hand: the key layout is that module's
+    -- to own, and `preview` above already opened the column through it.
+    if snapshot.sessions_shown then
+      panels.show("sessions")
+    else
+      panels.hide("sessions")
+    end
   end
 end
 

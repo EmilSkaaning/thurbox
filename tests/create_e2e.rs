@@ -8,8 +8,11 @@
 //! Everything it touches is scoped to a throwaway socket and a temporary
 //! directory, so it can never disturb a real session.
 
-use std::path::Path;
 use std::process::Command;
+
+mod common;
+
+use common::git;
 
 /// A throwaway tmux socket, so this never touches the real one.
 const SOCKET: &str = "thurbox-create-e2e";
@@ -22,35 +25,17 @@ fn have_tmux() -> bool {
         .unwrap_or(false)
 }
 
-fn git(dir: &Path, args: &[&str]) {
-    let ok = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        // Scrubbed so an inherited GIT_* var cannot reach into this repo.
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .output()
-        .expect("run git")
-        .status
-        .success();
-    assert!(ok, "git {args:?} failed");
-}
-
 /// A repository with one commit, which is the minimum a worktree needs.
 fn repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     git(dir.path(), &["init", "-q", "-b", "main"]);
     git(dir.path(), &["config", "user.email", "t@example.com"]);
     git(dir.path(), &["config", "user.name", "thurbox-test"]);
-    // Commit signing is a user setting that fails in a bare environment, and
-    // this repo is not the place to be signing anything.
+    // Signing would make this depend on a key in the user's agent, and the repo
+    // is throwaway.
     git(dir.path(), &["config", "commit.gpgsign", "false"]);
     std::fs::write(dir.path().join("README.md"), "# probe\n").expect("write");
     git(dir.path(), &["add", "."]);
-    // Signing would make this depend on a key in the user's agent; the repo is
-    // throwaway, so it is disabled here rather than required of the machine.
-    git(dir.path(), &["config", "commit.gpgsign", "false"]);
     git(dir.path(), &["commit", "-qm", "init"]);
     dir
 }
@@ -113,9 +98,21 @@ fn creating_a_session_produces_a_worktree_a_row_and_a_window() {
         Ok(spawned) => spawned,
         Err(e) => {
             cleanup();
-            // A tmux server that will not start is an environment problem.
-            if e.contains("tmux") {
-                eprintln!("skipping: tmux would not spawn a window: {e}");
+            // A server that will not start is an environment fact, like a
+            // missing binary. Anything else is this pipeline breaking, and this
+            // is the only test that runs the whole of it — so the skip has to
+            // name the condition rather than the tool. Matching the substring
+            // "tmux" over the whole error exited GREEN on every backend failure
+            // that merely mentions it ("can't find pane", "failed to create
+            // window", any `reportable_stderr` line), which is the one outcome
+            // an end-to-end test must never have.
+            const NO_SERVER: [&str; 3] = [
+                "no server running",
+                "failed to connect to server",
+                "error connecting to",
+            ];
+            if NO_SERVER.iter().any(|marker| e.contains(marker)) {
+                eprintln!("skipping: no multiplexer server to spawn into: {e}");
                 return;
             }
             panic!("creation failed: {e}");

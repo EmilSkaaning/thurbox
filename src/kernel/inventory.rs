@@ -27,7 +27,12 @@ pub enum Kind {
     /// Prose, not code: shipped guidance for whoever edits this directory.
     Doc,
     /// `plugins.toml`: what the interface is composed of.
-    Manifest,
+    ///
+    /// Named for the file — `plugin_spec::SPEC_FILE` — rather than "manifest",
+    /// which in this codebase already names two other files: a package's own
+    /// `plugin.toml` (`PackageManifest::FILE`) and delivery's `.bundled.json`
+    /// record (`bundled::MANIFEST`).
+    Spec,
 }
 
 impl Kind {
@@ -37,7 +42,7 @@ impl Kind {
             Kind::Module => "module",
             Kind::Arrangement => "arrangement",
             Kind::Doc => "doc",
-            Kind::Manifest => "manifest",
+            Kind::Spec => "spec",
         }
     }
 
@@ -45,10 +50,10 @@ impl Kind {
         if relative == "layout.lua" {
             Kind::Arrangement
         } else if relative == crate::session::plugin_spec::SPEC_FILE {
-            // Before the `plugins/` fallthrough, for the same reason `Doc` is: a
-            // manifest reported as a pane that failed to load is a false alarm,
-            // and the loader never offers it one (it reads `plugins/*.lua`).
-            Kind::Manifest
+            // Before the `plugins/` fallthrough, for the same reason `Doc` is: the
+            // spec reported as a pane that failed to load is a false alarm, and
+            // the loader never offers it one (it reads `plugins/*.lua`).
+            Kind::Spec
         } else if relative.ends_with(".md") {
             Kind::Doc
         } else if relative.starts_with("lib/") {

@@ -75,7 +75,7 @@ impl PluginEntry {
         if self.src.trim().is_empty() {
             return Err(format!("{}: src is empty", self.file));
         }
-        validate_destination(&self.file)
+        validate_pane_destination(&self.file)
     }
 }
 
@@ -104,6 +104,23 @@ pub fn validate_destination(file: &str) -> Result<(), String> {
     }
     if !file.ends_with(".lua") {
         return Err(format!("{file}: must be a Lua file"));
+    }
+    Ok(())
+}
+
+/// Refuse a *pane* destination, which is [`validate_destination`] plus the one
+/// rule that only applies to a pane: it may not land in `lib/`.
+///
+/// [`PackageManifest::validate`] has always refused a manifest that puts its pane
+/// there, but `--as` reaches the destination without going through a manifest —
+/// so `plugin install <url>/x.lua --as lib/mine.lua` used to record a spec entry
+/// for a file the loader never reads (`is_nested_pane` is false for `lib/…`) and
+/// which the inventory then classifies as a module: an install that succeeds,
+/// draws nothing, and reports no fault anywhere.
+pub fn validate_pane_destination(file: &str) -> Result<(), String> {
+    validate_destination(file)?;
+    if file.starts_with("lib/") {
+        return Err(format!("{file}: the pane belongs in plugins/"));
     }
     Ok(())
 }
@@ -336,13 +353,7 @@ impl PackageManifest {
                 ));
             }
         }
-        if self.pane.path.starts_with("lib/") {
-            return Err(format!(
-                "{}: the pane {} belongs in plugins/",
-                Self::FILE,
-                self.pane.path
-            ));
-        }
+        validate_pane_destination(&self.pane.path).map_err(|e| format!("{}: {e}", Self::FILE))?;
         Ok(())
     }
 }
@@ -650,6 +661,32 @@ file = "plugins/80_notes.lua"
         }
         .validate()
         .is_ok());
+    }
+
+    /// `lib/` is for modules, and `--as` reaches a destination without going
+    /// through a manifest — so without this rule `plugin install <url>/x.lua --as
+    /// lib/mine.lua` records a spec entry for a pane the loader never reads.
+    #[test]
+    fn a_pane_may_not_be_delivered_into_the_module_namespace() {
+        let error = validate_pane_destination("lib/theme.lua").expect_err("should fail");
+        assert!(error.contains("plugins/"), "says where it belongs: {error}");
+        assert!(validate_pane_destination("plugins/75_atlas.lua").is_ok());
+        // A repository keeps its author's layout, so its pane is nested under the
+        // package's own directory rather than in `plugins/`.
+        assert!(validate_pane_destination("thurbox-widget/plugins/40_x.lua").is_ok());
+        // The manifest half enforces the same rule, through the same function.
+        let manifest = PackageManifest {
+            name: "bad".into(),
+            description: None,
+            version: None,
+            requires_thurbox: None,
+            pane: PackageFile {
+                source: "pane.lua".into(),
+                path: "lib/bad.lua".into(),
+            },
+            modules: Vec::new(),
+        };
+        assert!(manifest.validate().is_err());
     }
 
     #[test]

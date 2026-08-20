@@ -652,6 +652,21 @@ pub(crate) fn host_shell_c(host: &HostDef, script: &str) -> Command {
     cmd
 }
 
+/// [`host_shell_c`], run in a directory **on the host**.
+///
+/// The `cd` is part of the script rather than a `Command::current_dir`, which
+/// would name a path on this machine — the directory is on the other one. The
+/// quoting is done here rather than at the call site so a caller outside this
+/// module does not have to reach for `shell::posix_quote` itself: a worktree
+/// path can contain anything a filesystem allows, and `kernel::runs` is the
+/// caller, which may not touch `shell` at all (see `MODULE_RULES`).
+pub(crate) fn host_shell_c_in(host: &HostDef, cwd: &Path, script: &str) -> Command {
+    host_shell_c(
+        host,
+        &format!("cd {} && {script}", posix_quote(&cwd.to_string_lossy())),
+    )
+}
+
 /// Build a `<launcher> powershell -NoProfile -EncodedCommand <base64>`
 /// [`Command`] — [`host_shell_c`] for a **native-Windows** host, which has no
 /// `sh` at all (`sh -c …` there fails with PowerShell's

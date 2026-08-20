@@ -119,12 +119,18 @@ pub enum Outcome {
     Updated,
     /// Present and already what the source carries.
     Current,
-    /// Changed by the user, and therefore theirs. Not overwritten.
+    /// Changed by the user, and therefore theirs. Not overwritten — and, when the
+    /// spec stopped listing it, not taken back either ([`withdraw`]), which is the
+    /// case [`EntryReport::kept`] names the files for.
     Kept,
     /// Deleted by the user, and remembered as such. Not reinstalled.
     Deleted,
     /// Taken back, because the spec no longer lists it.
-    Removed,
+    ///
+    /// Named for the [`withdraw`] that produces it rather than "removed", which
+    /// is the word `bundled::Report.removed` already uses for the opposite half
+    /// of the same delivery path — there it means the *user* deleted the file.
+    Withdrawn,
 }
 
 impl Outcome {
@@ -135,7 +141,7 @@ impl Outcome {
             Outcome::Current => "current",
             Outcome::Kept => "kept",
             Outcome::Deleted => "deleted",
-            Outcome::Removed => "removed",
+            Outcome::Withdrawn => "withdrawn",
         }
     }
 
@@ -143,7 +149,7 @@ impl Outcome {
     pub fn changed(self) -> bool {
         matches!(
             self,
-            Outcome::Installed | Outcome::Updated | Outcome::Removed
+            Outcome::Installed | Outcome::Updated | Outcome::Withdrawn
         )
     }
 }
@@ -283,7 +289,7 @@ fn escalate(current: &mut Outcome, candidate: Outcome) {
         Outcome::Installed => 2,
         Outcome::Deleted => 3,
         Outcome::Kept => 4,
-        Outcome::Removed => 5,
+        Outcome::Withdrawn => 5,
     };
     if rank(candidate) > rank(*current) {
         *current = candidate;
@@ -305,7 +311,7 @@ pub fn withdraw(dir: &Path, entry: &LockEntry) -> Result<Vec<(String, Outcome)>,
             Ok(current) if digest(&current) == *recorded => {
                 std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
                 prune_empty(dir, &path);
-                report.push((file.clone(), Outcome::Removed));
+                report.push((file.clone(), Outcome::Withdrawn));
             }
             // Theirs now — it outlived the entry that delivered it.
             Ok(_) => report.push((file.clone(), Outcome::Kept)),
@@ -313,6 +319,28 @@ pub fn withdraw(dir: &Path, entry: &LockEntry) -> Result<Vec<(String, Outcome)>,
         }
     }
     Ok(report)
+}
+
+/// [`withdraw`] an entry, and say what it came to: the files left on disk because
+/// the user had changed them, and the outcome to report for the entry as a whole.
+///
+/// One answer for both callers — `sync` for an entry the spec dropped, `remove`
+/// for one the user dropped — because they must not diverge. `Kept` wins over
+/// `Withdrawn` here, the opposite of [`escalate`]'s ranking for a convergence:
+/// reporting `withdrawn` for an entry whose pane is still on disk — still loaded,
+/// still claiming its keys — leaves it with no spec entry, so no later `sync`
+/// could ever explain it.
+fn take_back(dir: &Path, record: &LockEntry) -> Result<(Vec<String>, Outcome), String> {
+    let kept: Vec<String> = withdraw(dir, record)?
+        .into_iter()
+        .filter(|(_, outcome)| *outcome == Outcome::Kept)
+        .map(|(file, _)| file)
+        .collect();
+    let outcome = match kept.is_empty() {
+        true => Outcome::Withdrawn,
+        false => Outcome::Kept,
+    };
+    Ok((kept, outcome))
 }
 
 /// Remove the directories a withdrawn file leaves empty, up to (never including)
@@ -384,27 +412,26 @@ pub struct Resolved {
 /// otherwise ignored. For a bare name it selects the git ref, which is what makes
 /// a lock reproducible after the binary moves on.
 pub fn resolve_source(src: &str, pin: Option<&str>) -> Resolved {
-    use crate::agent::extension_config as ext;
     let bare = plugin_spec::is_bare_name(src);
     let version = match (pin, bare) {
         (Some(pin), _) => pin.to_string(),
         // A bare name is fetched at the binary's release tag, so that IS the
         // version of a freshly-installed one.
-        (None, true) => ext::official_ref(),
+        (None, true) => crate::agent::extension_config::official_ref(),
         (None, false) => String::new(),
     };
     let source = if bare {
-        ext::ExtensionSource::Remote(format!(
+        crate::agent::extension_config::ExtensionSource::Remote(format!(
             "{}/{src}",
-            ext::official_set_base_at(EXAMPLE_SET, &version)
+            crate::agent::extension_config::official_set_base_at(EXAMPLE_SET, &version)
         ))
     } else {
-        ext::resolve_source_in(src, EXAMPLE_SET)
+        crate::agent::extension_config::resolve_source_in(src, EXAMPLE_SET)
     };
     let at = match &source {
-        ext::ExtensionSource::Remote(base) => base.clone(),
-        ext::ExtensionSource::Local(dir) => dir.display().to_string(),
-        ext::ExtensionSource::Git(url) => url.clone(),
+        crate::agent::extension_config::ExtensionSource::Remote(base) => base.clone(),
+        crate::agent::extension_config::ExtensionSource::Local(dir) => dir.display().to_string(),
+        crate::agent::extension_config::ExtensionSource::Git(url) => url.clone(),
     };
     Resolved {
         source,
@@ -430,55 +457,74 @@ pub struct Fetched {
 /// `as_file` overrides the destination the manifest proposes. It is required for
 /// the degenerate shape, which proposes none.
 pub fn fetch(src: &str, resolved: &Resolved, as_file: Option<&str>) -> Result<Fetched, String> {
-    use crate::agent::extension_config as ext;
-
     if src.trim().ends_with(".lua") {
         let file = as_file
             .ok_or_else(|| {
                 format!("{src} is a single file, so it needs a destination: --as plugins/90_x.lua")
             })?
             .to_string();
-        plugin_spec::validate_destination(&file)?;
+        plugin_spec::validate_pane_destination(&file)?;
         // Fetched relative to the *parent*, since the source names the file itself.
         let (base, name) = split_last(src);
         let source = match &resolved.source {
-            ext::ExtensionSource::Remote(_) => ext::ExtensionSource::Remote(base),
-            ext::ExtensionSource::Local(_) => ext::ExtensionSource::Local(ext::expand_tilde(&base)),
+            crate::agent::extension_config::ExtensionSource::Remote(_) => {
+                crate::agent::extension_config::ExtensionSource::Remote(base)
+            }
+            crate::agent::extension_config::ExtensionSource::Local(_) => {
+                crate::agent::extension_config::ExtensionSource::Local(
+                    crate::agent::extension_config::expand_tilde(&base),
+                )
+            }
             // A `.lua` source cannot also be a repository: `git_url` matched first,
             // so a `git+…/x.lua` never reaches here.
-            ext::ExtensionSource::Git(url) => ext::ExtensionSource::Git(url.clone()),
+            crate::agent::extension_config::ExtensionSource::Git(url) => {
+                crate::agent::extension_config::ExtensionSource::Git(url.clone())
+            }
         };
-        let contents = ext::fetch_file(&source, &name)?;
+        let contents = crate::agent::extension_config::fetch_file(&source, &name)?;
         return Ok(Fetched {
             manifest: None,
             payloads: vec![Payload { file, contents }],
         });
     }
 
-    let manifest_text = ext::fetch_file(&resolved.source, crate::session::PackageManifest::FILE)
-        .map_err(|e| {
-            format!(
-                "{src}: no {} at {} ({e})",
-                crate::session::PackageManifest::FILE,
-                resolved.at
-            )
-        })?;
+    let manifest_text = crate::agent::extension_config::fetch_file(
+        &resolved.source,
+        crate::session::PackageManifest::FILE,
+    )
+    .map_err(|e| {
+        format!(
+            "{src}: no {} at {} ({e})",
+            crate::session::PackageManifest::FILE,
+            resolved.at
+        )
+    })?;
     let manifest = crate::session::PackageManifest::parse(&manifest_text)
         .map_err(|e| format!("{src}: {e}"))?;
 
     let mut payloads = Vec::new();
     for (index, file) in manifest.files().enumerate() {
+        // `files()` yields the pane first, then the modules.
+        let is_pane = index == 0;
         // Only the PANE may be redirected. A module's path is the namespace rule
         // the manifest was validated against, and letting `--as` move it would
         // hand back the collision that rule exists to prevent.
-        let destination = match (index, as_file) {
-            (0, Some(file)) => file.to_string(),
+        let destination = match (is_pane, as_file) {
+            (true, Some(file)) => file.to_string(),
             _ => file.path.clone(),
         };
-        plugin_spec::validate_destination(&destination)?;
+        // The pane is held to the pane rule even when `--as` named the
+        // destination: the manifest's own is checked by `validate`, and a
+        // redirection that skipped it would deliver a pane into `lib/`, where
+        // nothing loads it and nothing reports it missing.
+        if is_pane {
+            plugin_spec::validate_pane_destination(&destination)?;
+        } else {
+            plugin_spec::validate_destination(&destination)?;
+        }
         payloads.push(Payload {
             file: destination,
-            contents: ext::fetch_file(&resolved.source, &file.source)?,
+            contents: crate::agent::extension_config::fetch_file(&resolved.source, &file.source)?,
         });
     }
     Ok(Fetched {
@@ -496,6 +542,23 @@ fn split_last(src: &str) -> (String, String) {
     }
 }
 
+/// Does this standing grant the capabilities the file declared?
+///
+/// The other half of [`trust_of`], named rather than written out at the call
+/// site, because the two must agree: the Interface tab *labels* a row from
+/// `trust_of` and the kernel *grants* from this, and a second, weaker predicate
+/// beside it is exactly how they drifted — bare key presence granted an
+/// installed pane whose pin had moved, while the tab already said `untrusted`.
+///
+/// [`Drifted`](super::inventory::Trust::Drifted) grants: a trusted file the user
+/// then edited is the documented trusted-and-changed case, not a revocation.
+pub fn grants_capabilities(trust: super::inventory::Trust) -> bool {
+    matches!(
+        trust,
+        super::inventory::Trust::Trusted | super::inventory::Trust::Drifted
+    )
+}
+
 /// Where one file of the interface stands with the user, for what it declares.
 ///
 /// One implementation because the question splits two ways and the split is easy
@@ -509,7 +572,7 @@ pub fn trust_of(
     registry: &super::registry::Registry,
 ) -> super::inventory::Trust {
     let absolute = dir.join(relative);
-    let key = absolute.to_string_lossy();
+    let key = super::bundled::absolute_key(dir, relative);
     let current = std::fs::read_to_string(&absolute)
         .ok()
         .map(|text| digest(&text));
@@ -537,6 +600,12 @@ pub struct EntryReport {
     /// The version this moved from, when it moved.
     pub from: Option<String>,
     pub outcome: Outcome,
+    /// Files [`withdraw`] left on disk because the user had changed them.
+    ///
+    /// Carried rather than inferred from `outcome`: a caller reporting `kept` has
+    /// to be able to name what is still there, and the entry it belonged to is
+    /// gone from the spec by then — so nothing else could ever explain the file.
+    pub kept: Vec<String>,
 }
 
 /// Is this entry's source a repository, and therefore a working copy on disk?
@@ -735,6 +804,7 @@ fn install_repository(
         version: commit,
         from: None,
         outcome: Outcome::Installed,
+        kept: Vec::new(),
     })
 }
 
@@ -801,6 +871,7 @@ pub fn install(
         version,
         from: None,
         outcome,
+        kept: Vec::new(),
     })
 }
 
@@ -924,7 +995,7 @@ pub fn sync(dir: &Path) -> Result<Vec<EntryReport>, String> {
         .cloned()
         .collect::<Vec<LockEntry>>()
     {
-        withdraw(dir, &stale)?;
+        let (kept, outcome) = take_back(dir, &stale)?;
         lock.forget(&stale.file);
         reports.push(EntryReport {
             name: stale.file.clone(),
@@ -932,7 +1003,8 @@ pub fn sync(dir: &Path) -> Result<Vec<EntryReport>, String> {
             src: stale.src.clone(),
             version: stale.version.clone(),
             from: None,
-            outcome: Outcome::Removed,
+            outcome,
+            kept,
         });
     }
 
@@ -947,6 +1019,7 @@ pub fn sync(dir: &Path) -> Result<Vec<EntryReport>, String> {
                 version: commit,
                 from,
                 outcome,
+                kept: Vec::new(),
             });
             continue;
         }
@@ -971,6 +1044,7 @@ pub fn sync(dir: &Path) -> Result<Vec<EntryReport>, String> {
             version,
             from: None,
             outcome,
+            kept: Vec::new(),
         });
     }
 
@@ -1010,6 +1084,7 @@ pub fn update(dir: &Path, key: Option<&str>) -> Result<Vec<EntryReport>, String>
                 version: commit,
                 from,
                 outcome,
+                kept: Vec::new(),
             });
             continue;
         }
@@ -1035,6 +1110,7 @@ pub fn update(dir: &Path, key: Option<&str>) -> Result<Vec<EntryReport>, String>
             from: was.filter(|was| *was != version),
             version,
             outcome,
+            kept: Vec::new(),
         });
     }
 
@@ -1067,20 +1143,23 @@ pub fn remove(dir: &Path, key: &str) -> Result<EntryReport, String> {
             src: removed.src.clone(),
             version: record.map(|record| record.version).unwrap_or_default(),
             from: None,
-            outcome: Outcome::Removed,
+            outcome: Outcome::Withdrawn,
+            kept: Vec::new(),
         });
     }
 
-    if let Some(record) = &record {
-        withdraw(dir, record)?;
-    } else {
-        // Listed in the spec but never delivered — nothing on disk to take back,
-        // and the entry is gone either way.
-        let path = dir.join(&removed.file);
-        if path.is_file() {
-            std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let (kept, outcome) = match &record {
+        Some(record) => take_back(dir, record)?,
+        None => {
+            // Listed in the spec but never delivered — nothing on disk to take
+            // back, and the entry is gone either way.
+            let path = dir.join(&removed.file);
+            if path.is_file() {
+                std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            }
+            (Vec::new(), Outcome::Withdrawn)
         }
-    }
+    };
     write_lock(dir, &lock)?;
 
     Ok(EntryReport {
@@ -1089,7 +1168,8 @@ pub fn remove(dir: &Path, key: &str) -> Result<EntryReport, String> {
         src: removed.src.clone(),
         version: record.map(|record| record.version).unwrap_or_default(),
         from: None,
-        outcome: Outcome::Removed,
+        outcome,
+        kept,
     })
 }
 
@@ -1592,5 +1672,29 @@ mod tests {
             .expect("parent")
             .join("escape.lua")
             .exists());
+    }
+
+    /// The grant predicate answers for all four standings, and in particular
+    /// refuses the one that used to slip through: an installed pane whose pin
+    /// has moved. `plugin update` advancing a version must not let new upstream
+    /// code inherit the grant made to the old one.
+    #[test]
+    fn only_trusted_and_drifted_grant_capabilities() {
+        use super::super::inventory::Trust;
+        assert!(grants_capabilities(Trust::Trusted));
+        assert!(
+            grants_capabilities(Trust::Drifted),
+            "an edited own file is trusted-and-changed, not revoked"
+        );
+        assert!(!grants_capabilities(Trust::Untrusted));
+        assert!(!grants_capabilities(Trust::NotAsked));
+        assert!(
+            !grants_capabilities(Trust::resolve_installed(
+                Some(("atlas@v1", "a")),
+                "atlas@v2",
+                Some("b")
+            )),
+            "a moved pin must not carry the old grant"
+        );
     }
 }

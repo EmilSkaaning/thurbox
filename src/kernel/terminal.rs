@@ -214,6 +214,22 @@ pub struct Terminals {
     /// Captured once rather than looked up per attach so the failure mode is
     /// "no runtime at construction", not a surprise mid-session.
     runtime: Option<tokio::runtime::Handle>,
+    /// Sizes the multiplexer has yet to be told about, last-write-wins per
+    /// session.
+    ///
+    /// A rect change is noticed inside the paint, and pushing it is a blocking
+    /// round trip per pane (see [`crate::agent::backend::PaneResize`]) — so the
+    /// paint records the size it wants and [`Self::serve_resizes`] hands it to a
+    /// worker. A `RefCell` because `SurfaceProvider::render_session` takes
+    /// `&self`, like the rect and size memos beside it.
+    resizes: RefCell<HashMap<String, (u16, u16)>>,
+    /// Sessions whose resize worker has not reported back.
+    ///
+    /// Without it a drag across a slow host stacks a thread per frame, each
+    /// waiting out the same timeout. The pending size is *kept* while one is out,
+    /// so the last size asked for is still pushed once the worker lands.
+    resizing: std::collections::HashSet<String>,
+    resized: (Sender<String>, Receiver<String>),
     /// Programs plugins asked for, keyed by [`ProgramKey`].
     ///
     /// Here beside `live` rather than in a module of their own, because a pane
@@ -384,6 +400,9 @@ impl Terminals {
             discovering: std::collections::HashSet::new(),
             discovered_rx: std::sync::mpsc::channel(),
             runtime: tokio::runtime::Handle::try_current().ok(),
+            resizes: RefCell::new(HashMap::new()),
+            resizing: std::collections::HashSet::new(),
+            resized: std::sync::mpsc::channel(),
             programs: HashMap::new(),
         }
     }
@@ -402,6 +421,7 @@ impl Terminals {
         self.collect_discovered();
         self.collect_attached(rows, cols);
         self.drop_lost_panes(snapshot);
+        self.serve_resizes();
 
         // Only pay for discovery while something needs it, and never for a remote
         // row: a remote spawn drives control mode and records the real pane id, so
@@ -504,7 +524,7 @@ impl Terminals {
     /// records the new pane id; a local one has none to record and forgets
     /// instead.
     fn drop_lost_panes(&mut self, snapshot: &Snapshot) {
-        let lost: Vec<(String, Option<String>, bool)> = snapshot
+        let lost: Vec<(String, Option<String>, String, bool)> = snapshot
             .sessions
             .iter()
             .filter_map(|row| {
@@ -522,17 +542,26 @@ impl Terminals {
                         // by name, on every frame, forever.
                         && (remote || self.pane_placed(row, id))
                 });
-                (live.session.has_exited() || moved)
-                    .then(|| (row.id.clone(), row.backend_id.clone(), remote))
+                (live.session.has_exited() || moved).then(|| {
+                    (
+                        row.id.clone(),
+                        row.backend_id.clone(),
+                        row.backend.clone(),
+                        remote,
+                    )
+                })
             })
             .collect();
-        for (id, pane, remote) in lost {
+        for (id, pane, backend, remote) in lost {
             self.live.remove(&id);
             if remote {
                 // The backend has to be readied again before the next attach can
                 // adopt anything: the connection this session died with is the
-                // one every other session on that host shares.
-                self.ready.borrow_mut().clear();
+                // one every other session on THAT host shares. Only that one —
+                // clearing the whole set made one host going down re-ready every
+                // other backend, the local one included, and each re-ready is a
+                // blocking round trip on a connection that never broke.
+                self.ready.borrow_mut().remove(&backend);
                 self.fail(&id, pane, "host unreachable".to_string());
             } else {
                 // Locally the pane is simply gone. Recorded against the pane that
@@ -540,6 +569,55 @@ impl Terminals {
                 // one a restart just created — as worth trying at once.
                 self.fail(&id, pane, "session has no pane yet".to_string());
             }
+        }
+    }
+
+    /// Record the size a surface was painted at, for the multiplexer to be told
+    /// on the next tick.
+    ///
+    /// The grids move **now**, because they are this process's own memory and a
+    /// pane painted at a size its parser disagrees with wraps wrongly for the
+    /// whole frame. The panes themselves are queued: telling them is a blocking
+    /// round trip, and this runs inside the paint.
+    fn want_resize(&self, session: &str, live: &crate::agent::backend::Session, size: (u16, u16)) {
+        live.resize_grids(size.0, size.1);
+        self.resizes.borrow_mut().insert(session.to_string(), size);
+    }
+
+    /// Hand each queued size to a worker, one at a time per session.
+    ///
+    /// Last-write-wins: a drag through fifty widths is fifty entries overwriting
+    /// each other and one round trip per tick, rather than fifty round trips the
+    /// render loop waits on.
+    fn serve_resizes(&mut self) {
+        while let Ok(done) = self.resized.1.try_recv() {
+            self.resizing.remove(&done);
+        }
+        let wanted: Vec<(String, (u16, u16))> = {
+            let mut queue = self.resizes.borrow_mut();
+            let ready: Vec<String> = queue
+                .keys()
+                .filter(|id| !self.resizing.contains(*id))
+                .cloned()
+                .collect();
+            ready
+                .into_iter()
+                .filter_map(|id| queue.remove(&id).map(|size| (id, size)))
+                .collect()
+        };
+        for (id, (rows, cols)) in wanted {
+            // A session that went away between the paint and now: its panes are
+            // not ours to resize any more.
+            let Some(live) = self.live.get(&id) else {
+                continue;
+            };
+            let resize = live.session.pane_resize();
+            let tx = self.resized.0.clone();
+            self.resizing.insert(id.clone());
+            std::thread::spawn(move || {
+                resize.apply(rows, cols);
+                let _ = tx.send(id);
+            });
         }
     }
 
@@ -689,6 +767,8 @@ impl Terminals {
     pub fn forget(&mut self, session: &str) {
         self.live.remove(session);
         self.failed.remove(session);
+        // A size wanted for a pane we no longer hold is nobody's to push.
+        self.resizes.borrow_mut().remove(session);
     }
 
     /// Record why a session has no pane, and what was tried.
@@ -999,7 +1079,10 @@ impl Terminals {
             &key.name,
         );
         let env: HashMap<String, String> = HashMap::new();
-        let (rows, cols) = (rows.max(1), cols.max(1));
+        // The same floor the parser gets: clamped at 1 the multiplexer pane was
+        // born one cell smaller than the `vt100` grid `wire_up` floors to 2, so
+        // the two disagreed from the first byte.
+        let (rows, cols) = crate::agent::backend::vt_floor(rows, cols);
 
         // An existing window of that name is this same pane from a previous run of
         // the interface: the name is deterministic, so finding it IS the
@@ -1856,14 +1939,14 @@ impl SurfaceProvider for Terminals {
             // The shell is opened at the terminal's size, not the pane's, and
             // while it is the visible view nothing else drives a resize — so it
             // is matched to its rect here, exactly as the agent surface below
-            // is. `Session::resize` sizes both panes, which is right: they take
+            // is. One queued resize covers both panes, which is right: they take
             // turns in the same rect.
             live.rect.set(area);
             live.shell_visible.set(true);
             let wanted = (area.height, area.width);
             if live.size.get() != wanted {
                 live.size.set(wanted);
-                live.session.resize(area.height, area.width);
+                self.want_resize(id, &live.session, wanted);
             }
             let Ok(parser) = shell.parser.lock() else {
                 return false;
@@ -1880,14 +1963,14 @@ impl SurfaceProvider for Terminals {
         };
 
         // The pane must match the rect it is painted into, or the agent wraps
-        // at the wrong width. `resize` is a no-op when nothing changed, but the
-        // comparison keeps a tmux round-trip off every frame.
+        // at the wrong width. Compared against the last size rather than pushed
+        // every frame, so an unchanged rect queues nothing.
         live.rect.set(area);
         live.shell_visible.set(false);
         let wanted = (area.height, area.width);
         if live.size.get() != wanted {
             live.size.set(wanted);
-            live.session.resize(area.height, area.width);
+            self.want_resize(session, &live.session, wanted);
         }
 
         let Ok(mut parser) = live.session.parser.lock() else {
@@ -1951,6 +2034,51 @@ mod tests {
         // And the attempt is recorded as "there was no pane", which is what lets
         // a window appearing later be picked up instead of latched out.
         assert_eq!(terminals.failed["a"].pane, None);
+    }
+
+    /// The paint records the size it wants; the tick pushes it. Two frames of
+    /// dragging must cost one round trip, not two — and a session that went away
+    /// in between costs none.
+    #[test]
+    fn queued_resizes_coalesce_and_die_with_their_session() {
+        let mut terminals = Terminals::new();
+        terminals.resizes.borrow_mut().insert("a".into(), (10, 40));
+        terminals.resizes.borrow_mut().insert("a".into(), (24, 80));
+        assert_eq!(terminals.resizes.borrow().len(), 1, "last write wins");
+
+        terminals.serve_resizes();
+
+        assert!(terminals.resizes.borrow().is_empty());
+        assert!(
+            terminals.resizing.is_empty(),
+            "there is no live session to resize, so no worker was started"
+        );
+    }
+
+    /// The guard that stops a drag across a down host stacking one blocked
+    /// thread per frame — while keeping the size the drag ended on.
+    #[test]
+    fn a_resize_in_flight_holds_the_next_one_rather_than_losing_it() {
+        let mut terminals = Terminals::new();
+        terminals.resizing.insert("a".into());
+        terminals.resizes.borrow_mut().insert("a".into(), (24, 80));
+
+        terminals.serve_resizes();
+
+        assert_eq!(
+            terminals.resizes.borrow().get("a"),
+            Some(&(24, 80)),
+            "the size asked for while a worker was out is still owed"
+        );
+
+        // The worker reports; the queue is free to move again.
+        terminals.resized.0.send("a".into()).expect("report");
+        terminals.serve_resizes();
+        assert!(terminals.resizing.is_empty());
+        assert!(
+            terminals.resizes.borrow().is_empty(),
+            "and the owed size is taken off the queue"
+        );
     }
 
     #[test]

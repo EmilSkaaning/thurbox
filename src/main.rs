@@ -5,7 +5,10 @@
 //! Every surface you see — the session list included — is a file under `ui/`
 //! that you can edit while this is running.
 //!
-//! Runs alongside the v1 binary; nothing in `src/app/` or `src/ui/` is touched.
+//! This IS the `thurbox` binary: `src/app` (v1's TEA model) and `src/ui` (its 35
+//! render modules) were deleted when the kernel took the name, and v1 lives on
+//! the `v1.x` branch. `main` is the coordinator — the loop, the workers and the
+//! chrome — which is why it is the one module the architecture rules exempt.
 //! See `openspec/changes/v2-plugin-kernel/`.
 
 use std::error::Error;
@@ -136,7 +139,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // and the whole file is ignored, however carefully it was written.
     let (config, config_warnings) = thurbox::kernel::config::Config::load();
     let mut startup_notices: Vec<String> = config_warnings;
-    if let Some(db) = snapshots_db() {
+    if let Some(db) = open_db() {
         startup_notices.extend(thurbox::session_ops::heal_active_extensions(&db));
         startup_notices.extend(thurbox::session_ops::ensure_builtin_hooks_extension(&db));
         for notice in &startup_notices {
@@ -161,7 +164,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // the interface takes the terminal so it shows even if the interface would fail
     // to build. Declining cannot load v1 (it is not in this binary), so it turns
     // auto-update off and says how to reinstall the 1.x line.
-    if let Some(db) = snapshots_db() {
+    if let Some(db) = open_db() {
         if thurbox::kernel::consent::consent_gate(&db)?
             == thurbox::kernel::consent::Decision::Declined
         {
@@ -199,7 +202,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let settings = thurbox::session::settings::global();
             Notifier::new(settings.features.notifications, settings.notifications)
         },
-        themes: Themes::load(snapshots_db().as_ref()),
+        themes: Themes::load(open_db().as_ref()),
+        theme_db: None,
         updates: thurbox::kernel::updates::Updates::start(config.features()),
         slot_selection: std::collections::HashMap::new(),
         visible_slots: std::collections::HashSet::new(),
@@ -300,11 +304,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     result
 }
 
-/// A connection for reading the persisted theme choice at startup.
+/// A short-lived connection for a one-shot read or write outside the snapshot
+/// store, which owns its own.
 ///
-/// Separate from the snapshot store's: this is read once, and opening a second
-/// short-lived connection is cheaper than threading one through construction.
-fn snapshots_db() -> Option<thurbox::storage::Database> {
+/// **Not cheap.** `Database::open` runs `schema::initialize` — the busy timeout,
+/// the WAL pragma, the pragma batch and the whole migration pass — plus
+/// `prune_audit_log` and `prune_old_messages`. Fine at startup, once; per
+/// keystroke it replays all of that and two DELETEs on the render thread, which
+/// is why the theme picker holds its connection instead (see `App::theme_db`).
+///
+/// Named for what it is rather than for the one store that never uses it: it was
+/// `snapshots_db`.
+fn open_db() -> Option<thurbox::storage::Database> {
     thurbox::paths::database_file().and_then(|path| thurbox::storage::Database::open(&path).ok())
 }
 
@@ -384,7 +395,17 @@ fn key_event_from_chord(chord: &str) -> Option<KeyEvent> {
     let code = match name {
         "enter" => KeyCode::Enter,
         "esc" => KeyCode::Esc,
+        // shift+Tab is a KEY, not a modified Tab: that is how crossterm reports
+        // it and how `canonical_chord` spells it back. Emitting Tab+SHIFT did not
+        // round-trip — `canonical_chord` drops the shift for tab, so the chord
+        // came back as plain "tab" and a `key:shift+tab` click verb replayed as
+        // Tab. The SHIFT bit is cleared with it, since the code now carries it.
+        "tab" if modifiers.contains(KeyModifiers::SHIFT) => {
+            modifiers.remove(KeyModifiers::SHIFT);
+            KeyCode::BackTab
+        }
         "tab" => KeyCode::Tab,
+        // Still accepted as a spelling: a plugin may branch on the raw name.
         "backtab" => KeyCode::BackTab,
         "space" => KeyCode::Char(' '),
         "backspace" => KeyCode::Backspace,
@@ -419,7 +440,7 @@ fn key_event_from_chord(chord: &str) -> Option<KeyEvent> {
 /// v1's chain, from `resolve_editor` (`src/cli/config.rs`): the DB setting
 /// `thurbox-cli editor set` writes, then `$VISUAL`, then `$EDITOR`.
 fn editor_command() -> Option<String> {
-    snapshots_db()
+    open_db()
         .and_then(|db| db.get_editor_command().ok().flatten())
         .or_else(|| std::env::var("VISUAL").ok())
         .or_else(|| std::env::var("EDITOR").ok())
@@ -430,7 +451,7 @@ fn editor_command() -> Option<String> {
 ///
 /// `Auto` — the default — leaves the decision to the name-based classification.
 fn editor_mode() -> thurbox::session::settings::EditorMode {
-    snapshots_db()
+    open_db()
         .and_then(|db| db.get_editor_mode().ok())
         .unwrap_or_default()
 }
@@ -756,6 +777,14 @@ struct App {
     /// Active mouse text selection over a terminal surface, if any.
     selection: Option<Selection>,
     themes: Themes,
+    /// The connection the theme picker persists through, opened on first use.
+    ///
+    /// Lazy because most runs never open the picker, and **held** because
+    /// [`open_db`] runs schema init plus two prunes: opening one per call replayed
+    /// all of that on the render thread for every key the picker saw, so holding
+    /// `j` down paid for a migration pass and two DELETEs per key repeat — and
+    /// with a five-second busy timeout a contended write lock could park the loop.
+    theme_db: Option<thurbox::storage::Database>,
     /// Which occupant of each `switch` slot is visible, by slot name.
     ///
     /// Focusing a plugin in a switch slot makes it the visible one, which is
@@ -1052,7 +1081,13 @@ impl App {
             // state a worker thread cannot reach, and it is instant, so nothing is
             // gained by making it asynchronous.
             Command::Theme { name } => {
-                if let Err(e) = self.themes.select(name, snapshots_db().as_ref()) {
+                // Through the same held connection the picker reads (see
+                // `theme_db`) rather than a fresh `open_db`: a pane may send this
+                // as often as it likes, and this is the write half of that read.
+                if self.theme_db.is_none() {
+                    self.theme_db = open_db();
+                }
+                if let Err(e) = self.themes.select(name, self.theme_db.as_ref()) {
                     self.report(e, Level::Error);
                 }
             }
@@ -1315,6 +1350,18 @@ impl App {
         if self.diffs.poll() {
             self.dirty = true;
         }
+        // The cache tracks the sessions that exist, not every one ever selected: a
+        // diff is up to `MAX_DIFF_BYTES` and the default interface draws none of
+        // it, so without this the process holds a 4 MiB answer per session you
+        // ever looked at. Every other worker store has its own retain.
+        let present: std::collections::HashSet<&str> = self
+            .snapshots
+            .current()
+            .sessions
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect();
+        self.diffs.retain(&present);
 
         // The creation flow's reads. It asks by leaving a key in `store`,
         // which is written the moment its handler runs, so a request made
@@ -1686,7 +1733,7 @@ impl App {
                     .copied()
                     .unwrap_or(thurbox::kernel::inventory::Trust::NotAsked)
             },
-            &|path| registry.is_disabled(&ui_dir.join(path).to_string_lossy()),
+            &|path| registry.is_disabled(&thurbox::kernel::bundled::absolute_key(&ui_dir, path)),
         );
         let inventory = std::mem::take(&mut self.inventory);
         let ui_dir = self.ui_dir.display().to_string();
@@ -1954,10 +2001,7 @@ impl App {
             // cap for as long as the creation wizard was up. A float that really
             // does animate still repaints: the 250 ms floor paints it, its tree
             // differs, and that marks the change.
-            let unchanged = self
-                .last_floats
-                .get(&index)
-                .is_some_and(|(last, node)| *last == rect && node == &rendered.node);
+            let unchanged = float_settled(self.last_floats.get(&index), rect, &rendered.node);
             if !unchanged {
                 self.changed_this_frame = true;
             }
@@ -2197,12 +2241,8 @@ impl App {
         }
     }
 
-    /// Render one plugin, painting an error panel in ITS OWN rect on failure.
-    ///
-    /// This is the isolation rule made concrete: a plugin that throws costs its
-    /// own pane and nothing else. Its neighbours keep drawing, and its state
-    /// survives for when the file is fixed.
-    /// Centre a rect taking `width_pct` x `height_pct` of `area`.
+    /// Centre a rect taking `width_pct` x `height_pct` of `area`, or the exact
+    /// `cols`/`rows` a plugin asked for.
     fn float_rect(area: Rect, float: thurbox::kernel::host::Float) -> Rect {
         // Cells when the plugin knows them, else a share of the screen. A modal
         // whose height follows its content — v1's pickers, all of them — can only
@@ -2229,6 +2269,11 @@ impl App {
         }
     }
 
+    /// Render one plugin, painting an error panel in ITS OWN rect on failure.
+    ///
+    /// This is the isolation rule made concrete: a plugin that throws costs its
+    /// own pane and nothing else. Its neighbours keep drawing, and its state
+    /// survives for when the file is fixed.
     fn draw_plugin(&mut self, frame: &mut Frame, index: usize, rect: Rect, focused: bool) {
         let ctx = RenderContext {
             width: rect.width,
@@ -2271,7 +2316,7 @@ impl App {
         // it: skipping the stamp on a frame whose tree changed would make the
         // *next* frame see output that had already been painted.
         let surface_moved = self.surface_moved(&node);
-        let unchanged = self.last_trees[index].as_ref() == Some(&node) && !surface_moved;
+        let unchanged = pane_settled(self.last_trees[index].as_ref(), &node, surface_moved);
         if !unchanged {
             self.changed_this_frame = true;
         }
@@ -2930,8 +2975,7 @@ impl App {
     /// the same key, and confirming a reversible act is what teaches people to
     /// confirm without reading.
     fn apply_switch(&mut self, file: &str, off: bool) {
-        let absolute = self.ui_dir.join(file);
-        let key = absolute.to_string_lossy().into_owned();
+        let key = thurbox::kernel::bundled::absolute_key(&self.ui_dir, file);
         match self.registry.set_disabled(&key, off) {
             Ok(now_off) => {
                 self.publish_disabled();
@@ -2957,7 +3001,7 @@ impl App {
     /// refusing (design D7).
     fn apply_trust(&mut self, file: &str, trusted: bool) {
         let absolute = self.ui_dir.join(file);
-        let key = absolute.to_string_lossy().into_owned();
+        let key = thurbox::kernel::bundled::absolute_key(&self.ui_dir, file);
         let outcome = if trusted {
             match std::fs::read_to_string(&absolute) {
                 // Trusted as it is *now*: the digest recorded here is what makes
@@ -3004,9 +3048,10 @@ impl App {
         &mut self,
         act: impl FnOnce(&mut Modals, &mut thurbox::kernel::modals::World<'_>) -> T,
     ) -> T {
-        let db = matches!(self.modals.kind(), Some(ModalKind::Theme))
-            .then(snapshots_db)
-            .flatten();
+        if matches!(self.modals.kind(), Some(ModalKind::Theme)) && self.theme_db.is_none() {
+            self.theme_db = open_db();
+        }
+        let db = self.theme_db.as_ref();
         // The settings the modal shows, and the slot a save comes back through.
         // What the *file* holds rather than what is in force: the panel edits the
         // file, and a restart-only change lives only there until the next launch
@@ -3026,7 +3071,7 @@ impl App {
                 save_settings: &mut saved,
                 inventory: &inventory,
                 interface_edit: &mut edit,
-                db: db.as_ref(),
+                db,
             };
             act(&mut self.modals, &mut world)
         };
@@ -3088,24 +3133,29 @@ impl App {
     /// Relative, because that is `Plugin::path`; trust is stored absolute so two
     /// interface directories cannot share it, so this is where the two meet.
     fn publish_trust(&self) {
+        // Through `trust_of`, not `Registry::is_trusted`, so the grant is decided
+        // by the same function that labels the row in the Interface tab — bare key
+        // presence reads neither the lock's pin nor the digest, so an installed
+        // pane whose pin had moved kept the grant made to the old one. The rule
+        // itself is `packages::grants_capabilities`.
+        let lock = thurbox::kernel::packages::read_lock(&self.ui_dir).unwrap_or_default();
         let trusted: Vec<String> = self
             .host
             .plugins
             .iter()
             .map(|plugin| plugin.path.clone())
             .filter(|path| {
-                let absolute = self.ui_dir.join(path);
-                self.registry.is_trusted(&absolute.to_string_lossy())
+                thurbox::kernel::packages::grants_capabilities(thurbox::kernel::packages::trust_of(
+                    &self.ui_dir,
+                    path,
+                    &lock,
+                    &self.registry,
+                ))
             })
             .collect();
         self.host.set_trusted(trusted);
     }
 
-    /// Tell the host which plugins the user turned off.
-    ///
-    /// Derived from the *stored* absolute paths rather than from the loaded
-    /// plugins, because a disabled one is not loaded — it would not be in the
-    /// list to filter. Relative, because that is what `build` compares against.
     /// Start or close a plugin's program pane.
     ///
     /// The gate is here rather than in the queue: a command is honoured after the
@@ -3169,6 +3219,11 @@ impl App {
         self.changed_this_frame = true;
     }
 
+    /// Tell the host which plugins the user turned off.
+    ///
+    /// Derived from the *stored* absolute paths rather than from the loaded
+    /// plugins, because a disabled one is not loaded — it would not be in the
+    /// list to filter. Relative, because that is what `build` compares against.
     fn publish_disabled(&self) {
         let disabled: Vec<String> = self
             .registry
@@ -4134,6 +4189,40 @@ fn render_hud(frame: &mut Frame, area: Rect, counters: &thurbox::kernel::perf::S
     );
 }
 
+/// Has this float settled — same tree, same rect — so the frame need not be
+/// marked changed?
+///
+/// Free rather than a method, and named rather than written out at the call site,
+/// because it is one of the two rules that decide whether the loop settles at all
+/// and neither was reachable from `tests/` inside this binary target. Being open
+/// is deliberately NOT a change: while it was, an open float held `dirty` set
+/// forever and the whole interface rebuilt every Lua tree at the frame cap for as
+/// long as the creation wizard was up. The rect is compared as well as the tree —
+/// the same content in a new place is a repaint.
+fn float_settled(
+    last: Option<&(Rect, thurbox::kernel::node::Node)>,
+    rect: Rect,
+    node: &thurbox::kernel::node::Node,
+) -> bool {
+    last.is_some_and(|(seen, tree)| *seen == rect && tree == node)
+}
+
+/// Has this pane settled? [`float_settled`] for a pane, plus the one thing a tree
+/// comparison cannot see.
+///
+/// `surface_moved` is that thing: a live terminal's contents change underneath an
+/// identical tree, so a pane holding one that produced output is not settled even
+/// though it returned the same nodes. A live text selection, by contrast, is not a
+/// change by itself — it used to be, which pinned the loop at the frame cap for as
+/// long as a selection existed.
+fn pane_settled(
+    last: Option<&thurbox::kernel::node::Node>,
+    node: &thurbox::kernel::node::Node,
+    surface_moved: bool,
+) -> bool {
+    last == Some(node) && !surface_moved
+}
+
 /// Flatten a crossterm key into what Lua is told about it.
 fn to_press(key: &KeyEvent) -> KeyPress {
     let name = match key.code {
@@ -4151,6 +4240,7 @@ fn to_press(key: &KeyEvent) -> KeyPress {
         ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
         alt: key.modifiers.contains(KeyModifiers::ALT),
         shift: key.modifiers.contains(KeyModifiers::SHIFT),
+        cmd: key.modifiers.contains(KeyModifiers::SUPER),
     }
 }
 
@@ -4158,6 +4248,108 @@ fn to_press(key: &KeyEvent) -> KeyPress {
 mod tests {
     use super::*;
     use thurbox::kernel::host::Float;
+
+    /// A chord survives the trip out to a key event and back.
+    ///
+    /// The two halves are written in different modules and had drifted:
+    /// `KeyPress` carried no `cmd` and `to_press` never read `SUPER`, so a
+    /// declared `cmd+j` matched nothing *and* a real Cmd+J canonicalised to plain
+    /// `"j"` — firing whatever `j` was bound to, which is worse than not binding
+    /// it. `shift+tab` failed the other way: emitted as Tab+SHIFT, it came back as
+    /// plain `"tab"`. Both are one-line defects that only a round trip finds.
+    #[test]
+    fn every_chord_survives_the_round_trip_through_a_key_event() {
+        for chord in [
+            "j",
+            "ctrl+j",
+            "alt+j",
+            "shift+j",
+            "ctrl+alt+shift+j",
+            "cmd+j",
+            "ctrl+cmd+j",
+            "enter",
+            "esc",
+            "tab",
+            "shift+tab",
+            "backspace",
+            "up",
+            "pagedown",
+            "space",
+            "f1",
+            "f12",
+            "ctrl+/",
+        ] {
+            let wanted = thurbox::kernel::registry::normalise_chord(chord);
+            let event = key_event_from_chord(chord)
+                .unwrap_or_else(|| panic!("{chord} produced no key event"));
+            let got = thurbox::kernel::registry::canonical_chord(&to_press(&event));
+            assert_eq!(got, wanted, "{chord} did not round-trip");
+        }
+    }
+
+    /// `backtab` is still an accepted spelling, and canonicalises to the one name
+    /// the registry uses — a plugin may branch on the raw name, so the alias
+    /// cannot simply be dropped.
+    #[test]
+    fn backtab_is_an_accepted_alias_for_shift_tab() {
+        let event = key_event_from_chord("backtab").expect("backtab");
+        assert_eq!(event.code, KeyCode::BackTab);
+        assert_eq!(
+            thurbox::kernel::registry::canonical_chord(&to_press(&event)),
+            "shift+tab"
+        );
+    }
+
+    /// A different tree from [`Node::empty`], and the smallest one available.
+    fn other_tree() -> thurbox::kernel::node::Node {
+        thurbox::kernel::node::Node::Box {
+            axis: Axis::Vertical,
+            gap: 1,
+            children: Vec::new(),
+            frame: None,
+            size: Default::default(),
+            identity: Identity::default(),
+        }
+    }
+
+    /// The float settle rule: same tree AND same rect, or the frame changed.
+    #[test]
+    fn a_float_settles_only_when_neither_its_tree_nor_its_rect_moved() {
+        let rect = Rect::new(0, 0, 20, 5);
+        let moved = Rect::new(1, 0, 20, 5);
+        let tree = thurbox::kernel::node::Node::empty();
+
+        assert!(
+            float_settled(Some(&(rect, tree.clone())), rect, &tree),
+            "an open float that drew the same thing in the same place is settled"
+        );
+        assert!(
+            !float_settled(Some(&(rect, tree.clone())), moved, &tree),
+            "the same content in a new place is a repaint"
+        );
+        assert!(
+            !float_settled(Some(&(rect, other_tree())), rect, &tree),
+            "a changed tree is a repaint"
+        );
+        assert!(
+            !float_settled(None, rect, &tree),
+            "a float not drawn last frame has nothing to settle against"
+        );
+    }
+
+    /// The pane settle rule, and the one thing a tree comparison cannot see.
+    #[test]
+    fn a_pane_with_a_live_surface_is_not_settled_by_an_identical_tree() {
+        let tree = thurbox::kernel::node::Node::empty();
+
+        assert!(pane_settled(Some(&tree), &tree, false));
+        assert!(
+            !pane_settled(Some(&tree), &tree, true),
+            "a terminal that produced output is not settled by an unchanged tree"
+        );
+        assert!(!pane_settled(Some(&other_tree()), &tree, false));
+        assert!(!pane_settled(None, &tree, false));
+    }
 
     /// Startup says which interface loaded, but only when there is a question.
     ///

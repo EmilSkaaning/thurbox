@@ -348,6 +348,21 @@ const LIB_DEPTH: usize = 3;
 /// a no-op on Windows.
 ///
 /// `None` when `absolute` is not inside `dir`, or is `dir` itself.
+/// The inverse of [`relative_to`]: the storage key for one file of `dir`.
+///
+/// Trust, the disabled set and the rebindings are keyed by the **absolute** path
+/// as `Path::join` writes it, so every reader and every writer has to build that
+/// string the same way — and the way that breaks is invisible on Linux. `dir` is
+/// a `Path` while the relative half carries `/` separators, so on Windows
+/// `dir.join("plugins/90_notes.lua")` yields `C:\ui\plugins/90_notes.lua`: a key
+/// that is *stable* (writer and reader agree, which is why turning a plugin off
+/// works) but that nothing constructed any other way will ever match. Anything
+/// that reaches for a stored decision goes through here rather than joining for
+/// itself, so a second construction cannot drift from the first.
+pub fn absolute_key(dir: &Path, relative: &str) -> String {
+    dir.join(relative).to_string_lossy().into_owned()
+}
+
 pub fn relative_to(dir: &Path, absolute: &str) -> Option<String> {
     let root = dir.to_string_lossy();
     let rest = absolute.strip_prefix(root.as_ref())?;
@@ -538,12 +553,29 @@ pub fn remove(dir: &Path, relative: &str) -> Result<(), String> {
     write_manifest(dir, &manifest)
 }
 
+/// The extensions delivery ships, and so the only ones [`checked`] opens onto.
+///
+/// Every entry in [`BUNDLED`] has one of these, which
+/// `the_bundle_covers_the_whole_interface` pins — the door has to widen with the
+/// bundle, or a newly shipped kind of file would be listed by [`sources`] and
+/// refused by the command that restores it.
+const SHIPPED_EXTENSIONS: [&str; 2] = ["lua", "md"];
+
 /// Resolve a path that came from a plugin, or refuse it.
 ///
 /// Lua has no filesystem and this command is the one door into one, so the door
-/// opens only onto Lua files inside the interface directory: no absolute paths,
-/// no `..`, and nothing that is not a `.lua` file — which also keeps the
-/// manifest itself out of reach.
+/// opens only onto what delivery itself ships, inside the interface directory:
+/// no absolute paths, no `..`, and no extension outside
+/// [`SHIPPED_EXTENSIONS`].
+///
+/// `.md` is there because the guidance files are shipped, listed by [`sources`]
+/// and tombstoned like any other bundled file — refusing them here meant the
+/// Interface tab armed `r` and `d` on rows whose action could never complete, so
+/// a `README.md` deleted outside thurbox could not be restored from the one view
+/// that lists it. Everything else stays shut by the same rule: the bookkeeping
+/// files nobody edits (`.bundled.json`, `plugins.lock`, `ui.json`) are `.json`
+/// and `.lock`, so they remain out of reach without a second list to keep in
+/// step.
 fn checked(dir: &Path, relative: &str) -> Result<PathBuf, String> {
     let candidate = Path::new(relative);
     if !candidate
@@ -552,8 +584,12 @@ fn checked(dir: &Path, relative: &str) -> Result<PathBuf, String> {
     {
         return Err(format!("{relative} is not inside the interface directory"));
     }
-    if candidate.extension() != Some("lua".as_ref()) {
-        return Err(format!("{relative} is not a Lua file"));
+    let shipped = candidate
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| SHIPPED_EXTENSIONS.contains(&ext));
+    if !shipped {
+        return Err(format!("{relative} is not a file the interface ships"));
     }
     Ok(dir.join(candidate))
 }
@@ -685,13 +721,14 @@ impl Chosen {
 
 /// The interface directory, and which rule chose it.
 ///
-/// Two rules, in order: `THURBOX_UI_DIR`, then the user's own copy —
+/// Two rules, in order: `THURBOX_UI_DIR`, else the user's own copy —
 /// materialized from the embedded interface on first run, preserving anything
 /// they edited. There is deliberately no automatic `./ui` rule; the comment on
-/// the branch below says why. A missing or unwritable config directory is not
-/// fatal: the embedded copies are written somewhere throwaway and used from
-/// there, because no interface at all is the one outcome worth avoiding
-/// (`v2-plugin-kernel` design.md D11).
+/// the branch below says why, and [`Chosen::Checkout`] is a *label* for an
+/// override that happens to point at a checkout's `ui/`, not a third rule. A
+/// missing or unwritable config directory is not fatal: the embedded copies are
+/// written somewhere throwaway and used from there, because no interface at all
+/// is the one outcome worth avoiding (`v2-plugin-kernel` design.md D11).
 ///
 /// Lives here rather than in the interface binary so that anything asking "which
 /// directory is live" gets the same answer the interface will use — two
@@ -945,6 +982,29 @@ mod tests {
         assert_eq!(relative_to(dir, "/home/me/.config/thurbox/ui/"), None);
     }
 
+    /// [`absolute_key`] and [`relative_to`] are inverses, on every platform.
+    ///
+    /// This is the property every stored decision depends on: the writer keys by
+    /// `absolute_key`, the readers look one up by the same, and `host_at` /
+    /// `publish_disabled` convert back with `relative_to` to tell `build` which
+    /// files to skip. Written as a round trip because the failure is invisible on
+    /// Linux — on Windows the key carries a `/` inside a `\`-separated path, which
+    /// is fine as long as nothing constructs it a second way, and this is what
+    /// says so. A test that hand-joined the components instead reported a
+    /// disabled pane as `failed` on Windows only.
+    #[test]
+    fn a_storage_key_converts_back_to_the_file_it_names() {
+        let dir = Path::new("/home/me/.config/thurbox/ui");
+        for relative in ["plugins/90_notes.lua", "lib/atlas/util.lua", "layout.lua"] {
+            let key = absolute_key(dir, relative);
+            assert_eq!(
+                relative_to(dir, &key).as_deref(),
+                Some(relative),
+                "{relative} did not survive the round trip through {key}"
+            );
+        }
+    }
+
     /// The directory tells whoever edits it how to, under the name their tool reads.
     ///
     /// `README.md` is what a person opens; `AGENTS.md` is what a coding CLI loads as
@@ -1003,6 +1063,16 @@ mod tests {
         }
         for (name, contents) in BUNDLED {
             assert!(!contents.is_empty(), "{name} is empty");
+            // And every shipped kind of file is one `checked` will open, so a
+            // new one cannot be delivered and then be unrestorable.
+            let extension = Path::new(name)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or_default();
+            assert!(
+                SHIPPED_EXTENSIONS.contains(&extension),
+                "{name} ships but `checked` refuses its extension"
+            );
         }
     }
 

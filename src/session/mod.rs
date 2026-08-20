@@ -133,8 +133,9 @@ impl std::str::FromStr for SessionId {
 }
 
 /// A session's lifecycle state, driven by agent hooks (see
-/// `thurbox-cli session signal`). Repo groups in the session list roll up to
-/// their most-urgent member so the whole list scans at a glance.
+/// `thurbox-cli session signal`). Status renders on a session's own row and
+/// nowhere else: a repo-group header carries no rolled-up dot, because it would
+/// only restate what every member row already shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionStatus {
     /// 🟡 The agent is actively running (reported by a hook).
@@ -147,23 +148,26 @@ pub enum SessionStatus {
     Idle,
     /// Reserved for a crashed agent. **Not currently derived** — process exit has
     /// no failure signal yet (a clean or crashed exit both map to `Idle`), so this
-    /// variant is wired through colour/glyph/rollup but never assigned. Kept for
+    /// variant is wired through colour and glyph but never assigned. Kept for
     /// when exit-code plumbing lands.
     Error,
     /// The session lives on a remote host that is currently unreachable (SSH
-    /// down / auth failing / host offline). Assigned to placeholder rows so a
-    /// remote session never silently vanishes from the list; cleared to the
-    /// real hook-driven status once the host recovers and the session adopts.
+    /// down / auth failing / host offline). Derived rather than stored:
+    /// `kernel::snapshot::with_reachability` reports it for a remote row that has
+    /// no live pane, the attach failure behind it having been recorded in
+    /// `Terminals::failed`. So a remote session never silently vanishes from the
+    /// list, and it reverts to its hook-driven status the moment the host
+    /// recovers and the ordinary attach retry adopts a pane.
     Unreachable,
 }
 
 impl SessionStatus {
     /// A status glyph chosen for **shape** distinctiveness, not just colour, so
     /// the state survives in greyscale / for colour-blind users: a spinner
-    /// (working — the live session list animates it, see `ui::SPINNER_FRAMES`)
-    /// vs. diamond (blocked) vs. filled circle (done, unseen) vs. hollow circle
-    /// (idle, seen) vs. cross (error). The filled/hollow pair makes
-    /// done-vs-idle read at a glance.
+    /// (working — the static frame; the session list animates it Lua-side from
+    /// `theme.spinner`, see `widgets.spinner_frame`) vs. diamond (blocked) vs.
+    /// filled circle (done, unseen) vs. hollow circle (idle, seen) vs. cross
+    /// (error). The filled/hollow pair makes done-vs-idle read at a glance.
     pub fn icon(self) -> &'static str {
         match self {
             Self::Working => "◐",

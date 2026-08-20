@@ -88,11 +88,20 @@ kernel over the real `ui/`** rather than a harness that imitates either:
 - **`tests/v2_*.rs`** — one file per surface or contract: `v2_session_list`,
   `v2_search`, `v2_new_session`, `v2_terminal_pane`, `v2_session_lifetime`,
   `v2_keymap`, `v2_focus`, `v2_modals`, `v2_chrome`, `v2_mouse`, `v2_hover`,
-  `v2_decoration`, `v2_plugin_{authoring,commands,lifecycle,settings,switching}`,
+  `v2_decoration`,
+  `v2_plugin_{authoring,commands,lifecycle,packages,programs,settings,switching}`,
   `v2_repo_memory`, `v2_remote_status`, `v2_session_status`, `v2_core_settings`,
   `v2_attach_by_name`.
   Several build an interface in a tempdir from the embedded copy, so delivery and
   loading are exercised together.
+- **`tests/common/mod.rs`** — the shared fixtures, included per target with `mod
+  common;`: `host()` (a host over the bundled interface, asserting it loaded),
+  `ui_dir()`, `interface()`, `themes()`, `registry()`, `index_of()`, `ctx()`,
+  `press()`, `publish()` / `publish_with()`, `session_row()`, `git()` /
+  `git_command()`. Reach for it before hand-writing a fixture: `SessionRow` was
+  written out in twenty-seven files and `Published` in sixteen, which made adding
+  one readable field a sixteen-file mechanical edit and a fixture row that had
+  drifted invisible. Seven files use it so far.
 - **`tests/kernel_limits.rs`** — instruction and memory ceilings, in their own file
   because they mutate process-wide limits.
 - **Lua statics** — `selene ui` (undefined names + the sandbox, via `thurbox.yml`),
@@ -155,10 +164,13 @@ asked for by leaving a key in `store`), `kernel::runs`, `kernel::updates`.
 
 Cached answers carry an **age**, not just a value. The mistake this repeatedly
 invited was storing "we have an answer" where "the answer is current" was needed:
-git stats froze at their first reading, a `run` refresh started a process per frame,
-a failed branch fetch stuck for the process lifetime, and a backend surveyed once
-was treated as surveyed since. Each is now a TTL, an in-flight marker, or a
-generation counter — if you add a cache here, give it one.
+git stats froze at their first reading, a diff was computed once per session per
+process (so a pane watching an agent still writing code showed what it first saw),
+a `run` refresh started a process per frame, a failed branch fetch stuck for the
+process lifetime, and a backend surveyed once was treated as surveyed since. Each
+is now a TTL, an in-flight marker, or a generation counter, paired with a `retain`
+so the cache tracks what exists rather than everything that ever did — if you add
+a cache here, give it one.
 
 `republish` — the one call that rebuilds every `thurbox.*` table — runs once per
 painted frame and **once per input batch**, not once per event: a held-down key
@@ -707,12 +719,12 @@ not block startup, so `check_available`/`ensure_ready` are deferred to first use
   (`git::host_launcher` → `ssh …` or `wsl.exe …`). Worktrees live under the
   host's `worktrees_dir` (or `$HOME/.local/share/thurbox/worktrees` resolved +
   cached per backend name — a WSL distro has no `destination`).
-- **Persistence/restore**: `backend_type` round-trips in SQLite; restore
+- **Persistence/restore**: `backend_type` round-trips in SQLite; re-adoption
   discovers windows **per backend** so off-local sessions re-adopt against their
-  own host. Remote backends are readied + discovered **in the background** (one
-  thread per host, drained by `App::poll_remote_restore` each tick) so an
-  unreachable or slow host never blocks the first frame — only local sessions
-  restore synchronously at startup (ADR-P7, `docs/PERFORMANCE.md`).
+  own host. Nothing is restored synchronously at startup: `Terminals::sync`
+  attaches on workers, and a remote backend is readied on the attach worker that
+  needs it (`Attached::readied`), so an unreachable or slow host never blocks the
+  first frame (ADR-P7, `docs/PERFORMANCE.md`).
 - **Headless**: `thurbox-cli session create --host <name>` spawns on the host
   (an SSH name or an auto-discovered WSL distro name).
 - **Agent config on the host**: agent args referencing thurbox-managed config
@@ -1217,7 +1229,7 @@ their screens**, which is the half that finds a session by the error in it.
   at.
 - Sessions is the only scope with a pane today. A result carries the pane it
   belongs to, so a returning surface is a scope added and nothing else changed.
-- One deliberate divergence, recorded in `tests/v2_parity.rs`'s successor notes: v1
+- One deliberate divergence, recorded in `openspec/changes/v2-parity-gaps/`: v1
   also took `Ctrl+P`/`Ctrl+N` inside the strip because its search focus captured
   input ahead of the keybinding table. Here every chord goes through one registry
   where a plugin-scoped claim does not outrank a global one, so declaring them
@@ -1236,37 +1248,39 @@ or done. `SessionStatus` (`src/session/mod.rs`) has six states — five driven b
 | `Done` | blue | `●` (filled) | a turn just finished; shown until you switch away |
 | `Idle` | green | `○` (hollow) | acknowledged (you moved off a Done), never active, or at rest |
 | `Error` | red | `✗` | reserved for a crashed agent — **not derived yet** (no exit-code signal; exited → `Idle`) |
-| `Unreachable` | muted grey | `⊘` | remote host down/offline; a **placeholder** row (no live pane) awaiting reconnect |
+| `Unreachable` | muted grey | `⊘` | remote host down/offline: a remote row with no live pane |
 
-**Unreachable / placeholder sessions.** A persisted **remote** session whose host
-is unreachable at restore (SSH down / auth failing / offline) is inserted as a
-`Session::placeholder` (`src/agent/backend.rs`) so it **always appears** in the
-list instead of silently vanishing, tagged `Unreachable`. A placeholder holds no
-live backend pane — its reader/writer loops are never spawned, keystrokes are
-dropped with a hint, and `resize`/`kill`/`detach`/`save_state` skip it (so it
-never issues a blocking ssh call on the UI thread nor clobbers the persisted
-row). The remote-restore loop (`App::poll_remote_restore` /
-`maybe_retry_remote_restore`) readies each remote backend off-thread, retries a
-down host every `REMOTE_RETRY_INTERVAL` (20 s) — or immediately on restart
-(`Ctrl+R`) — and, once the host recovers, replaces the placeholder **in place**
-with the adopted session (same `SessionId`, so the order signature is unchanged).
+**Unreachable sessions.** There is no placeholder `Session` — the row appears
+because the snapshot is built from the **database**, not from the live panes, so a
+persisted remote session whose host is unreachable (SSH down / auth failing /
+offline) is in the list whether or not anything is attached to it, and
+`kernel::snapshot::with_reachability` reports `unreachable` for exactly that
+shape: a remote row with no live pane. Nothing is faked to carry it — no dead
+input channel, no seeded notice buffer — the row simply has no terminal surface
+until `Terminals::sync` adopts one. The retry is the ordinary attach path: the
+failure is recorded in `Terminals::failed` per session, carrying the **pane** it
+tried — so a row whose candidate pane has changed is retried at once, and only an
+unchanged one waits out `ATTACH_RETRY_INTERVAL` (20 s), which is what stops a
+host that was down at startup staying dead for the life of the process.
 
-The same treatment covers **mid-session host loss**:
-`App::detect_lost_remote_sessions` (per tick) spots a *live* remote session whose
-control-mode connection just died, converts it in place to an `Unreachable`
-placeholder and queues a reconnect (`enqueue_remote_reconnect`). The reliable
-signal is `has_exited()`: with `remain-on-exit=on` a clean agent exit keeps its
-pane alive (no reader EOF), so a remote reader hitting EOF means the host/SSH
-connection dropped. This composes with the fail-fast SSH hardening
-(`crate::shell::SSH_HARDENING_OPTS` = `BatchMode=yes` + `ConnectTimeout` +
-`ServerAlive*`), which stops a broken host from prompting for a password on the
-TUI's terminal or hanging the render loop.
+**Mid-session host loss** goes through the same door.
+`Terminals::drop_lost_panes` (per tick) drops the pane of a live session whose
+reader hit EOF and records "host unreachable" — which is what makes the row read
+`unreachable` on the next snapshot, and which also clears that backend's
+readiness so the next attach re-readies the connection every session on that host
+shares. `has_exited()` is the reliable signal: with `remain-on-exit=on` a clean
+agent exit keeps its pane alive (no reader EOF), so a remote reader hitting EOF
+means the host/SSH connection dropped. This composes with the fail-fast SSH
+hardening (`crate::shell::SSH_HARDENING_OPTS` = `BatchMode=yes` +
+`ConnectTimeout` + `ServerAlive*`), which stops a broken host from prompting for a
+password on the TUI's terminal or hanging the render loop.
 
-The live session list **animates** the `Working` spinner (`ui::SPINNER_FRAMES`,
-`App::spinner_frame` advanced from `tick_count`, ~8 fps, repaints forced only
-while something is working). The filled `●` (Done) vs hollow `○` (Idle) pair
-reads done-vs-seen at a glance. `ui::status_glyph(status, spinner)` picks the
-frame; the static `icon()` is used in non-animated contexts (info panel).
+The session list **animates** the `Working` spinner Lua-side:
+`widgets.status_glyph(status, ctx.elapsed)` over `theme.spinner`, eight frames a
+second off `ctx.elapsed` (the only monotonic reading a plugin gets — the plugin
+stdlib ships no `os`). The filled `●` (Done) vs hollow `○` (Idle) pair reads
+done-vs-seen at a glance; `SessionStatus::icon()` is the static frame, for
+non-animated contexts.
 
 - **The callback.** Agents report transitions with
   `thurbox-cli session signal --state <working|blocked|done|idle>`

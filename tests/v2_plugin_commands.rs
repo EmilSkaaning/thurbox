@@ -244,11 +244,98 @@ fn a_plugin_reads_its_own_answers_and_no_one_elses() {
     );
 }
 
+/// A pane declaring **no** capabilities reads empty tables, not whatever the
+/// plugin rendered before it in the same frame.
+///
+/// `thurbox.runs` and `thurbox.granted` are written only by `enter`, and
+/// `publish` rebuilds the `thurbox` table once per frame — so an `enter` that
+/// skipped those two writes for a capability-less pane left the *previous*
+/// plugin's values in place under the names a pane reads its own by. Absence is
+/// the grant model; a stale value is not absence, so the skip handed an
+/// untrusted third-party pane a trusted one's captured stdout.
+///
+/// Renders `a` first on purpose: that is the order in which the leak existed.
+#[test]
+fn a_pane_that_declares_nothing_inherits_no_one_elses_answers() {
+    let bare = r#"return {
+  name = "bare",
+  slot = "sessions",
+  render = function()
+    local runs = (thurbox and thurbox.runs) or {}
+    local got = runs["mine"]
+    local granted = (thurbox and thurbox.granted) or {}
+    local seen = 0
+    for _ in pairs(runs) do
+      seen = seen + 1
+    end
+    return {
+      type = "text",
+      text = (got and got.stdout or "nothing")
+        .. " runs=" .. seen
+        .. " run=" .. tostring(granted.run)
+        .. " program=" .. tostring(granted.program),
+    }
+  end,
+}"#;
+    let (_home, ui) = interface(&[("91_a.lua", &reader("a")), ("92_bare.lua", bare)]);
+    let host = LuaHost::new(&ui);
+    host.set_trusted(vec!["plugins/91_a.lua".to_string()]);
+    let mut answers = std::collections::HashMap::new();
+    answers.insert(
+        "plugins/91_a.lua".to_string(),
+        vec![(
+            "mine".to_string(),
+            Run::Done(thurbox::kernel::runs::Output {
+                stdout: "secret".into(),
+                stderr: String::new(),
+                status: Some(0),
+                truncated: false,
+                timed_out: false,
+            }),
+        )],
+    );
+    host.set_runs(answers);
+
+    let context = RenderContext {
+        width: 60,
+        height: 4,
+        focused: true,
+        elapsed: 0.0,
+        frame: 0,
+    };
+    let a = host
+        .render(host.index_of("a").expect("a"), context)
+        .expect("render a");
+    assert!(
+        format!("{:?}", a.node).contains("secret"),
+        "a reads its own"
+    );
+
+    let bare = format!(
+        "{:?}",
+        host.render(host.index_of("bare").expect("bare"), context)
+            .expect("render bare")
+            .node
+    );
+    assert!(
+        !bare.contains("secret"),
+        "a capability-less pane read a's output: {bare}"
+    );
+    assert!(
+        bare.contains("runs=0"),
+        "runs must be empty, not inherited: {bare}"
+    );
+    assert!(
+        bare.contains("run=nil") && bare.contains("program=nil"),
+        "granted must be empty, not inherited: {bare}"
+    );
+}
+
 /// A pane that prints whatever its `mine` run returned.
 ///
-/// Declares the capability because only a plugin that can ASK can have answers —
-/// the kernel skips the whole per-call publish for one that declared nothing,
-/// since it could never have any.
+/// Declares the capability because only a plugin that can ASK can have answers.
+/// A pane that declares nothing still gets the publish — with empty tables; see
+/// `a_pane_that_declares_nothing_inherits_no_one_elses_answers`.
 fn reader(name: &str) -> String {
     format!(
         r#"return {{
