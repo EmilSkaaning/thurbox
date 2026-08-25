@@ -34,7 +34,8 @@ scripts/dev/e2e/real-host.sh devbox check  # readiness probe on a real host
 
 `smoke/tui-smoke.sh` launches the real `thurbox` binary in a throwaway tmux
 pane, drives it with `send-keys`, and asserts on captured frames (boot → F1 →
-theme → quit). Runs in CI as the `tui-smoke` job; also `just smoke`.
+theme → quit). Runs at the end of CI's `nextest` job against the binary that
+run already built (`THURBOX_BIN`); also `just smoke`.
 
 ## Dev utilities (not tests)
 

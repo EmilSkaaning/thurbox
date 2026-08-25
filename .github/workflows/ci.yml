@@ -113,17 +113,10 @@ jobs:
               - 'scripts/install.Tests.ps1'
               - '.github/workflows/ci.yml'
 
-  check:
-    name: Check
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo check --all
-
+  # No `check` job. `clippy --all-targets -D warnings` already type-checks the
+  # same targets, so a separate `cargo check` was a second full build on its own
+  # runner asserting nothing extra — the same reasoning the Windows gate below
+  # already applied when it dropped its check pass.
   fmt:
     name: Rustfmt
     needs: changes
@@ -161,7 +154,18 @@ jobs:
       - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
         with:
           tool: cargo-nextest
+      # For the black-box smoke test below, which drives the TUI inside a tmux
+      # pane. (The PTY e2e tests need none: they seed settings that keep the
+      # binary from arming the tmux heartbeat.)
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      # Building the integration tests also builds the `thurbox` bin target
+      # (Cargo provides CARGO_BIN_EXE_thurbox to them), so target/debug/thurbox
+      # exists after this run — which is what lets the smoke test below reuse it
+      # instead of paying for a second build on a separate runner.
       - run: cargo nextest run --all --profile ci
+      - name: Black-box TUI smoke test
+        run: THURBOX_BIN="$PWD/target/debug/thurbox" scripts/dev/smoke/tui-smoke.sh
 
   # Native-Windows gate (psmux backend selection, known-folder paths, toast
   # notifications, junction workspaces), split into two parallel jobs so the heavy
@@ -214,30 +218,11 @@ jobs:
       # (the `ci` profile is fail-fast); easier to triage runner-specific issues.
       - run: cargo nextest run --all --profile ci --no-fail-fast
 
-  architecture:
-    name: Architecture Rules
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo test --test architecture_rules
-
-  tui-smoke:
-    name: TUI Smoke Test
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
-      - name: Black-box TUI smoke test
-        run: scripts/dev/smoke/tui-smoke.sh
+  # No `architecture` job. `tests/architecture_rules.rs` is an ordinary
+  # integration test, so `nextest run --all` above already runs it — the
+  # dedicated job was a duplicate build and run on its own runner. Likewise no
+  # separate `tui-smoke` job: the smoke script runs at the end of the nextest
+  # job against the binary that run already built (THURBOX_BIN).
 
   # No `acceptance` job. It ran `-E 'test(app::acceptance::)'`, which was v1's
   # in-process TEA harness under `src/app` — deleted when the kernel took the
@@ -474,14 +459,11 @@ jobs:
     if: always()
     needs:
       - changes
-      - check
       - fmt
       - clippy
       - nextest
-      - architecture
       - windows-clippy
       - windows-test
-      - tui-smoke
       - deny
       - docs
       - conventional-commits
