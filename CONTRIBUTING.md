@@ -95,9 +95,11 @@ The interface is Lua on a Rust kernel, so most coverage drives the **real kernel
 over the real `ui/`**: `tests/kernel_mvp.rs` for the kernel's contract and
 `tests/v2_*.rs` one file per surface. There is also a black-box smoke test
 (`scripts/dev/smoke/tui-smoke.sh`) that launches the real binary in a throwaway
-tmux pane. v1's in-process acceptance harness and its `insta` snapshots were
-deleted with `src/app`; there are no snapshots to update. See the Testing section
-of [`CLAUDE.md`](CLAUDE.md) for the full picture.
+tmux pane. Frame snapshots live in `tests/v2_snapshots.rs` (insta): when a frame
+changes on purpose, review and accept with `cargo insta review` and commit the
+updated `tests/snapshots/`. Property tests (`tests/v2_render_props.rs`) and a
+unix-only PTY e2e (`tests/tui_pty_e2e.rs`) run in the same `nextest` sweep. See
+the Testing section of [`CLAUDE.md`](CLAUDE.md) for the full picture.
 
 ## Linting & formatting
 

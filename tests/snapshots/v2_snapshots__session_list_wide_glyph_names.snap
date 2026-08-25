@@ -1,0 +1,14 @@
+---
+source: tests/v2_snapshots.rs
+expression: "paint(&host, \"sessions\", 40, 10)"
+---
+╭ Sessions ─────────────────────────○◆○╮
+│── thurbox ───────────────────────────│
+│ ○ ⑂ 修 复 终 端 宽 度                      │
+│ ◆ ⑂ emoji-🚀 -name  Blocked           │
+│ ○ ⑂ plain-name                       │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+╰──────────────────────────────────────╯

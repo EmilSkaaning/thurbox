@@ -1,0 +1,14 @@
+---
+source: tests/v2_snapshots.rs
+expression: "style_runs(terminal.backend().buffer(), 40, 10)"
+---
+⟨LightCyan/Reset/NONE⟩╭⟨Black/Cyan/BOLD⟩ Sessions ⟨LightCyan/Reset/NONE⟩───────────────────────⟨Yellow/Reset/NONE⟩⠇⟨Green/Reset/NONE⟩○⟨Red/Reset/NONE⟩◆⟨LightBlue/Reset/NONE⟩●⟨Green/Reset/NONE⟩○⟨LightCyan/Reset/NONE⟩╮
+⟨LightCyan/Reset/NONE⟩│⟨DarkGray/Reset/NONE⟩── thurbox ───────────────────────────⟨LightCyan/Reset/NONE⟩│
+⟨LightCyan/Reset/NONE⟩│⟨Yellow/Reset/NONE⟩ ⠇ ⟨Green/Reset/NONE⟩⑂ ⟨White/Reset/NONE⟩fix-osc52⟨Reset/Reset/NONE⟩                        ⟨LightCyan/Reset/NONE⟩│
+⟨LightCyan/Reset/NONE⟩│⟨White/Indexed(24)/BOLD⟩ ○ └ ⑂ fix-osc52-tests                ⟨LightCyan/Reset/NONE⟩│
+⟨LightCyan/Reset/NONE⟩│⟨Red/Reset/NONE⟩ ◆ ⟨Green/Reset/NONE⟩⑂ ⟨White/Reset/NONE⟩add-wsl-tests⟨Reset/Reset/NONE⟩  ⟨Red/Reset/NONE⟩Blocked⟨Reset/Reset/NONE⟩           ⟨LightCyan/Reset/NONE⟩│
+⟨LightCyan/Reset/NONE⟩│⟨LightBlue/Reset/NONE⟩ ● ⟨Green/Reset/NONE⟩⑂ ⟨White/Reset/NONE⟩perf-cache⟨Reset/Reset/NONE⟩                       ⟨LightCyan/Reset/NONE⟩│
+⟨LightCyan/Reset/NONE⟩│⟨DarkGray/Reset/NONE⟩── website ───────────────────────────⟨LightCyan/Reset/NONE⟩│
+⟨LightCyan/Reset/NONE⟩│⟨Green/Reset/NONE⟩ ○ ⑂ ⟨White/Reset/NONE⟩update-deps⟨Reset/Reset/NONE⟩                      ⟨LightCyan/Reset/NONE⟩│
+⟨LightCyan/Reset/NONE⟩│⟨Reset/Reset/NONE⟩                                      ⟨LightCyan/Reset/NONE⟩│
+⟨LightCyan/Reset/NONE⟩╰──────────────────────────────────────╯

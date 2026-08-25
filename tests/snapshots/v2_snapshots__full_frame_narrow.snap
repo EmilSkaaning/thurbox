@@ -1,0 +1,27 @@
+---
+source: tests/v2_snapshots.rs
+expression: "paint_arrangement(&host, 60, 24)"
+---
+
+╭ ◀ F9 ─ Agent ─ Shell · F8 ── fix-osc52 (claude) [feat/fi…╮
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                     terminal surface                     │
+│                            fix                           │
+│                       not attached                       │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+╰──────────────────────────────────────────────────────────╯

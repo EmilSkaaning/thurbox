@@ -1,0 +1,14 @@
+---
+source: tests/v2_snapshots.rs
+expression: "paint(&host, \"sessions\", 24, 10)"
+---
+╭ Sessions ───────⠇○◆●○╮
+│── thurbox ───────────│
+│ ⠇ ⑂ fix-osc52        │
+│ ○ └ ⑂ fix-osc52-tests│
+│ ◆ ⑂ add-wsl-tests    │
+│ ● ⑂ perf-cache       │
+│── website ───────────│
+│ ○ ⑂ update-deps      │
+│                      │
+╰──────────────────────╯

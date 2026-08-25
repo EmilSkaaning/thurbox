@@ -1,0 +1,14 @@
+---
+source: tests/v2_snapshots.rs
+expression: "paint(&host, \"sessions\", 40, 10)"
+---
+○○○○○○○○○○○○○○○○○○○○○○○○○○○○○○○○○○○○○○○╮
+│── thurbox ───────────────────────────│
+│ ○ ⑂ session-00                       │
+│ ○ ⑂ session-01                       │
+│ ○ ⑂ session-02                       │
+│ ○ ⑂ session-03                       │
+│ ○ ⑂ session-04                       │
+│ ○ ⑂ session-05                       │
+│ ○ ⑂ session-06                       │
+╰─────────────────────────────────▼ 33 ╯

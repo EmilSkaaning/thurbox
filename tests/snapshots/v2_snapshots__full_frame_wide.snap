@@ -1,0 +1,33 @@
+---
+source: tests/v2_snapshots.rs
+expression: "paint_arrangement(&host, 120, 30)"
+---
+
+╭ Sessions ─────────────⠇○◆●○╮╭ ◀ F9 ─ Agent ─ Shell · F8 ────────────── fix-osc52 (claude) [feat/fix-osc52] [Working] ╮
+│── thurbox ─────────────────││                                                                                        │
+│ ⠇ ⑂ fix-osc52              ││                                                                                        │
+│ ○ └ ⑂ fix-osc52-tests      ││                                                                                        │
+│ ◆ ⑂ add-wsl-tests  Blocked ││                                                                                        │
+│ ● ⑂ perf-cache             ││                                                                                        │
+│── website ─────────────────││                                                                                        │
+│ ○ ⑂ update-deps            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                    terminal surface                                    │
+│                            ││                                           fix                                          │
+│                            ││                                      not attached                                      │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+│                            ││                                                                                        │
+╰────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────╯

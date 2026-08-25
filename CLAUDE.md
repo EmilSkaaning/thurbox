@@ -98,9 +98,27 @@ kernel over the real `ui/`** rather than a harness that imitates either:
 - **Lua statics** — `selene ui` (undefined names + the sandbox, via `thurbox.yml`),
   `lua-language-server --check` (types + withheld libraries), `stylua` (format).
   The three cover different halves; see **Linting & Formatting**.
+- **`tests/v2_snapshots.rs`** — insta frame snapshots of the bundled surfaces:
+  deterministic frames (pinned theme, elapsed and snapshot data) of the session
+  list, agent-pane states, style runs and the resolved arrangement at wide and
+  narrow sizes. The regression net for "the frame looked wrong", which the
+  cell/substring assertions above cannot see; review intentional changes with
+  `cargo insta review`. Keep every input pinned — a snapshot that moves on its
+  own is worse than none.
+- **`tests/v2_render_props.rs`** — proptest crash invariants for the render
+  geometry: every bundled pane renders and paints at any size down to one cell,
+  resolved slots stay inside the screen, selection extraction/highlighting
+  survives arbitrary buffers and arbitrary vt100 byte streams, and
+  `normalize_ambiguous_width` strips `U+FE0F` without reshaping the buffer.
+- **`tests/tui_pty_e2e.rs`** (unix-only) — the real binary on a real PTY
+  (ptyprocess, whose tree is essentially `nix` alone): asserts the byte stream
+  no `TestBackend` test or `capture-pane` can see — alternate-screen
+  enter/leave, mouse reporting and bracketed paste turned off on exit, and
+  surviving a resize storm down to 2×2.
 - **Black-box smoke test** (`scripts/dev/smoke/tui-smoke.sh`) — launches the real
   binary in a throwaway tmux pane with isolated `HOME`/XDG/`TMUX_TMPDIR` and
-  asserts on captured frames. Gated behind the `tui-smoke` CI job (needs tmux).
+  asserts on captured frames. Runs at the end of CI's `nextest` job (needs
+  tmux), reusing the binary that run already built via `THURBOX_BIN`.
 
 Tests that shell out to `git` **must scrub the `GIT_*` location variables**
 (`git::GIT_LOCATION_ENV`): git exports them to hook processes, so the suite running

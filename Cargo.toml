@@ -147,3 +147,25 @@ tempfile = "3"
 # render-transparent (control_mode transport + terminal_view rendering). Runs in
 # the normal `cargo nextest --all`.
 proptest = "1"
+
+# Frame snapshot testing (tests/v2_snapshots.rs): deterministic frames of the
+# bundled surfaces, reviewed with `cargo insta review`. This is the regression
+# net for "the frame looked wrong" — a class the cell/substring assertions in
+# the other v2_* files cannot see.
+insta = "1"
+
+# The same vt100 the render path uses, made visible to the integration tests so
+# tests/v2_render_props.rs can feed a parser arbitrary bytes and assert the
+# selection/extraction layer above it never panics.
+vt100 = "0.16"
+
+# PTY e2e (tests/tui_pty_e2e.rs): spawns the real `thurbox` binary on a pseudo
+# terminal to assert what no TestBackend test can — boot on a real tty, resize
+# handling, and that exit restores the terminal (alt screen left, mouse
+# reporting off). Unix-only: the Windows ConPTY path is exercised by the
+# windows-vm e2e harness instead, and ConPTY timing on shared runners is flaky.
+# ptyprocess over portable-pty deliberately: the tests never need Windows, and
+# ptyprocess's tree is essentially `nix` alone — no unmaintained `serial`
+# transitive (RUSTSEC-2017-0008), so no advisory exception in deny.toml.
+[target.'cfg(unix)'.dev-dependencies]
+ptyprocess = "0.5"
