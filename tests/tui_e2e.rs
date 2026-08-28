@@ -172,21 +172,29 @@ impl Drop for Profile {
 fn openpty(rows: u16, cols: u16) -> (OwnedFd, OwnedFd) {
     let mut master = -1;
     let mut slave = -1;
-    let size = libc::winsize {
+    let mut size = libc::winsize {
         ws_row: rows,
         ws_col: cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    // macOS declares openpty's termios/winsize params `*mut`, Linux `*const`,
+    // so neither `&size` nor `&mut size` is portable at the call site: the
+    // first fails to compile on macOS, the second trips
+    // `clippy::unnecessary_mut_passed` on Linux. A raw `*mut` in a local
+    // satisfies both — it coerces to `*const` where that is what is wanted,
+    // and is not a `&mut` for the lint to see.
+    let winsize: *mut libc::winsize = &mut size;
     // SAFETY: openpty writes two valid descriptors into the out-params on
-    // success; the name and termios pointers are allowed to be null.
+    // success; the name and termios pointers are allowed to be null, and
+    // `winsize` points at a live local for the duration of the call.
     let rc = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            &size,
+            std::ptr::null_mut(),
+            winsize,
         )
     };
     assert_eq!(rc, 0, "openpty failed: {}", std::io::Error::last_os_error());
