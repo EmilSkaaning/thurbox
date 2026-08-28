@@ -12,9 +12,10 @@ use crate::storage::Database;
 
 /// Run one command. Called on the command's own thread, never the UI thread.
 ///
-/// Only the outcome travels back. A creation and a fork each mint a session id,
-/// and neither reports it: a session that finished spawning is a row in the
-/// list, not a reason to move the user's selection onto it.
+/// Only the outcome travels back. A creation and a fork carry their session id
+/// *in* rather than reporting it out: the loop minted it at dispatch
+/// (`Command::mint_session_id`) and is already steering the view onto it, so
+/// nothing here needs to say which row appeared.
 pub(super) fn execute(
     command: &Command,
     id: u64,
@@ -36,9 +37,21 @@ pub(super) fn execute(
         agent,
         host,
         extras,
+        session_id,
     } = command
     {
-        return create(name, repo, branch, base, agent, host, extras, id, progress);
+        return create(
+            name,
+            repo,
+            branch,
+            base,
+            agent,
+            host,
+            extras,
+            *session_id,
+            id,
+            progress,
+        );
     }
 
     // Repository memory names a path, not a session, so it too runs before the
@@ -97,10 +110,13 @@ pub(super) fn execute(
     let path = crate::paths::database_file().ok_or("could not resolve the database path")?;
     let db = Database::open(&path).map_err(|e| format!("open database: {e}"))?;
 
-    // A fork mints a session too; like a creation, the new row simply appears
-    // in the list rather than pulling the selection onto itself.
-    if let Command::Fork { name, .. } = command {
-        return fork(&db, id, name);
+    // A fork carries its pre-minted id like a creation does; the selection is
+    // already following it by the time the row appears.
+    if let Command::Fork {
+        name, session_id, ..
+    } = command
+    {
+        return fork(&db, id, name, *session_id);
     }
 
     match command {
@@ -177,6 +193,7 @@ fn create(
     agent: &Option<String>,
     host: &Option<String>,
     extras: &[ExtraMember],
+    session_id: Option<SessionId>,
     id: u64,
     progress: &Sender<Progress>,
 ) -> Result<(), String> {
@@ -215,6 +232,7 @@ fn create(
         base_branch: base.clone(),
         agent: agent.clone(),
         host: host.clone(),
+        session_id,
         // Each extra either takes its own worktree on the shared branch — off
         // its own base, which here is the session's — or is attached as it is.
         // Two or more members is what makes the agent launch in a symlink
@@ -379,7 +397,12 @@ fn bookmark_add(
 }
 
 /// Fork a session: a new one on the same repository, recording its parent.
-fn fork(db: &Database, id: SessionId, name: &str) -> Result<(), String> {
+fn fork(
+    db: &Database,
+    id: SessionId,
+    name: &str,
+    session_id: Option<SessionId>,
+) -> Result<(), String> {
     let source = db
         .get_session_by_id(id)
         .map_err(|e| format!("get session: {e}"))?
@@ -409,6 +432,7 @@ fn fork(db: &Database, id: SessionId, name: &str) -> Result<(), String> {
     let request = crate::session_ops::spawn::SpawnRequest {
         name,
         repo_path,
+        session_id,
         // No new worktree (the defaults): a fork works beside its parent, on
         // the same branch.
         agent: Some(source.agent.clone()),

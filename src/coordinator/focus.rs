@@ -112,12 +112,16 @@ impl App {
 
     /// Select a session and put the input focus on the pane that shows it.
     ///
-    /// Only for a request made *now*: a clicked notification, or
-    /// `thurbox-cli session focus`. A session this instance just created is
-    /// deliberately not one — creation finishes on a worker seconds after the
-    /// wizard closed, so steering the view then lands at a moment the user did
-    /// not choose, and taking the selection back after every one of them made
-    /// creating several sessions in a row a fight with the cursor.
+    /// Only for a request made *now*, at a moment the user chose: a clicked
+    /// notification, `thurbox-cli session focus`, or a create/fork the user
+    /// just submitted (stamped at dispatch in `dispatch_tracked`). The line
+    /// that matters is submit-time vs completion-time: a spawn finishes on a
+    /// worker seconds after the wizard closed, and steering the view *then*
+    /// yanked the cursor at a moment the user did not choose — which is why
+    /// nothing acts on a finished creation. Instead the list *follows* the
+    /// pre-minted id: sticky until the row appears, overridden by the user's
+    /// own next cursor move, and a failed spawn's dangling follow dies the
+    /// same way.
     ///
     /// The selection travels through the store rather than being set here,
     /// because the list is a plugin and it is the only thing that knows the

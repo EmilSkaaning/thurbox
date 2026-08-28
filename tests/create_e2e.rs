@@ -105,6 +105,9 @@ fn creating_a_session_produces_a_worktree_a_row_and_a_window() {
     )
     .expect("write agents.toml");
 
+    // Pre-minted, the way the TUI stamps a create at dispatch so it can steer
+    // the view onto the row before the worker finishes.
+    let minted = thurbox::session::SessionId::default();
     let result = thurbox::session_ops::spawn::spawn_session_headless(
         &db,
         thurbox::session_ops::spawn::SpawnRequest {
@@ -114,6 +117,7 @@ fn creating_a_session_produces_a_worktree_a_row_and_a_window() {
             base_branch: Some("main".into()),
             agent: Some("shell".into()),
             agent_session_id: None,
+            session_id: Some(minted),
             host: None,
             parent_session_id: None,
             task_id: None,
@@ -135,6 +139,9 @@ fn creating_a_session_produces_a_worktree_a_row_and_a_window() {
             panic!("creation failed: {e}");
         }
     };
+
+    // The spawn honored the pre-mint: the row's id is the one handed in.
+    assert_eq!(spawned.session_id, minted);
 
     // The row exists, and carries what a plugin needs to draw it.
     let row = db
@@ -470,6 +477,7 @@ fn a_vetoed_creation_reports_through_the_command_bus() {
         agent: Some("shell".into()),
         host: None,
         extras: Vec::new(),
+        session_id: None,
     });
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {

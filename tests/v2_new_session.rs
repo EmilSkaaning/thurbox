@@ -899,6 +899,8 @@ fn a_plain_selection_names_the_session_then_the_agent() {
             agent: Some("claude".into()),
             host: None,
             extras: Vec::new(),
+            // The id is minted by the loop at dispatch, never by the flow.
+            session_id: None,
         }]
     );
     assert_eq!(drawn(&host, &world), "", "the flow closes when it commits");
@@ -938,6 +940,7 @@ fn an_untouched_name_takes_the_repository_it_just_picked() {
             agent: Some("claude".into()),
             host: None,
             extras: Vec::new(),
+            session_id: None,
         }]
     );
 }
@@ -1013,6 +1016,7 @@ fn a_worktree_selection_asks_for_a_base_branch_and_a_branch_name() {
             agent: Some("claude".into()),
             host: None,
             extras: Vec::new(),
+            session_id: None,
         }]
     );
 }

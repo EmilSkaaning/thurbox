@@ -210,6 +210,61 @@ fn a_session_that_went_away_does_not_freeze_the_selection() {
     );
 }
 
+#[test]
+fn a_focus_request_waits_for_the_row_to_appear() {
+    // What creating a session leans on: the loop requests focus on the
+    // pre-minted id at submit, seconds before the spawn lands the row. The
+    // follow must survive those frames — selection stays put while the id is
+    // absent, then lands on the row the moment it exists.
+    let host = host();
+    render(&host);
+    host.set_shared_string("focus_session", "ccc");
+    render(&host);
+    assert_eq!(
+        host.shared_string("selected").as_deref(),
+        Some("aaa"),
+        "an id not yet in the list moves nothing"
+    );
+    render(&host);
+    assert_eq!(
+        host.shared_string("selected").as_deref(),
+        Some("aaa"),
+        "the request is not forgotten by an intervening frame either"
+    );
+
+    let mut landed = snapshot();
+    landed.sessions.push(row("ccc", "third"));
+    render_in(&host, &landed);
+    assert_eq!(
+        host.shared_string("selected").as_deref(),
+        Some("ccc"),
+        "the cursor was already waiting on the row when it appeared"
+    );
+}
+
+#[test]
+fn the_users_own_cursor_move_wins_over_a_pending_focus_request() {
+    // Moving the cursor while a spawn is in flight is a choice made later than
+    // the submit, so it wins: the follow is dropped and the row appearing does
+    // not yank the selection.
+    let host = host();
+    render(&host);
+    host.set_shared_string("focus_session", "ccc");
+    render(&host);
+    press(&host, "j");
+    render(&host);
+    assert_eq!(host.shared_string("selected").as_deref(), Some("bbb"));
+
+    let mut landed = snapshot();
+    landed.sessions.push(row("ccc", "third"));
+    render_in(&host, &landed);
+    assert_eq!(
+        host.shared_string("selected").as_deref(),
+        Some("bbb"),
+        "the appearing row did not steal the selection back"
+    );
+}
+
 /// A worktree with nothing in it that a delete could not put back.
 fn clean() -> GitState {
     GitState {

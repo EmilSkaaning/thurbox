@@ -36,6 +36,11 @@ pub struct SpawnRequest {
     /// Optional pre-generated agent session UUID. When unset one is generated
     /// so callers can return it to the user immediately.
     pub agent_session_id: Option<String>,
+    /// Optional pre-minted thurbox [`SessionId`]. When set, the spawn uses it
+    /// instead of minting one — so a caller that must know the id *before* the
+    /// worker finishes (the TUI steering the view onto the row it just asked
+    /// for) can hand it in rather than wait for the result.
+    pub session_id: Option<SessionId>,
     /// Optional remote host name (from `hosts.toml`). When set, the session is
     /// created on that host over SSH (worktree + tmux window live remotely).
     pub host: Option<String>,
@@ -195,11 +200,11 @@ pub fn spawn_session_headless_with_progress(
     let mut agent_def = super::resolve_agent_def(req.agent.as_deref());
     let agent_name = agent_def.name.clone();
 
-    // Both ids are minted before anything happens, so the pre-create hook can
-    // name the session it is being asked about — and correlate with the
-    // post-create one — and so `THURBOX_SESSION` is in the process env before
-    // the agent launches.
-    let session_id = SessionId::default();
+    // Both ids are known before anything happens — the caller's pre-mint, or
+    // minted here — so the pre-create hook can name the session it is being
+    // asked about — and correlate with the post-create one — and so
+    // `THURBOX_SESSION` is in the process env before the agent launches.
+    let session_id = req.session_id.unwrap_or_default();
     let agent_session_id = req
         .agent_session_id
         .clone()

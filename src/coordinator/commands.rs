@@ -226,9 +226,10 @@ impl App {
             // the command made, which only exists here once the rows are.
             self.snapshots.refresh();
             self.report_finished_commands();
-            // A finished creation is deliberately not acted on here: see
-            // `focus_on_session` for why a session that just spawned does not
-            // pull the view onto itself.
+            // A finished creation moves nothing here: the view started
+            // following its pre-minted id back at dispatch (`dispatch_tracked`)
+            // — the moment the user chose — so by the time the row lands the
+            // cursor is already waiting on it.
             self.note_data_change();
         } else {
             self.snapshots.refresh_if_due();
@@ -318,8 +319,15 @@ impl App {
     ///
     /// It is also the only moment the subject can be resolved: a delete's row is
     /// gone by the time it reports.
-    pub(crate) fn dispatch_tracked(&mut self, command: thurbox::kernel::command::Command) {
+    pub(crate) fn dispatch_tracked(&mut self, mut command: thurbox::kernel::command::Command) {
         use thurbox::kernel::command::Command;
+        // A creation or fork gets its id here, at the moment the user asked for
+        // it, so the selection can follow the row before the worker finishes —
+        // completion-time steering is what yanked the cursor at a moment the
+        // user did not choose (see `focus_on_session`).
+        if let Some(id) = command.mint_session_id() {
+            self.focus_on_session(&id.to_string());
+        }
         let kind = command.kind();
         let session = command.session().to_string();
         let label = self

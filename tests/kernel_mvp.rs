@@ -2051,6 +2051,7 @@ fn the_spawn_pipeline_reports_the_stage_it_reached() {
             base_branch: None,
             agent: None,
             agent_session_id: None,
+            session_id: None,
             host: None,
             parent_session_id: None,
             task_id: None,

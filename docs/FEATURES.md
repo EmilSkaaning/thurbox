@@ -247,15 +247,20 @@ not applicable.
    session. Skipped when only one agent is defined in
    `agents.toml`.
 
-**Creating a session moves nothing.** The new row appears in the list and waits
-to be picked; the selection, the pane showing it and the keyboard all stay where
-they were. Creation is a command that finishes on a worker seconds after the flow
-closed, so the moment it lands is not a moment the user chose — steering the view
-then interrupted whatever they had gone back to reading, and made creating three
-sessions in a row a fight with the cursor. `Ctrl+F` fork behaves the same way.
-Selection is still *steerable*, by the two requests that are deliberate: a
-clicked notification and `thurbox-cli session focus`, both through
-`focus_session`, which the list follows by id rather than by row number.
+**Creating a session selects it — at submit, not at completion.** Confirming
+the flow (and `Ctrl+F` fork) mints the new session's id on the spot, moves the
+keyboard to the agent pane at once, and sets the list *following* that id
+(`focus_session`, the same channel a clicked notification and `thurbox-cli
+session focus` use — by id, never by row number). The spawn itself still
+finishes on a worker seconds later, and that landing moves nothing: the follow
+is sticky until the row appears, so the cursor is already waiting on it — while
+completion-time steering yanked the view at a moment the user did not choose.
+Until the row lands the agent pane keeps showing the previous session; moving
+the cursor yourself in the meantime wins over the pending jump (and clears a
+follow left dangling by a failed spawn); creating several sessions in a row
+follows only the last one. Headless creates (`thurbox-cli session create`,
+automations, task dispatch) still move nothing — only `session focus` steers
+cross-process.
 
 A session is fully described by its repos and agent. There is no
 per-session model selection, permissions, prompt, tool, or skill

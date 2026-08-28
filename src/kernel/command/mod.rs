@@ -23,6 +23,7 @@ mod execute;
 pub use bus::{CommandBus, InFlight, Phase};
 
 use super::registry::Value as SettingValue;
+use crate::session::SessionId;
 
 /// A state change a plugin asked for.
 #[derive(Debug, Clone, PartialEq)]
@@ -85,6 +86,10 @@ pub enum Command {
         /// whole thing back on failure, and a session half-created by three
         /// commands has no owner.
         extras: Vec<ExtraMember>,
+        /// The id the spawn will use, stamped by the loop at dispatch
+        /// (`mint_session_id`) so the view can follow the row before the
+        /// worker finishes. `None` as parsed.
+        session_id: Option<SessionId>,
     },
     /// Remember, forget, or import a folder of repositories.
     ///
@@ -105,6 +110,8 @@ pub enum Command {
     Fork {
         session: String,
         name: String,
+        /// The forked session's own id, stamped at dispatch like `Create`'s.
+        session_id: Option<SessionId>,
     },
     /// Bring a session's worktree up to date with the branch it came from.
     Sync {
@@ -347,6 +354,24 @@ impl Command {
         }
     }
 
+    /// Stamp a creation or fork with the id its spawn will use.
+    ///
+    /// Called by the loop at dispatch — the moment the user's submit becomes a
+    /// command — so the selection can start following the new session before
+    /// the worker finishes. Returns the minted id, `None` for every other
+    /// variant. `DispatchTask` is deliberately not stamped: it can fire from
+    /// contexts that are not "the user just asked for this session".
+    pub fn mint_session_id(&mut self) -> Option<SessionId> {
+        match self {
+            Command::Create { session_id, .. } | Command::Fork { session_id, .. } => {
+                let id = SessionId::default();
+                *session_id = Some(id);
+                Some(id)
+            }
+            _ => None,
+        }
+    }
+
     /// The session this command concerns.
     pub fn session(&self) -> &str {
         match self {
@@ -549,6 +574,8 @@ impl Command {
                 agent: agent.filter(|a| !a.is_empty()),
                 host: host.filter(|h| !h.is_empty()),
                 extras,
+                // Minting is the loop's, at dispatch — parse stays pure.
+                session_id: None,
             });
         }
         // Repository memory names a path and a host, not a session. The verb is
@@ -658,6 +685,7 @@ impl Command {
             "fork" => Ok(Command::Fork {
                 session,
                 name: text.unwrap_or_default(),
+                session_id: None,
             }),
             "sync" => Ok(Command::Sync { session }),
             "copy" => Ok(Command::Copy { session }),
@@ -766,6 +794,56 @@ mod tests {
                 delta: -1
             })
         );
+    }
+
+    #[test]
+    fn minting_stamps_a_creation_and_a_fork_and_nothing_else() {
+        // The loop stamps the id at dispatch so the view can follow the row
+        // before the spawn finishes; the stored field and the returned id must
+        // be the same one, or the worker and the selection chase different
+        // sessions.
+        let mut create = Command::parse(
+            "create",
+            Args {
+                repo: Some("/src/thurbox".into()),
+                ..Args::default()
+            },
+        )
+        .expect("parse create");
+        assert!(
+            matches!(
+                create,
+                Command::Create {
+                    session_id: None,
+                    ..
+                }
+            ),
+            "parse leaves minting to the loop"
+        );
+        let minted = create.mint_session_id().expect("a create mints");
+        assert!(matches!(
+            create,
+            Command::Create { session_id: Some(id), .. } if id == minted
+        ));
+
+        let mut fork = Command::parse(
+            "fork",
+            Args {
+                session: "s1".into(),
+                ..Args::default()
+            },
+        )
+        .expect("parse fork");
+        let minted = fork.mint_session_id().expect("a fork mints");
+        assert!(matches!(
+            fork,
+            Command::Fork { session_id: Some(id), .. } if id == minted
+        ));
+
+        let mut sync = Command::Sync {
+            session: "s1".into(),
+        };
+        assert_eq!(sync.mint_session_id(), None);
     }
 
     #[test]
