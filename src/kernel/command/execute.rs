@@ -246,6 +246,18 @@ fn create(
         return Err("opening a worktree needs the branch checked out in it".to_string());
     }
 
+    // Same reasoning as `repo_path` above, and the same local-only caveat: an
+    // opened worktree becomes the session's cwd, so a path that isn't there
+    // yields a pane that cannot start rather than a stated error. The picker
+    // only offers paths `git worktree list` reported, but `thurbox-cli` and
+    // plugins can name any path at all.
+    let opened = worktree_path.map(crate::paths::expand_tilde);
+    if let Some(worktree) = &opened {
+        if host.is_none() && !worktree.is_dir() {
+            return Err(format!("not a worktree: {}", worktree.display()));
+        }
+    }
+
     let name = session_name(name, branch.as_deref(), worktree_path, &repo_path);
 
     let request = crate::session_ops::spawn::SpawnRequest {
@@ -253,7 +265,7 @@ fn create(
         repo_path,
         worktree_branch: branch.clone(),
         base_branch: base.clone(),
-        existing_worktree: worktree_path.map(crate::paths::expand_tilde),
+        existing_worktree: opened,
         agent: agent.clone(),
         host: host.clone(),
         // Each extra either takes its own worktree on the shared branch — off
