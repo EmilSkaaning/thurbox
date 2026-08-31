@@ -699,12 +699,15 @@ fn resolve_dirs(
                 repo_path: repo.to_path_buf(),
                 worktree_path,
                 branch: branch.to_string(),
+                created_by_thurbox: true,
             }
         })
         .collect();
 
     // The opened worktree leads, holding the place plan 0 would have taken, so
-    // "the primary is worktree 0" stays true for every caller downstream.
+    // "the primary is worktree 0" stays true for every caller downstream. It is
+    // flagged as not ours: the user made this directory, so force-delete leaves
+    // it (and restore re-attaches to it) rather than removing it.
     if let Some(path) = &req.existing_worktree {
         worktrees.insert(
             0,
@@ -712,6 +715,7 @@ fn resolve_dirs(
                 repo_path: req.repo_path.clone(),
                 worktree_path: path.clone(),
                 branch: branch.to_string(),
+                created_by_thurbox: false,
             },
         );
     }
@@ -1822,6 +1826,10 @@ mod tests {
             "every worktree was actually checked out: {worktrees:?}"
         );
         assert!(worktrees.iter().all(|w| w.branch == "feat/x"));
+        assert!(
+            worktrees.iter().all(|w| w.created_by_thurbox),
+            "thurbox checked these out, so force-delete owns their removal"
+        );
         assert!(additional.is_empty());
     }
 
@@ -1858,6 +1866,10 @@ mod tests {
         assert_eq!(worktrees[0].repo_path, primary);
         assert_eq!(worktrees[0].worktree_path, foreign);
         assert_eq!(worktrees[0].branch, "feat/tooltips");
+        assert!(
+            !worktrees[0].created_by_thurbox,
+            "an opened worktree is the user's; force-delete must not remove it"
+        );
         assert!(additional.is_empty());
         assert_eq!(
             crate::git::list_worktrees(&primary).unwrap(),

@@ -1360,6 +1360,7 @@ mod tests {
             repo_path: PathBuf::from("/src/thurbox"),
             worktree_path: PathBuf::from("/worktrees/fix-osc52"),
             branch: "fix/osc52".into(),
+            created_by_thurbox: true,
         }];
         let members = session_members(Some(std::path::Path::new("/src/thurbox")), &worktrees, &[]);
         assert_eq!(
@@ -1378,11 +1379,13 @@ mod tests {
                 repo_path: PathBuf::from("/src/a"),
                 worktree_path: PathBuf::from("/worktrees/a"),
                 branch: "feat/x".into(),
+                created_by_thurbox: true,
             },
             crate::sync::state::SharedWorktree {
                 repo_path: PathBuf::from("/src/b"),
                 worktree_path: PathBuf::from("/worktrees/b"),
                 branch: "feat/x".into(),
+                created_by_thurbox: true,
             },
         ];
         // An attached directory that is already a worktree must not appear twice.

@@ -168,6 +168,19 @@ pub fn restore_session_headless(
 pub fn recreate_worktrees(worktrees: &[SharedWorktree]) -> Vec<WorktreeInfo> {
     let mut recovered = Vec::new();
     for worktree in worktrees {
+        // Never thurbox's to re-create: the directory was the user's all along
+        // and force-delete left it in place, so it is still checked out and
+        // still registered with git. `add_existing_worktree` would only fail on
+        // it and drop it from the restored session.
+        if !worktree.created_by_thurbox {
+            recovered.push(WorktreeInfo {
+                repo_path: worktree.repo_path.clone(),
+                worktree_path: worktree.worktree_path.clone(),
+                branch: worktree.branch.clone(),
+                created_by_thurbox: false,
+            });
+            continue;
+        }
         if !crate::git::branch_exists(&worktree.repo_path, &worktree.branch) {
             tracing::warn!(
                 "not restoring {}: its branch is gone",
@@ -180,6 +193,7 @@ pub fn recreate_worktrees(worktrees: &[SharedWorktree]) -> Vec<WorktreeInfo> {
                 repo_path: worktree.repo_path.clone(),
                 worktree_path: path,
                 branch: worktree.branch.clone(),
+                created_by_thurbox: true,
             }),
             Err(e) => tracing::warn!("could not recreate worktree {}: {e}", worktree.branch),
         }
@@ -248,6 +262,7 @@ mod tests {
             repo_path: std::path::PathBuf::from("/definitely/not/a/repo"),
             worktree_path: std::path::PathBuf::from("/definitely/not/a/worktree"),
             branch: "feat/gone".into(),
+            created_by_thurbox: true,
         }];
         assert!(recreate_worktrees(&worktrees).is_empty());
     }

@@ -2000,7 +2000,11 @@ branch name) is saved in the database and reconstructed on restore.
   delete** — the full teardown with no `Ctrl+Z` undo, so it is gated
   behind a confirmation modal (`Modal::ConfirmDeleteSession`) instead.
   The flag never affects `thurbox-cli session delete`, which stays soft
-  unless `--force`. Either way the row **leaves the list on the
+  unless `--force`. A teardown only removes worktrees **thurbox created**
+  (`created_by_thurbox`, schema v41): a session that *opened* a worktree the
+  user already had leaves that directory exactly where it was and reports it
+  as kept, because `git worktree remove --force` would take any uncommitted
+  work in it along with it. Either way the row **leaves the list on the
   keystroke** rather than sitting there tagged while the teardown runs:
   the session list drops any session whose `delete` is in flight
   (`live_sessions()` in `ui/plugins/10_sessions.lua`), so the cursor lands on

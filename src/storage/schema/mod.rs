@@ -26,7 +26,7 @@ use rusqlite::Connection;
 /// a session's persisted launch recipe, its `stopped_at` mark, and the
 /// `session_meta` key/value table.
 /// Gaps in the step table are fine (there is no v18 step either).
-pub const SCHEMA_VERSION: u32 = 41;
+pub const SCHEMA_VERSION: u32 = 42;
 
 /// A single migration step: applied when the stored version is below `target`.
 type MigrationStep = (u32, fn(&Connection) -> rusqlite::Result<()>);
@@ -134,6 +134,7 @@ pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
             branch        TEXT NOT NULL,
             created_at    INTEGER NOT NULL,
             deleted_at    INTEGER,
+            created_by_thurbox INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY (session_id, repo_path)
         );
 
@@ -321,6 +322,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         (39, migrate_v39_bookmark_host),
         (40, migrate_v40_bookmark_git_kind),
         (41, migrate_v41_joinable),
+        (42, migrate_v42_worktree_provenance),
     ];
 
     for &(target, step) in steps {

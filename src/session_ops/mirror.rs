@@ -104,6 +104,7 @@ pub fn session_to_json(
             "repo_path": w.repo_path.display().to_string(),
             "worktree_path": w.worktree_path.display().to_string(),
             "branch": w.branch,
+            "created_by_thurbox": w.created_by_thurbox,
         })).collect::<Vec<_>>(),
     })
 }
@@ -187,6 +188,13 @@ pub fn session_from_json(value: &Value, backend_type: &str) -> Result<HostRow, S
                         repo_path: PathBuf::from(w.get("repo_path")?.as_str()?),
                         worktree_path: PathBuf::from(w.get("worktree_path")?.as_str()?),
                         branch: w.get("branch")?.as_str()?.to_string(),
+                        // Absent from a peer running a build that predates the
+                        // field. Those peers only ever created their worktrees,
+                        // so "ours" is the accurate reading, not a guess.
+                        created_by_thurbox: w
+                            .get("created_by_thurbox")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true),
                     })
                 })
                 .collect()

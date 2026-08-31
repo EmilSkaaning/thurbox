@@ -1099,6 +1099,7 @@ mod tests {
                 repo_path: std::path::PathBuf::from("/srv/repo"),
                 worktree_path: std::path::PathBuf::from("/srv/worktree"),
                 branch: "feat/x".into(),
+                created_by_thurbox: true,
             }],
             shell_backend_id: None,
             parent_session_id: None,
