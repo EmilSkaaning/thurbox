@@ -300,6 +300,23 @@ not applicable.
    v40) so it's learned once. The first selected repo becomes the
    session's `cwd`; the rest may be exposed to the agent depending
    on the agent's own flags.
+
+   **Worktrees the repo already has** appear as `↳` child rows under
+   whichever repo the cursor is resting on, each showing its directory
+   name and the branch checked out there. They come from
+   `git worktree list --porcelain` on that repo — so a worktree made
+   *outside* thurbox is found wherever it lives (`.worktrees/`, a
+   sibling directory, anywhere), not just at thurbox's own derived
+   `<repo-hash>/<branch>` path. One git call per highlighted row, cached
+   with the same TTL as the branch list; the main checkout, bare repos,
+   detached heads and prunable registrations are dropped, since no
+   session can be started on them. `Enter` on one **opens** it: no
+   `git worktree add` runs, and steps 3–5 below are skipped entirely
+   (the branch is the one already checked out there, and the session is
+   named after the worktree *directory* — an agent that cuts
+   `.worktrees/dynamic-tooltips` on branch
+   `feat/dynamic-tooltips-15307729713678226529` gives you a session
+   called `dynamic-tooltips`, not the suffix).
 3. **Base branch selector** — worktree mode only.
 4. **Session name** — free text identifier shown in the sidebar.
 5. **New branch name** — worktree mode only.
