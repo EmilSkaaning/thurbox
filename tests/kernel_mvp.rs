@@ -2050,6 +2050,7 @@ fn the_spawn_pipeline_reports_the_stage_it_reached() {
             repo_path: repo.path().to_path_buf(),
             worktree_branch: None,
             base_branch: None,
+            existing_worktree: None,
             agent: None,
             command: None,
             args: Vec::new(),
