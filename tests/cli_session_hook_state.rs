@@ -602,3 +602,167 @@ fn doctor_fails_a_session_whose_hook_command_cannot_find_the_binary_it_names() {
     assert_eq!(check(&out, "cli")["level"], Value::String("ok".into()));
     assert!(out.failure.is_none(), "{out}");
 }
+
+/// A session parked by `session stop` must be tellable from a running one by
+/// the two verbs a driver polls.
+///
+/// It used to be readable only through `watch`, which reports the flag — so the
+/// alternative was probing the pane and inferring, or paying a one-second
+/// `watch --initial` per liveness check. `get` and `list` answered *identically*
+/// for a parked and a running session, down to a `backend_id` naming a window
+/// that no longer existed.
+#[test]
+fn a_parked_session_says_so_on_get_and_on_list() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let _guard = isolated_config(dir.path());
+    let db = Database::open_in_memory().expect("db");
+    let row = session_row("parked", "claude", "local-tmux");
+    db.upsert_session(&row).expect("persist");
+    db.set_hook_state(row.id, "working").expect("signal");
+
+    // Running: the agent's own last word, and not stopped.
+    let before = get(&db, row.id, false);
+    assert_eq!(before["state"], Value::String("working".into()));
+    assert_eq!(before["stopped"], Value::Bool(false));
+
+    run(
+        Action::Stop {
+            session: row.id.to_string(),
+        },
+        &db,
+    )
+    .expect("session stop");
+
+    let after = get(&db, row.id, false);
+    assert_eq!(after["stopped"], Value::Bool(true), "{after}");
+    // Not `working`, and not `uncovered` either: it is parked, which is a fact
+    // thurbox knows first-hand rather than one inferred from an agent's
+    // silence. Both of the other answers describe a session that is running.
+    assert_eq!(after["state"], Value::String("stopped".into()), "{after}");
+    assert!(
+        after["state_source"].is_null(),
+        "nothing reported this; thurbox recorded it: {after}"
+    );
+
+    // And the same fact under the same key on the list, which is the verb a
+    // driver actually polls.
+    let listed = run(
+        Action::List {
+            parent: None,
+            deleted: false,
+            verify: false,
+        },
+        &db,
+    )
+    .expect("session list");
+    let rows = listed.json.as_array().expect("rows");
+    let found = rows
+        .iter()
+        .find(|r| r["id"] == Value::String(row.id.to_string()))
+        .expect("a parked session stays in the list");
+    assert_eq!(found["stopped"], Value::Bool(true), "{found}");
+    assert_eq!(found["state"], Value::String("stopped".into()), "{found}");
+}
+
+/// The pane verbs refuse a parked session by name.
+///
+/// `session stop` killed the window on purpose, so reaching for it and
+/// reporting what the multiplexer says about a window that is not there
+/// describes a crash rather than the state the caller itself asked for.
+#[test]
+fn the_pane_verbs_refuse_a_parked_session_by_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let _guard = isolated_config(dir.path());
+    let db = Database::open_in_memory().expect("db");
+    let row = session_row("no-pane", "claude", "local-tmux");
+    db.upsert_session(&row).expect("persist");
+    run(
+        Action::Stop {
+            session: row.id.to_string(),
+        },
+        &db,
+    )
+    .expect("session stop");
+
+    for action in [
+        Action::Send {
+            uuid: row.id.to_string(),
+            text: "hello".into(),
+            no_enter: false,
+        },
+        Action::Key {
+            uuid: row.id.to_string(),
+            key: "enter".into(),
+        },
+        Action::Capture {
+            uuid: row.id.to_string(),
+            lines: 10,
+            ansi: false,
+        },
+    ] {
+        let err = run(action, &db).expect_err("a parked session has no pane");
+        assert!(err.contains("stopped"), "got {err}");
+        assert!(
+            err.contains("session start"),
+            "the refusal names the fix: {err}"
+        );
+    }
+}
+
+/// `session doctor` on a parked session is a clean report, not a warning about
+/// silence it was told to cause.
+///
+/// `aider` only ever reports `blocked` (`Coverage::Partial`, and no
+/// `hook_file`), so its coverage and payload checks stay put across the stop —
+/// the only thing that moves is what the doctor makes of a session it knows was
+/// asked to go silent. Before `stop`, a session that has never signalled gets a
+/// `warn` on `last-signal` — the honest "nothing has ever signalled" case. Once
+/// `stop` parks it, the same absence of a signal is expected and reported
+/// `ok`, and the pane check — which would otherwise warn that nothing could be
+/// resolved — says plainly that there is no pane by design.
+#[test]
+fn a_parked_sessions_doctor_report_is_clean_not_a_warning() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let _guard = isolated_config(dir.path());
+    let _path = PathGuard::only(&dir.path().join("path"), true);
+    let db = Database::open_in_memory().expect("db");
+    let row = session_row("parked-doctor", "aider", "local-tmux");
+    db.upsert_session(&row).expect("persist");
+
+    let before = doctor(&db, row.id);
+    assert_eq!(
+        check(&before, "last-signal")["level"],
+        Value::String("warn".into()),
+        "{before}"
+    );
+
+    run(
+        Action::Stop {
+            session: row.id.to_string(),
+        },
+        &db,
+    )
+    .expect("session stop");
+
+    let after = doctor(&db, row.id);
+    let last_signal = check(&after, "last-signal");
+    assert_eq!(
+        last_signal["level"],
+        Value::String("ok".into()),
+        "{last_signal}"
+    );
+
+    let pane = check(&after, "pane");
+    assert_eq!(pane["level"], Value::String("ok".into()), "{pane}");
+    assert!(
+        pane["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("stopped") && d.contains("session start")),
+        "the report must say why there is no pane and how to get one back: {pane}"
+    );
+
+    assert!(
+        after.failure.is_none(),
+        "a parked session is not broken wiring: {after}"
+    );
+}
