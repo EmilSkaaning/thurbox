@@ -46,12 +46,15 @@ pub mod notify;
 pub mod output;
 pub mod perf;
 pub mod plugins;
+pub mod runtime;
 pub mod session_doctor;
+pub mod session_ref;
 pub mod sessions;
 pub mod tasks;
 pub mod toon;
 pub mod update;
 pub mod version;
+pub mod watch;
 
 use output::{CommandOutput, Format, FormatFlags};
 
@@ -176,6 +179,14 @@ pub enum Command {
     /// Print the perf snapshot a running TUI publishes (THURBOX_PERF_LOG or
     /// the perf HUD must be active in that TUI).
     Perf,
+    /// Stream session changes as newline-delimited JSON — one object per
+    /// transition, so nothing driving thurbox has to poll.
+    Watch(watch::WatchArgs),
+    /// What thurbox runs besides sessions (the automation heartbeat keeper).
+    Runtime {
+        #[command(subcommand)]
+        action: runtime::Action,
+    },
     /// Interface plugins: where they live, start one, check it loads.
     Plugin {
         #[command(subcommand)]
@@ -232,7 +243,12 @@ pub enum Outcome {
     Ok,
     /// Rendered, and the command asks for a non-zero exit. Nothing more may go
     /// to stdout; the message is a diagnostic for stderr.
-    Failed(String),
+    ///
+    /// `code` is `None` for the ordinary "it ran and failed" case, and `Some`
+    /// only where the command's own exit code *is* the answer — `session exec
+    /// --exit-passthrough`. The entrypoint owns what `None` resolves to, so the
+    /// exit-code constants stay in one place.
+    Failed { message: String, code: Option<i32> },
 }
 
 /// Run a parsed CLI invocation against `db`, rendering the result in the
@@ -251,6 +267,14 @@ pub fn run(cli: Cli, db: &Database) -> Result<Outcome, String> {
         text: cli.text,
         toon: cli.toon,
     });
+    // `watch` is the one command that is a *stream* rather than a document: it
+    // writes a line per change for as long as it runs, so the one-document rule
+    // below (and the renderer it exists for) does not apply to it.
+    if let Some(Command::Watch(args)) = cli.command {
+        watch::run(db, args)?;
+        return Ok(Outcome::Ok);
+    }
+
     let mut output: CommandOutput = match cli.command {
         // No subcommand: live state, not a usage dump (AXI principle 8).
         None => home::run(db),
@@ -269,7 +293,10 @@ pub fn run(cli: Cli, db: &Database) -> Result<Outcome, String> {
     // Its report is the answer and is already on stdout, so the failure travels
     // as an outcome rather than an `Err` the caller would print again.
     Ok(match output.failure {
-        Some(msg) => Outcome::Failed(msg),
+        Some(message) => Outcome::Failed {
+            message,
+            code: output.exit_code,
+        },
         None => Outcome::Ok,
     })
 }
@@ -305,6 +332,11 @@ fn dispatch(command: Command, db: &Database) -> Result<CommandOutput, String> {
         Command::Update(args) => Ok(update::run(args)),
         Command::Notify(args) => Ok(notify::run(args)),
         Command::Perf => perf::run(db),
+        // Never returns a document: it *is* the document, one line at a time,
+        // written as each change lands. Handled before dispatch for that
+        // reason — see `run`.
+        Command::Watch(_) => unreachable!("handled in run(), which owns the stream"),
+        Command::Runtime { action } => Ok(runtime::run(action)),
         // The only command that needs no database: a plugin is a file.
         Command::Plugin { action } => plugins::run(action),
     }

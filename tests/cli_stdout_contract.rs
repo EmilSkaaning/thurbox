@@ -84,6 +84,24 @@ fn sole_document(out: &Output) -> Value {
 /// refuses a session with no live window — and a window is exactly what this
 /// test must not create. `doctor` needs a *row*, not a pane; the pane check
 /// answers "no live pane" and is not what is under test here.
+/// [`seed_session`] with a working directory, for the verbs that run something
+/// in it rather than merely reporting on the row.
+fn seed_session_in(env: &Env, name: &str, cwd: Option<&std::path::Path>) -> String {
+    let id = seed_session(env, name, "claude");
+    if let Some(dir) = cwd {
+        let db = thurbox::storage::Database::open(&env.path("data").join("thurbox.db"))
+            .expect("open the instance database");
+        let parsed: SessionId = id.parse().expect("seeded id");
+        let mut row = db
+            .get_session_by_id(parsed)
+            .expect("query")
+            .expect("just seeded");
+        row.cwd = Some(dir.to_path_buf());
+        db.upsert_session(&row).expect("record the cwd");
+    }
+    id
+}
+
 fn seed_session(env: &Env, name: &str, agent: &str) -> String {
     let db = thurbox::storage::Database::open(&env.path("data").join("thurbox.db"))
         .expect("open the instance database");
@@ -200,4 +218,170 @@ fn a_runtime_failure_is_not_advised_as_a_usage_error() {
         "a bad invocation is the one that is sent to the usage page: {}",
         String::from_utf8_lossy(&usage.stdout)
     );
+}
+
+/// `session exec --exit-passthrough` exits with the command's own code.
+///
+/// The flag's whole purpose is Gas City's `proc.exec` capability: "the exec
+/// op's process exit code carries the in-box command's exit code, so an
+/// exec-op exit of 2 is read as the command's own exit 2 rather than the
+/// unknown-op sentinel". Collapsing every failure to 1 makes that unreadable —
+/// and a caller that trusted the flag's own help would mis-report every
+/// non-zero code as 1.
+///
+/// The single-document rule still applies: the report is on stdout either way,
+/// so a caller never has to choose between reading the answer and knowing the
+/// result.
+#[test]
+fn exec_exit_passthrough_carries_the_commands_own_code() {
+    let env = Env::new();
+    let dir = env.path("home");
+    let id = seed_session_in(&env, "worker", Some(&dir));
+
+    // Without the flag: the command failed, the invocation did not. Exit 0,
+    // because thurbox was asked to run something and ran it.
+    let plain = env.run(&["session", "exec", "worker", "--", "sh", "-c", "exit 7"]);
+    assert_eq!(
+        plain.status.code(),
+        Some(0),
+        "an unasked-for failure is data"
+    );
+
+    // With it: the command's code *is* the invocation's.
+    for code in [7, 3] {
+        let out = env.run(&[
+            "session",
+            "exec",
+            "--exit-passthrough",
+            "--json",
+            &id,
+            "--",
+            "sh",
+            "-c",
+            &format!("exit {code}"),
+        ]);
+        assert_eq!(
+            out.status.code(),
+            Some(code),
+            "--exit-passthrough must carry {code}, not collapse it:\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // And the report is still exactly one document on stdout.
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut stream = serde_json::Deserializer::from_slice(&out.stdout).into_iter::<Value>();
+        let first = stream
+            .next()
+            .unwrap_or_else(|| panic!("stdout carries a document: {stdout}"))
+            .expect("stdout is JSON");
+        assert!(stream.next().is_none(), "one document only:\n{stdout}");
+        assert_eq!(first["exit_code"].as_i64(), Some(i64::from(code)));
+    }
+
+    // A command that succeeds exits 0 with the flag, like any other success.
+    let ok = env.run(&[
+        "session",
+        "exec",
+        "--exit-passthrough",
+        "worker",
+        "--",
+        "sh",
+        "-c",
+        "exit 0",
+    ]);
+    assert_eq!(ok.status.code(), Some(0));
+}
+
+/// `session create` answers the "a session of this name already exists"
+/// question four ways, and `fail` is the one that was missing.
+///
+/// Both orchestrators tested against this branch hand-rolled the same
+/// duplicate refusal, each with its own list-then-create race, because thurbox
+/// offered adopt and replace but no way to *refuse*. Gas City's
+/// `RPP-LIFECYCLE-002` mandates that a duplicate start exit non-zero, so the
+/// exit code is part of the contract, not decoration.
+///
+/// No multiplexer is involved: every arm here is decided before anything is
+/// spawned, which is also why it can refuse without leaving a window behind.
+#[test]
+fn create_answers_an_existing_name_four_ways() {
+    let env = Env::new();
+    let repo = env.path("home");
+    let existing = seed_session(&env, "worker", "claude");
+
+    let create = |mode: &str| {
+        env.run(&[
+            "session",
+            "create",
+            "--name",
+            "worker",
+            "--repo-path",
+            repo.to_str().expect("utf-8 path"),
+            "--on-existing",
+            mode,
+            "--json",
+        ])
+    };
+
+    // fail: exit 1, and the error names the session in the way — an integrator
+    // acts on the id, not on the word "exists".
+    let refused = create("fail");
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "a duplicate name must exit non-zero: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let doc = String::from_utf8_lossy(&refused.stdout);
+    assert!(
+        doc.contains(&existing),
+        "the refusal names the existing id: {doc}"
+    );
+
+    // adopt: exit 0, the existing session, and `created: false` so a caller
+    // reads one shape whether it made the session or found it.
+    let adopted = create("adopt");
+    assert_eq!(adopted.status.code(), Some(0));
+    let value: Value = serde_json::from_slice(&adopted.stdout).expect("one JSON document");
+    assert_eq!(value["id"].as_str(), Some(existing.as_str()));
+    assert_eq!(value["created"].as_bool(), Some(false));
+
+    // The row is still there: adopting is not a mutation.
+    let listed = env.run(&["session", "list", "--json"]);
+    let rows: Value = serde_json::from_slice(&listed.stdout).expect("JSON");
+    assert_eq!(rows.as_array().map(Vec::len), Some(1));
+}
+
+/// A name matching more than one session is refused for `adopt` and `replace`,
+/// because either would be a guess about which session was meant.
+///
+/// This is the same rule the reference resolver follows, and it has to hold
+/// here too: thurbox does not enforce uniqueness by default, so a database
+/// with two same-named rows is a state `create` can legitimately meet.
+#[test]
+fn an_ambiguous_name_is_never_adopted_or_replaced() {
+    let env = Env::new();
+    let repo = env.path("home");
+    seed_session(&env, "twin", "claude");
+    seed_session(&env, "twin", "codex");
+
+    for mode in ["adopt", "replace"] {
+        let out = env.run(&[
+            "session",
+            "create",
+            "--name",
+            "twin",
+            "--repo-path",
+            repo.to_str().expect("utf-8 path"),
+            "--on-existing",
+            mode,
+            "--json",
+        ]);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "--on-existing {mode} must refuse an ambiguous name"
+        );
+        let doc = String::from_utf8_lossy(&out.stdout);
+        assert!(doc.contains('2'), "the refusal counts the matches: {doc}");
+    }
 }

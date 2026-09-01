@@ -35,8 +35,10 @@ thurbox-cli session list --parent <lead-uuid> --json | jq  # direct children onl
 ```
 
 Subcommands: `session` (create/list [`--deleted`]/get/delete/restore/restart
-[`--if-missing`]/send [`--no-enter`]/key/capture/focus/signal/doctor/sync/register —
-`sync`/`register` and the flags serve session sharing, ADR-24), `automation` (alias `auto`:
+[`--if-missing`]/stop/start/fork/exec/meta/send [`--no-enter`]/key/capture/focus/signal/doctor/sync/register —
+`sync`/`register` and the flags serve session sharing, ADR-24), `watch` (stream
+session changes as newline-delimited JSON), `runtime` (status/stop — what
+thurbox runs that is not a session), `automation` (alias `auto`:
 create/list/show/edit/remove/run/runs/tick), `task` (alias `todo`:
 create/list/show/edit/remove/run), `message` (alias `msg`:
 send/inbox/prune — the inter-session mailbox queue; see below), `editor`
@@ -69,6 +71,131 @@ modal's Interface tab shows, and
 `events` lists every event a plugin may subscribe to with its payload, and
 `install|sync|update|remove|available` manage panes from a declarative spec
 — see `docs/PLUGINS.md`).
+
+### A session reference is a name, a UUID, or an id prefix
+
+Every session verb takes the same reference, resolved in that order: a full
+UUID first (unambiguous by construction), then an exact name, then a unique id
+prefix. **Ambiguity is refused, never guessed** — names are not unique (thurbox
+does not enforce it, and a mirrored host contributes rows that legitimately
+collide), so a reference matching two sessions exits non-zero and names both
+ids. `--parent` resolves the same way.
+
+`session create --on-existing <allow|adopt|replace|fail>` answers "a session of
+this name already exists" — one question, four answers, because none of them is
+safe to assume:
+
+| Mode | Behaviour |
+|---|---|
+| `allow` (default) | create another one; both are then addressable only by id |
+| `adopt` | return the existing session with `created: false` — idempotent, what a driver reconciling desired state wants |
+| `replace` | tear the old one down (`delete --force`) first |
+| `fail` | refuse, naming the id in the way; exit 1 |
+
+`allow` is the default because thurbox **cannot** enforce uniqueness: a database
+mirroring a shareable host (ADR-24) holds that host's rows beside its own, and
+two machines may each legitimately have a session called `build`. Uniqueness is
+something a caller asks for per creation, not a property of the namespace — which
+is why `fail` exists at all, and why both firstmate and a Gas City provider were
+each hand-rolling it with their own list-then-create race.
+
+`adopt` and `replace` refuse an *ambiguous* name (one matching several
+sessions), for the same reason the reference resolver does: adopting one of two,
+or destroying one of two, is a guess. Every mode is decided before anything is
+spawned, so a refusal leaves no window, worktree or row behind. It is a check,
+not a lock — two simultaneous creates can still both pass, which is inherent to
+a spawn that must make a multiplexer window before it has a row.
+
+### Any command can be a session
+
+`--agent` names an `agents.toml` entry; `--command` **is** the definition:
+
+```bash
+# A shell — the ready-made form, and a built-in agent
+thurbox-cli session create --name probe --repo-path . --agent shell
+
+# Anything at all, with its own environment
+thurbox-cli session create --name build --repo-path . \
+    --command npm --arg run --arg watch --env NODE_ENV=development
+```
+
+A `--command` session persists its **launch recipe** (command, args, env) on its
+row, because there is no registry entry to re-resolve; `session restart` replays
+it verbatim. A registry agent deliberately stores nothing, so it is resolved by
+name at every launch and editing `agents.toml` then restarting still takes
+effect.
+
+What a command session does **not** have is a conversation. `resume_args` and
+`fork_args` are what address one, and only an agent definition declares them —
+so `--resume` is refused for a raw command (the error names the fix: give it an
+`[[agents]]` entry), and `session fork` gives you a second session in the same
+directory rather than a continued one. Thurbox never learns what a conversation
+*is*; it only knows how to address one.
+
+### Parking a session: `stop` / `start`
+
+`session stop` kills the pane and keeps everything else — the row, the checkout,
+the branch, the agent's own history on disk. It is the verb between "leave it
+running" and "delete it": reclaiming a heavy agent's pane used to mean deleting
+the session, which also removed its worktrees.
+
+A stopped session is marked, not merely pane-less, because three things repair a
+session that has no pane on sight — the interface's respawn of surveyed rows, a
+peer's `restart --if-missing` after a reboot, and extension self-heal. All three
+skip a stopped row; `session start` is the only caller that clears the mark.
+
+### `session exec` — run something in a session's context
+
+```bash
+thurbox-cli session exec worker -- git status --porcelain
+```
+
+A separate process in the session's directory, on the machine the session lives
+on — **not** typed into the pane, which belongs to the agent and would interleave
+with whatever it is doing. The command's exit code is always in the output;
+`--exit-passthrough` additionally makes it this invocation's own — a command
+exiting 2 is *that command's* 2, not a usage error, which is the distinction
+Gas City's `proc.exec` capability is defined by. `exit_code` is `null` when the
+command was terminated by a signal rather than exiting; passthrough then takes
+the generic failure code, since there is no code to carry.
+
+Arguments to `--command` may start with a dash (`--arg -c`): passing a switch is
+the usual reason to pass an argument at all.
+
+### `session meta` — the driver's key/value space
+
+`set`/`get`/`list`/`unset`, namespaced by convention (`fm.*`, `gc.*`), never
+interpreted by thurbox. Without it a driver's identity ends up encoded in the
+session *name*, which then has to be parsed and kept unique and inside the
+64-character limit. `set` reads the value from stdin when it is not an argument.
+
+### `thurbox-cli watch` — nothing has to poll
+
+```bash
+thurbox-cli watch --initial | while read -r line; do …; done
+```
+
+One JSON object per line as sessions appear, change state, or go —
+`{"event":"changed","session":"…","name":"…","state":"working",…}`. The
+mechanism is the `PRAGMA data_version` gate the sync worker already uses, so it
+works with no interface running and costs a pragma per tick rather than a query.
+`--session` narrows it to one, `--for-secs` bounds it, `--initial` emits the
+current state first so a starting driver gets its baseline and every change
+after it in one stream.
+
+### Remote sessions are driven, not refused
+
+`send`, `key`, `capture` and `exec` work on a `--host` session: they delegate to
+that host's own `thurbox-cli` (the mechanism the mirror pass already uses).
+A refusal survives only where delegation is genuinely impossible — no
+`hosts.toml` entry, or no reachable CLI there — and says which.
+
+### `runtime` — what thurbox runs that is not a session
+
+The automation heartbeat keeper is a detached tmux window created implicitly by
+anything that arms an automation. It is not a session, so no session listing
+showed it and no delete reclaimed it. `runtime status` reports it and the socket
+in force; `runtime stop` kills it (the next `automation` write arms it again).
 
 ### thurbox-cli is an AXI
 
@@ -138,17 +265,22 @@ is typed into the pane as literal text — so `session key` refuses what it does
 not know rather than injecting `Escpe` into somebody's prompt. Text goes out
 bracketed-paste-wrapped either way (`paste_prompt_args`), which is what makes it
 literal: no shell sees it, a leading `-` cannot read as a `send-keys` flag, and a
-newline cannot submit the line before it. Both are **local-only** — the one-shot
-helpers bypass the transport seam and drive this machine's tmux server — so a
-session on an `ssh:`/`wsl:` backend is refused by name (`require_local_pane`)
-instead of failing as a tmux status code against a window that was never there.
+newline cannot submit the line before it. The one-shot helpers themselves drive
+only this machine's tmux server, so `send`/`key`/`capture` on an `ssh:`/`wsl:`
+backend are delegated to that host's own `thurbox-cli` (`delegate_to_host` in
+`src/cli/sessions.rs`) instead of failing as a tmux status code against a
+window that was never there. The refusal survives only where delegation is
+genuinely impossible: a backend with no `hosts.toml` entry, or one whose
+`thurbox-cli` could not be reached.
 
 `session delete <uuid>` **soft-deletes** by default — only the DB row is marked
 deleted (the TUI tears down the tmux window/worktree on its next sync), and
 `session restore` revives it. `--force`
 (`session_ops::delete_session_headless`) also kills the tmux window, removes
-worktrees + the symlink workspace, and disables `send` automations targeting the
-session — for headless cleanup with no TUI running. Teardown is best-effort
+worktrees + the symlink workspace, disables `send` automations targeting the
+session, and clears its `session meta` key/value space (the row is
+unrestorable, so the meta would otherwise outlive it) — for headless cleanup
+with no TUI running. Teardown is best-effort
 (failures land in the JSON report); the row is always soft-deleted last. A
 `--force` delete stamps `sessions.force_deleted` (schema v37): the row still
 appears in the restore list **tagged `force-deleted`** and is restorable

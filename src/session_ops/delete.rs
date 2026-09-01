@@ -78,6 +78,8 @@ pub fn delete_session_headless(
             if force {
                 db.mark_session_force_deleted(session_id)
                     .map_err(|e| format!("mark_session_force_deleted: {e}"))?;
+                db.clear_session_meta(session_id)
+                    .map_err(|e| format!("clear_session_meta: {e}"))?;
             }
             report.hook_failures =
                 super::fire_post(crate::session::HookEvent::PostDelete, &hook_ctx);
@@ -100,6 +102,8 @@ pub fn delete_session_headless(
     if force {
         db.mark_session_force_deleted(session_id)
             .map_err(|e| format!("mark_session_force_deleted: {e}"))?;
+        db.clear_session_meta(session_id)
+            .map_err(|e| format!("clear_session_meta: {e}"))?;
     }
 
     report.hook_failures = super::fire_post(crate::session::HookEvent::PostDelete, &hook_ctx);
@@ -428,6 +432,32 @@ mod tests {
         assert_eq!(report.disabled_automations, 2);
         assert!(!db.get_automation(a).unwrap().unwrap().enabled);
         assert!(!db.get_automation(b).unwrap().unwrap().enabled);
+    }
+
+    #[test]
+    fn force_delete_clears_session_meta_but_soft_delete_does_not() {
+        // Regression: `clear_session_meta` is documented as being called on
+        // force-delete (the row is unrestorable, so its metadata is dead
+        // weight) but nothing wired the call in — a force-deleted session's
+        // meta rows outlived it forever.
+        let db = Database::open_in_memory().unwrap();
+
+        let soft = insert_session(&db, "soft-meta");
+        db.set_session_meta(soft, "fm.lease", "abc").unwrap();
+        delete_session_headless(&db, soft, false).unwrap();
+        assert_eq!(
+            db.get_session_meta(soft, "fm.lease").unwrap(),
+            Some("abc".to_string()),
+            "a soft delete is restorable, so its metadata must survive it"
+        );
+
+        let hard = insert_session(&db, "hard-meta");
+        db.set_session_meta(hard, "fm.lease", "xyz").unwrap();
+        delete_session_headless(&db, hard, true).unwrap();
+        assert!(
+            db.get_session_meta(hard, "fm.lease").unwrap().is_none(),
+            "a force delete is unrestorable, so its metadata must not outlive it"
+        );
     }
 
     #[test]

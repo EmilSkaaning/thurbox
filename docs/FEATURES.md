@@ -1823,6 +1823,80 @@ complete. The TUI remains fully interactive during sync.
 
 ---
 
+## Sessions That Arrive From Elsewhere
+
+Thurbox is normally the thing that *starts* work: it launches a coding agent in
+a worktree it made. But an increasing amount of work starts somewhere else — an
+orchestrator that owns the plan, a checkout tool that owns the pool, a session
+that already exists in another terminal manager. None of that should require
+thurbox to own it first.
+
+Three pieces make a session joinable, and each one is a **value handed in**
+rather than an interface anyone has to implement.
+
+### Any command can be a session (`--command`)
+
+`session create --agent <name>` looks the launch up in `agents.toml`;
+`session create --command <exe> --arg … --env K=V` *is* the definition. The
+distinction matters at restart, not at spawn:
+
+- A **registry agent** is resolved by name at every launch. That indirection is
+  a feature — fix `agents.toml`, restart, and the fix takes effect.
+- A **command session** has no entry to re-resolve, so its **launch recipe**
+  (command, args, env) is persisted on its row and replayed verbatim. Without
+  that it would restart into nothing and lose its `--env` on the first respawn.
+
+A ready-made form ships as the `shell` built-in, whose `command` is the
+platform's own interactive shell (see [AGENTS.md](AGENTS.md)).
+
+### A launch recipe is not a conversation
+
+Restart, resume and fork are three different relationships to an agent's
+conversation, and only two of them need one:
+
+| Verb | What it does | Needs a conversation address |
+|------|--------------|------------------------------|
+| `restart` | Same session, new pane, replays the recipe | no |
+| `create --resume <id>` | New session attached to an existing conversation | yes |
+| `fork` | New session branching from one | yes |
+
+The address is the `resume_args` / `fork_args` / `resume_latest` groups of an
+`[[agents]]` entry — thurbox never learns what a conversation *is*, only how to
+ask an agent for one. So a command session restarts (a shell barely notices; its
+history and cwd live on disk), and `--resume` is **refused** for it with the fix
+named, rather than silently starting fresh. Making anything resumable is
+therefore a TOML edit, never a thurbox code change.
+
+### A name that is already taken
+
+`session create --on-existing <allow|adopt|replace|fail>` — one question with
+four answers. `allow` (the default) creates a second session with that name;
+`adopt` returns the existing one with `created: false`; `replace` tears it down
+first; `fail` refuses and exits 1, naming the session in the way.
+
+The default is `allow` because thurbox **cannot** make names unique: a database
+mirroring a shareable host (ADR-24) carries that host's rows beside its own, and
+two machines may each legitimately have a session called `build`. Uniqueness is
+therefore something a caller asks for per creation rather than a property of the
+namespace — and `fail` exists because, without it, every external driver wrote
+its own list-then-create check with its own race.
+
+`adopt` and `replace` refuse a name matching *several* sessions, on the same
+principle the reference resolver follows: picking one of two is a guess.
+
+### Stopping is not deleting
+
+`session stop` kills the pane and keeps the row, the checkout and the branch;
+`session start` puts a pane back. Before this the only headless way to reclaim a
+heavy agent's pane was `delete --force`, which also removed its worktrees.
+
+A stopped session is **marked**, not merely pane-less, because a session with no
+pane normally means its agent died — and three subsystems repair that on sight:
+the interface's respawn of surveyed rows, a peer's `restart --if-missing` after
+a reboot, and extension self-heal. All three skip a marked row, and `start` is
+the only caller that clears the mark. Without the exemptions the interface would
+undo every stop within a tick of it happening.
+
 ## Session Persistence
 
 Sessions run inside a dedicated tmux server (`tmux -L thurbox`)
@@ -1835,7 +1909,12 @@ thurbox instances.
   tmux pane keeps running regardless of thurbox's lifecycle.
 - On every session spawn, Thurbox assigns an `agent_session_id`
   (UUID v4) via the agent CLI's `--session-id` flag. This tells
-  the agent to use a stable conversation ID from the start.
+  the agent to use a stable conversation ID from the start —
+  unless the session is resuming an id-pinned agent's existing
+  conversation (`create --resume <id>`), in which case the given
+  id is persisted as `agent_session_id` instead of a fresh one, so
+  a later restart resumes the right conversation (see
+  [Sessions That Arrive From Elsewhere](#sessions-that-arrive-from-elsewhere)).
 - On shutdown (`Ctrl+Q`), session metadata (including backend IDs)
   is written to the SQLite database at
   `$XDG_DATA_HOME/thurbox/thurbox.db`. Thurbox detaches from each
