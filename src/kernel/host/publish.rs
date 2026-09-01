@@ -367,7 +367,7 @@ impl LuaHost {
     /// Publish the creation flow's four parameterised reads.
     ///
     /// Only what was asked for this frame: a flow that is closed asks nothing,
-    /// so all three are empty tables. Each carries its own request back
+    /// so all four are empty tables. Each carries its own request back
     /// (`host`, `dir`, `repo`) so a plugin can tell an answer to its current
     /// question from one still in flight for the previous.
     fn publish_repo_reads(

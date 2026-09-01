@@ -173,13 +173,6 @@ pub(super) fn execute(
     }
 }
 
-/// Create a session.
-///
-/// The whole pipeline — repo resolution, worktree checkout, multi-repo
-/// workspace, agent launch — already exists as `spawn_session_headless` and is
-/// what `thurbox-cli session create` uses. Reusing it unchanged means creation
-/// behaves identically whether it came from a plugin or a script, and there is
-/// one cleanup path for a failure rather than two.
 /// The name an unnamed create gets.
 ///
 /// Order: the **worktree directory's** own name when one is being opened, then
@@ -213,6 +206,13 @@ fn session_name(
         .unwrap_or_else(|| "session".to_string())
 }
 
+/// Create a session.
+///
+/// The whole pipeline — repo resolution, worktree checkout, multi-repo
+/// workspace, agent launch — already exists as `spawn_session_headless` and is
+/// what `thurbox-cli session create` uses. Reusing it unchanged means creation
+/// behaves identically whether it came from a plugin or a script, and there is
+/// one cleanup path for a failure rather than two.
 #[allow(clippy::too_many_arguments)]
 fn create(
     name: &str,

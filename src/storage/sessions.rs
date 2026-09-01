@@ -40,8 +40,11 @@ pub struct DeletedSessionInfo {
     pub backend_id: String,
     pub deleted_at: u64,
     /// Whether this row was hard-deleted (tmux window + worktrees torn down). A
-    /// force-deleted session is shown in the restore list but cannot be restored
-    /// — its worktrees (and any uncommitted work) are gone. See schema v37.
+    /// force-deleted session is shown in the restore list and normally cannot be
+    /// restored — its worktrees, and any uncommitted work in them, are gone. See
+    /// schema v37. The exception is a session whose worktrees were all *opened*
+    /// rather than created (`created_by_thurbox`, schema v42): the teardown
+    /// skipped every one, so nothing was lost and the restore is not refused.
     pub force_deleted: bool,
     pub worktrees: Vec<SharedWorktree>,
 }

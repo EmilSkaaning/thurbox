@@ -41,6 +41,21 @@ pub struct RestoreReport {
 /// of them; the agent last, and its failure does not fail the restore — a
 /// session whose window did not come up is still restored, and `restart` will
 /// try again.
+/// Whether a force-delete of these worktrees could have destroyed work.
+///
+/// The refusal below exists because `git worktree remove --force` takes the
+/// directory and any uncommitted work in it. A session that only *opened*
+/// worktrees it did not create had none of them removed, so there is nothing
+/// to warn about and the refusal would scare the caller off a restore that
+/// costs them nothing.
+///
+/// No worktrees at all still counts as lossy: that is every session predating
+/// `created_by_thurbox`, and the conservative reading is the one that cannot
+/// lose someone's work by being wrong.
+fn force_delete_was_lossy(worktrees: &[SharedWorktree]) -> bool {
+    worktrees.is_empty() || worktrees.iter().any(|w| w.created_by_thurbox)
+}
+
 pub fn restore_session_headless(
     db: &Database,
     id: SessionId,
@@ -53,8 +68,9 @@ pub fn restore_session_headless(
 
     // Lossy recovery is a decision, not a discovery: the caller has to have been
     // told before it happens. v1's confirm modal and the CLI's `--best-effort`
-    // are the two places that ask.
-    if deleted.force_deleted && !best_effort {
+    // are the two places that ask — but only when there is something to warn
+    // about, which `force_deleted` alone no longer answers.
+    if deleted.force_deleted && !best_effort && force_delete_was_lossy(&deleted.worktrees) {
         return Err(format!(
             "'{}' was force-deleted; recovering it brings back committed work only \
              (uncommitted and untracked changes are gone)",
@@ -265,5 +281,39 @@ mod tests {
             created_by_thurbox: true,
         }];
         assert!(recreate_worktrees(&worktrees).is_empty());
+    }
+
+    fn worktree(created_by_thurbox: bool) -> SharedWorktree {
+        SharedWorktree {
+            repo_path: std::path::PathBuf::from("/repo"),
+            worktree_path: std::path::PathBuf::from("/repo/.worktrees/mine"),
+            branch: "feat/x".into(),
+            created_by_thurbox,
+        }
+    }
+
+    #[test]
+    fn a_force_delete_that_removed_nothing_is_not_lossy() {
+        // The session only opened worktrees it did not create, so the teardown
+        // skipped every one of them and the directories are still on disk with
+        // their uncommitted work. Warning here talks the caller out of a
+        // restore that costs them nothing.
+        assert!(!force_delete_was_lossy(&[worktree(false)]));
+        assert!(!force_delete_was_lossy(&[worktree(false), worktree(false)]));
+    }
+
+    #[test]
+    fn one_worktree_thurbox_created_makes_the_whole_restore_lossy() {
+        // `git worktree remove --force` ran on that one, so something was
+        // destroyed even though its neighbours survived.
+        assert!(force_delete_was_lossy(&[worktree(false), worktree(true)]));
+        assert!(force_delete_was_lossy(&[worktree(true)]));
+    }
+
+    #[test]
+    fn a_session_with_no_worktrees_stays_lossy() {
+        // Every row predating `created_by_thurbox` looks like this, and the
+        // conservative reading is the one that cannot lose work by being wrong.
+        assert!(force_delete_was_lossy(&[]));
     }
 }

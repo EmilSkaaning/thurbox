@@ -272,7 +272,7 @@ enum Done {
     },
 }
 
-/// Serves the creation flow's three reads, caching each under its request.
+/// Serves the creation flow's four reads, caching each under its request.
 pub struct RepoStore {
     hosts: HostRegistry,
     bookmarks: HashMap<HostKey, Remembered>,

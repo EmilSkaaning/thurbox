@@ -69,6 +69,7 @@ pub fn delete_session_headless(
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             report.removed_worktrees = string_list(&answer, "removed_worktrees");
+            report.kept_worktrees = string_list(&answer, "kept_worktrees");
             report.worktree_errors = string_list(&answer, "worktree_errors");
             report.remote_teardown_error = answer
                 .get("remote_teardown_error")

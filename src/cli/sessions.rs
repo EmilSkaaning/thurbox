@@ -943,6 +943,7 @@ fn delete_session(db: &Database, uuid: &str, force: bool) -> Result<CommandOutpu
             "forced": force,
             "killed_window": report.killed_window,
             "removed_worktrees": report.removed_worktrees,
+            "kept_worktrees": report.kept_worktrees,
             "worktree_errors": report.worktree_errors,
             "disabled_automations": report.disabled_automations,
             "remote_teardown_error": report.remote_teardown_error,
@@ -968,6 +969,11 @@ fn force_delete_detail(
             report.disabled_automations.to_string(),
         ),
     ];
+    // Only when there are any: a teardown that removed everything it found
+    // should not grow a "kept worktrees: " line saying nothing.
+    if !report.kept_worktrees.is_empty() {
+        detail.push(("kept worktrees", report.kept_worktrees.join("; ")));
+    }
     if !report.worktree_errors.is_empty() {
         detail.push(("worktree errors", report.worktree_errors.join("; ")));
     }
