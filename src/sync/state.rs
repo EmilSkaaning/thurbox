@@ -100,7 +100,7 @@ pub struct SharedWorktree {
     /// Force-delete removes only what thurbox created: `git worktree remove
     /// --force` deletes the directory and any uncommitted work in it, which is
     /// thurbox's to discard for a worktree it made and never for one it
-    /// borrowed. Persisted (schema v41) because the decision outlives the
+    /// borrowed. Persisted (schema v42) because the decision outlives the
     /// process that made it.
     pub created_by_thurbox: bool,
 }
