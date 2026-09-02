@@ -178,9 +178,10 @@ pub fn restore_session_headless(
 
 /// Re-attach each worktree whose branch still exists.
 ///
-/// A branch that is gone is skipped rather than failing the restore: the other
-/// worktrees are still worth having, and the report says how many came back. v1's
-/// `App::recreate_worktrees`, lifted here so both interfaces share it.
+/// A worktree that cannot come back — its branch gone, or, for one thurbox only
+/// borrowed, its directory gone — is skipped rather than failing the restore:
+/// the others are still worth having, and the report says how many came back.
+/// v1's `App::recreate_worktrees`, lifted here so both interfaces share it.
 pub fn recreate_worktrees(worktrees: &[SharedWorktree]) -> Vec<WorktreeInfo> {
     let mut recovered = Vec::new();
     for worktree in worktrees {
@@ -189,6 +190,18 @@ pub fn recreate_worktrees(worktrees: &[SharedWorktree]) -> Vec<WorktreeInfo> {
         // still registered with git. `add_existing_worktree` would only fail on
         // it and drop it from the restored session.
         if !worktree.created_by_thurbox {
+            // The user's directory, so its continued existence is theirs to
+            // decide: if they removed it after the force-delete, restoring the
+            // row would hand the session a cwd that is not there. Symmetric
+            // with the `branch_exists` guard below — each arm checks the thing
+            // its own restore depends on.
+            if !worktree.worktree_path.is_dir() {
+                tracing::warn!(
+                    "not restoring {}: the worktree is gone",
+                    worktree.worktree_path.display()
+                );
+                continue;
+            }
             recovered.push(WorktreeInfo {
                 repo_path: worktree.repo_path.clone(),
                 worktree_path: worktree.worktree_path.clone(),
@@ -281,6 +294,36 @@ mod tests {
             created_by_thurbox: true,
         }];
         assert!(recreate_worktrees(&worktrees).is_empty());
+    }
+
+    #[test]
+    fn a_borrowed_worktree_whose_directory_is_gone_is_skipped_too() {
+        // The user deleted their own checkout between the force-delete and the
+        // restore. Handing the row back regardless gives the session a cwd that
+        // is not there, which the thurbox arm already refuses to do via
+        // `branch_exists`.
+        let worktrees = vec![SharedWorktree {
+            repo_path: std::path::PathBuf::from("/definitely/not/a/repo"),
+            worktree_path: std::path::PathBuf::from("/definitely/not/a/worktree"),
+            branch: "feat/borrowed".into(),
+            created_by_thurbox: false,
+        }];
+        assert!(recreate_worktrees(&worktrees).is_empty());
+    }
+
+    #[test]
+    fn a_borrowed_worktree_still_on_disk_comes_back_as_it_is() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let worktrees = vec![SharedWorktree {
+            repo_path: dir.path().to_path_buf(),
+            worktree_path: dir.path().to_path_buf(),
+            branch: "feat/borrowed".into(),
+            created_by_thurbox: false,
+        }];
+        let recovered = recreate_worktrees(&worktrees);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].worktree_path, dir.path());
+        assert!(!recovered[0].created_by_thurbox);
     }
 
     fn worktree(created_by_thurbox: bool) -> SharedWorktree {
