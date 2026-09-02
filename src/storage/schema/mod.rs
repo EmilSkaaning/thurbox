@@ -24,7 +24,10 @@ use rusqlite::Connection;
 /// gates the worktree toggle) and `parent_path` (persisted children of a
 /// remote parent bookmark) to `repo_bookmarks`. v41 adds the joinable columns:
 /// a session's persisted launch recipe, its `stopped_at` mark, and the
-/// `session_meta` key/value table.
+/// `session_meta` key/value table. v42 adds `created_by_thurbox` to
+/// `worktrees`: a session can now *open* a worktree it did not create,
+/// and provenance is what tells a teardown to leave that directory alone and a
+/// restore not to warn about work no delete could have destroyed.
 /// Gaps in the step table are fine (there is no v18 step either).
 pub const SCHEMA_VERSION: u32 = 42;
 
