@@ -56,6 +56,43 @@ fn force_delete_was_lossy(worktrees: &[SharedWorktree]) -> bool {
     worktrees.is_empty() || worktrees.iter().any(|w| w.created_by_thurbox)
 }
 
+/// Why this restore should stop and ask first, if it should — `None` when it
+/// can simply run.
+///
+/// Two different promises can be broken, and saying the wrong one is worse
+/// than saying nothing. A **lossy force-delete** destroyed uncommitted work, so
+/// only committed work returns. A **borrowed worktree that is no longer on
+/// disk** destroyed nothing — but the restore cannot deliver the session it
+/// hands back: `restore_session` leaves the stored `cwd` alone and `respawn`
+/// anchors on it, so the pane opens at a path that is not there. The skip in
+/// [`recreate_worktrees`] keeps the *count* honest; only this keeps the restore
+/// honest.
+///
+/// The disk check is not conditioned on `force_deleted`: a soft-deleted session
+/// whose borrowed checkout the user removed afterwards lands in exactly the
+/// same place. `--best-effort` (the interface's confirm) remains the way to say
+/// yes to either.
+pub fn restore_refusal(
+    name: &str,
+    force_deleted: bool,
+    worktrees: &[SharedWorktree],
+) -> Option<String> {
+    if force_deleted && force_delete_was_lossy(worktrees) {
+        return Some(format!(
+            "'{name}' was force-deleted; recovering it brings back committed work only \
+             (uncommitted and untracked changes are gone)"
+        ));
+    }
+    let gone = worktrees
+        .iter()
+        .find(|w| !w.created_by_thurbox && !w.worktree_path.is_dir())?;
+    Some(format!(
+        "'{name}' opened the worktree at {}, and it is no longer on disk; \
+         restoring cannot bring back a directory thurbox never created",
+        gone.worktree_path.display()
+    ))
+}
+
 pub fn restore_session_headless(
     db: &Database,
     id: SessionId,
@@ -66,16 +103,17 @@ pub fn restore_session_headless(
         .map_err(|e| format!("get deleted session: {e}"))?
         .ok_or_else(|| format!("deleted session not found: {id}"))?;
 
-    // Lossy recovery is a decision, not a discovery: the caller has to have been
-    // told before it happens. v1's confirm modal and the CLI's `--best-effort`
-    // are the two places that ask — but only when there is something to warn
-    // about, which `force_deleted` alone no longer answers.
-    if deleted.force_deleted && !best_effort && force_delete_was_lossy(&deleted.worktrees) {
-        return Err(format!(
-            "'{}' was force-deleted; recovering it brings back committed work only \
-             (uncommitted and untracked changes are gone)",
-            deleted.name
-        ));
+    // Recovery the caller would not want is a decision, not a discovery: they
+    // have to have been told before it happens. v1's confirm modal and the
+    // CLI's `--best-effort` are the two places that ask — but only when there
+    // is something to warn about, which `force_deleted` alone no longer
+    // answers.
+    if !best_effort {
+        if let Some(reason) =
+            restore_refusal(&deleted.name, deleted.force_deleted, &deleted.worktrees)
+        {
+            return Err(reason);
+        }
     }
 
     // A session on a shareable host is restored by the host's CLI — the
@@ -191,10 +229,13 @@ pub fn recreate_worktrees(worktrees: &[SharedWorktree]) -> Vec<WorktreeInfo> {
         // it and drop it from the restored session.
         if !worktree.created_by_thurbox {
             // The user's directory, so its continued existence is theirs to
-            // decide: if they removed it after the force-delete, restoring the
-            // row would hand the session a cwd that is not there. Symmetric
-            // with the `branch_exists` guard below — each arm checks the thing
-            // its own restore depends on.
+            // decide: if they removed it, there is nothing to re-attach and
+            // counting it as recovered would be a lie. Symmetric with the
+            // `branch_exists` guard below — each arm checks the thing its own
+            // restore depends on. This is the *report* only; what stops a
+            // session being handed a cwd that is not there is
+            // [`restore_refusal`], since nothing here is written back to the
+            // row.
             if !worktree.worktree_path.is_dir() {
                 tracing::warn!(
                     "not restoring {}: the worktree is gone",
@@ -351,6 +392,40 @@ mod tests {
         // destroyed even though its neighbours survived.
         assert!(force_delete_was_lossy(&[worktree(false), worktree(true)]));
         assert!(force_delete_was_lossy(&[worktree(true)]));
+    }
+
+    #[test]
+    fn a_borrowed_worktree_missing_from_disk_is_refused_with_its_own_reason() {
+        // The restore cannot deliver what it promises: the directory the
+        // session would be anchored at is not there, and nothing downstream
+        // notices — `restore_session` leaves `cwd` alone and `respawn` opens a
+        // pane at it regardless. The message has to name that, not uncommitted
+        // work that was never touched.
+        let reason = restore_refusal("borrowed", false, &[worktree(false)])
+            .expect("a missing borrowed worktree is a refusal");
+        assert!(reason.contains("/repo/.worktrees/mine"), "{reason}");
+        assert!(!reason.contains("uncommitted"), "{reason}");
+    }
+
+    #[test]
+    fn a_borrowed_worktree_still_on_disk_is_not_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let present = SharedWorktree {
+            repo_path: dir.path().to_path_buf(),
+            worktree_path: dir.path().to_path_buf(),
+            branch: "feat/borrowed".into(),
+            created_by_thurbox: false,
+        };
+        assert_eq!(restore_refusal("borrowed", true, &[present]), None);
+    }
+
+    #[test]
+    fn a_lossy_force_delete_keeps_the_uncommitted_work_message() {
+        // Thurbox made this one, so `git worktree remove --force` took the
+        // directory: the older refusal is the accurate one and wins.
+        let reason = restore_refusal("mine", true, &[worktree(true)])
+            .expect("a lossy force-delete is a refusal");
+        assert!(reason.contains("uncommitted"), "{reason}");
     }
 
     #[test]
