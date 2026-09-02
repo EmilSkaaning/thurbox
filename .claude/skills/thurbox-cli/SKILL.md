@@ -343,13 +343,27 @@ branch, so restore reattaches each surviving branch's committed work
 (`App::recreate_worktrees`); only uncommitted/untracked changes are gone. Because
 that recovery is lossy, the headless `session restore` **refuses a force-deleted
 row unless `--best-effort`** (its JSON then carries `best_effort: true`) — but
-only when the teardown could actually have lost something
-(`session_ops::restore::force_delete_was_lossy`). A session whose worktrees were
-every one of them opened is restored without the flag, since nothing was removed.
-A row with *no* worktrees stays refused: that is every row predating the column,
-and the conservative reading is the one that cannot lose work by being wrong.
-Restore skips a worktree it cannot bring back — branch gone for one thurbox cut,
-directory gone for one it borrowed — rather than failing outright.
+only when the teardown could actually have lost something. A session whose
+worktrees were every one of them opened is restored without the flag, since
+nothing was removed. A row with *no* worktrees stays refused: that is every row
+predating the column, and the conservative reading is the one that cannot lose
+work by being wrong.
+
+`session_ops::restore::restore_refusal` is the single decision behind that, and
+it answers two questions, not one: *could the teardown have destroyed anything*
+(the lossy case above) and *can this restore deliver what it promises*. The
+second refuses — force-deleted or not — a session holding a **borrowed worktree
+that is no longer on disk**, naming the path rather than talking about
+uncommitted work that was never touched: `restore_session` reinstates the stored
+`cwd` untouched and `respawn` anchors on it, so the pane would open at a
+directory that is not there. `--best-effort` says yes to either. The command
+line calls the same function and only appends the `--best-effort` sentence, so
+it and the TUI cannot disagree about what is restorable.
+
+Restore still skips a worktree it cannot bring back — branch gone for one
+thurbox cut, directory gone for one it borrowed — rather than failing outright;
+that skip keeps `worktrees_recovered` honest and nothing more, since its result
+is never written back to the row.
 `restore_session` clears both `deleted_at` and `force_deleted`.
 
 The **TUI** `Ctrl+D` soft-deletes too (with a `Ctrl+Z` undo window). The
@@ -365,10 +379,14 @@ The assessment is the pane's (`at_risk` in `ui/plugins/10_sessions.lua`, reading
 the snapshot's `git` stats — v1 computed it in Rust over `git::worktree_stats`),
 and the question travels through the shared `store.confirm` to the confirmation
 float (`ui/plugins/60_confirm.lua`) rather than a bespoke modal. `Ctrl+U` lists the deleted rows (`ui/plugins/80_restore.lua`,
-a float) and `Enter` restores the one under the cursor; a **force-deleted** row
-asks first — through the shared `store.confirm` question, not a bespoke modal —
-since recovery is committed-state-only, and only then issues `restore` with
-`best_effort`. The flag never changes
+a float) and `Enter` restores the one under the cursor; a row the kernel **would
+refuse** asks first — through the shared `store.confirm` question, not a bespoke
+modal — and only then issues `restore` with `best_effort`. What it asks about is
+the snapshot's `restore_refusal` (`DeletedRow`, published per row and nil when
+the restore would simply run), i.e. `restore_refusal`'s own sentence, not the
+`force-deleted` tag beside it: the two differ in both directions, and the pane
+must not describe a refusal it does not decide. The tag still says how the row
+was deleted, and drives the muted styling. The flag never changes
 `thurbox-cli session delete`, which stays soft unless `--force`.
 
 ### Session lifecycle hooks (`hooks.toml`)

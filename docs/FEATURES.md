@@ -2009,9 +2009,14 @@ branch name) is saved in the database and reconstructed on restore.
   destroyed uncommitted work, and a teardown that removed nothing destroyed
   nothing. A session with no worktrees at all stays refused — that is every
   row predating the column, and the conservative reading is the one that
-  cannot lose work by being wrong. Either way the row **leaves the list on the
-  keystroke** rather than sitting there tagged while the teardown runs:
-  the session list drops any session whose `delete` is in flight
+  cannot lose work by being wrong. A borrowed worktree the user has since
+  removed themselves is refused too, and says so in those words: nothing was
+  lost, but the restore cannot deliver either, since the row's `cwd` is
+  reinstated untouched and the agent would be respawned at a path that is not
+  there. `session_ops::restore::restore_refusal` decides both, so the TUI and
+  `thurbox-cli session restore` cannot disagree about what is restorable.
+  Either way the row **leaves the list on the keystroke** rather than sitting
+  there tagged while the teardown runs: the session list drops any session whose `delete` is in flight
   (`live_sessions()` in `ui/plugins/10_sessions.lua`), so the cursor lands on
   the next session and a repo group whose last session went takes its
   header with it. A delete that *failed* keeps its row — the failure is
