@@ -326,18 +326,30 @@ genuinely impossible: a backend with no `hosts.toml` entry, or one whose
 deleted (the TUI tears down the tmux window/worktree on its next sync), and
 `session restore` revives it. `--force`
 (`session_ops::delete_session_headless`) also kills the tmux window, removes
-worktrees + the symlink workspace, disables `send` automations targeting the
-session, and clears its `session meta` key/value space (the row is
-unrestorable, so the meta would otherwise outlive it) — for headless cleanup
-with no TUI running. Teardown is best-effort
+the worktrees **thurbox created** + the symlink workspace, disables `send`
+automations targeting the session, and clears its `session meta` key/value space
+(the row is unrestorable, so the meta would otherwise outlive it) — for headless
+cleanup with no TUI running. Teardown is best-effort
 (failures land in the JSON report); the row is always soft-deleted last. A
-`--force` delete stamps `sessions.force_deleted` (schema v37): the row still
+worktree the session merely **opened** (`created_by_thurbox = 0`, schema v42) is
+left on disk and listed in the report's `kept_worktrees`: `git worktree remove
+--force` would take the uncommitted work in it too, which is thurbox's to discard
+only for a directory it made.
+
+A `--force` delete stamps `sessions.force_deleted` (schema v37): the row still
 appears in the restore list **tagged `force-deleted`** and is restorable
 **best-effort** — force-delete removes the worktree *directory* but not the git
 branch, so restore reattaches each surviving branch's committed work
 (`App::recreate_worktrees`); only uncommitted/untracked changes are gone. Because
 that recovery is lossy, the headless `session restore` **refuses a force-deleted
-row unless `--best-effort`** (its JSON then carries `best_effort: true`).
+row unless `--best-effort`** (its JSON then carries `best_effort: true`) — but
+only when the teardown could actually have lost something
+(`session_ops::restore::force_delete_was_lossy`). A session whose worktrees were
+every one of them opened is restored without the flag, since nothing was removed.
+A row with *no* worktrees stays refused: that is every row predating the column,
+and the conservative reading is the one that cannot lose work by being wrong.
+Restore skips a worktree it cannot bring back — branch gone for one thurbox cut,
+directory gone for one it borrowed — rather than failing outright.
 `restore_session` clears both `deleted_at` and `force_deleted`.
 
 The **TUI** `Ctrl+D` soft-deletes too (with a `Ctrl+Z` undo window). The
