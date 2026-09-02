@@ -76,6 +76,10 @@ fn cleanup() {
 
 /// How many worktrees git has registered for `repo` — the main checkout plus
 /// each linked one.
+///
+/// Gated with its only caller: the Windows `clippy -D warnings` job counts an
+/// unused helper as dead code and fails the build.
+#[cfg(unix)]
 fn registered_worktrees(repo: &Path) -> usize {
     let out = Command::new("git")
         .args(["worktree", "list", "--porcelain"])
