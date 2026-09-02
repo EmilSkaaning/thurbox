@@ -578,6 +578,33 @@ mod tests {
     }
 
     #[test]
+    fn a_borrowed_worktree_stays_borrowed_across_the_wire() {
+        // The peer that tears a mirrored session down reads this flag off the
+        // JSON, not off its own database. `created_by_thurbox` is absent-means-
+        // true for older hosts, so a writer that stopped emitting the key would
+        // turn every borrowed worktree back into one force-delete may
+        // `git worktree remove --force` — taking the user's uncommitted work
+        // with it — while `the_json_shape_round_trips` stayed green, since its
+        // fixture never sets the flag false.
+        let id = SessionId::default();
+        let mut row = host_row(id, "borrowed");
+        row.session.worktrees[0].created_by_thurbox = false;
+
+        let again = session_from_json(
+            &session_to_json(
+                &row.session,
+                row.hook_state.as_deref(),
+                row.base_branch.as_deref(),
+            ),
+            BACKEND,
+        )
+        .unwrap();
+
+        assert!(!again.session.worktrees[0].created_by_thurbox);
+        assert_eq!(again, row);
+    }
+
+    #[test]
     fn an_older_host_that_prints_fewer_fields_still_parses() {
         let id = SessionId::default();
         let row = session_from_json(

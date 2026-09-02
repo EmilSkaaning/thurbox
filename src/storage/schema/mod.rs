@@ -758,6 +758,54 @@ mod tests {
     }
 
     #[test]
+    fn migrate_from_v41_backfills_worktree_provenance_as_thurbox_made() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Minimal v41 state: the worktrees table without created_by_thurbox.
+        conn.execute_batch(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO metadata (key, value) VALUES ('schema_version', '41');
+             CREATE TABLE worktrees (
+                session_id    TEXT NOT NULL,
+                repo_path     TEXT NOT NULL,
+                worktree_path TEXT NOT NULL,
+                branch        TEXT NOT NULL,
+                created_at    INTEGER NOT NULL,
+                deleted_at    INTEGER,
+                PRIMARY KEY (session_id, repo_path)
+             );
+             INSERT INTO worktrees (session_id, repo_path, worktree_path, branch, created_at)
+             VALUES ('s1', '/repo/a', '/repo/a/wt', 'feat/x', 1);",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+        // Re-run is a no-op (guarded ALTER).
+        migrate(&conn).unwrap();
+
+        // The value, not merely the column: opening a worktree is what the
+        // column was added for, so every row predating it was one thurbox
+        // checked out itself. Backfilling 0 would make force-delete skip a
+        // worktree it owns and leave the directory behind forever.
+        let mine: bool = conn
+            .query_row(
+                "SELECT created_by_thurbox FROM worktrees WHERE session_id = 's1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(mine, "a worktree predating the column was made by thurbox");
+
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+    }
+
+    #[test]
     fn migrate_from_v26_adds_is_parent_column() {
         let conn = Connection::open_in_memory().unwrap();
         // Minimal v26 state: a repo_bookmarks table without the is_parent column.
