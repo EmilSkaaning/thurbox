@@ -784,6 +784,9 @@ fn build_deleted(lua: &Lua, snapshot: &Snapshot) -> Result<Value, String> {
         set(&item, "worktrees", row.worktrees)?;
         // Restoring this one recovers committed work only.
         set(&item, "partial", row.partial)?;
+        // Nil when the restore would simply run — the pane asks if and only if
+        // this is a string, and shows it as the reason.
+        set(&item, "restore_refusal", row.restore_refusal.clone())?;
         deleted
             .raw_set(index + 1, item)
             .map_err(|e| e.to_string())?;
