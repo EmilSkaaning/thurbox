@@ -1005,6 +1005,7 @@ fn restore_deleted(db: &Database, uuid: &str, best_effort: bool) -> Result<Comma
         if let Some(reason) = crate::session_ops::restore_refusal(
             &deleted.name,
             deleted.force_deleted,
+            &deleted.backend_type,
             &deleted.worktrees,
         ) {
             return Err(format!("{reason} — pass --best-effort to restore anyway"));

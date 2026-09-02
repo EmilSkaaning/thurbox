@@ -2013,7 +2013,10 @@ branch name) is saved in the database and reconstructed on restore.
   removed themselves is refused too, and says so in those words: nothing was
   lost, but the restore cannot deliver either, since the row's `cwd` is
   reinstated untouched and the agent would be respawned at a path that is not
-  there. `session_ops::restore::restore_refusal` decides both, so the TUI and
+  there. That second check is asked only of a local session — a remote one's
+  checkout is on its host, and the host's own `session restore` is where the
+  path can actually be looked for.
+  `session_ops::restore::restore_refusal` decides both, so the TUI and
   `thurbox-cli session restore` cannot disagree about what is restorable.
   Either way the row **leaves the list on the keystroke** rather than sitting
   there tagged while the teardown runs: the session list drops any session whose `delete` is in flight

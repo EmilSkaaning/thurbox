@@ -72,9 +72,18 @@ fn force_delete_was_lossy(worktrees: &[SharedWorktree]) -> bool {
 /// whose borrowed checkout the user removed afterwards lands in exactly the
 /// same place. `--best-effort` (the interface's confirm) remains the way to say
 /// yes to either.
+///
+/// It *is* conditioned on the backend being local, for the same reason the
+/// `create` command only validates a worktree path when no host is named: a
+/// remote session's checkout lives on its host, so stat'ing the path here
+/// answers about the wrong filesystem and reads every borrowed remote worktree
+/// as gone. The host's own `session restore` asks this question again against
+/// the filesystem the path belongs to — [`restore_session_headless`] delegates
+/// before it gets as far as recreating anything.
 pub fn restore_refusal(
     name: &str,
     force_deleted: bool,
+    backend_type: &str,
     worktrees: &[SharedWorktree],
 ) -> Option<String> {
     if force_deleted && force_delete_was_lossy(worktrees) {
@@ -82,6 +91,9 @@ pub fn restore_refusal(
             "'{name}' was force-deleted; recovering it brings back committed work only \
              (uncommitted and untracked changes are gone)"
         ));
+    }
+    if crate::session::is_remote_backend(backend_type) {
+        return None;
     }
     let gone = worktrees
         .iter()
@@ -109,9 +121,12 @@ pub fn restore_session_headless(
     // is something to warn about, which `force_deleted` alone no longer
     // answers.
     if !best_effort {
-        if let Some(reason) =
-            restore_refusal(&deleted.name, deleted.force_deleted, &deleted.worktrees)
-        {
+        if let Some(reason) = restore_refusal(
+            &deleted.name,
+            deleted.force_deleted,
+            &deleted.backend_type,
+            &deleted.worktrees,
+        ) {
             return Err(reason);
         }
     }
@@ -367,6 +382,9 @@ mod tests {
         assert!(!recovered[0].created_by_thurbox);
     }
 
+    /// The backend a session on this machine carries.
+    const LOCAL: &str = "local-tmux";
+
     fn worktree(created_by_thurbox: bool) -> SharedWorktree {
         SharedWorktree {
             repo_path: std::path::PathBuf::from("/repo"),
@@ -401,7 +419,7 @@ mod tests {
         // notices — `restore_session` leaves `cwd` alone and `respawn` opens a
         // pane at it regardless. The message has to name that, not uncommitted
         // work that was never touched.
-        let reason = restore_refusal("borrowed", false, &[worktree(false)])
+        let reason = restore_refusal("borrowed", false, LOCAL, &[worktree(false)])
             .expect("a missing borrowed worktree is a refusal");
         assert!(reason.contains("/repo/.worktrees/mine"), "{reason}");
         assert!(!reason.contains("uncommitted"), "{reason}");
@@ -416,14 +434,32 @@ mod tests {
             branch: "feat/borrowed".into(),
             created_by_thurbox: false,
         };
-        assert_eq!(restore_refusal("borrowed", true, &[present]), None);
+        assert_eq!(restore_refusal("borrowed", true, LOCAL, &[present]), None);
+    }
+
+    #[test]
+    fn a_remote_session_is_not_refused_over_a_path_on_the_other_machine() {
+        // The borrowed worktree is on the host, so the path never existed
+        // locally and `is_dir` here is answering about the wrong filesystem.
+        // Refusing on it would make every remote session that opened a
+        // worktree unrestorable without `--best-effort`, over a directory that
+        // is in fact still there. The host's own `session restore` asks again,
+        // against the filesystem the path belongs to.
+        assert_eq!(
+            restore_refusal("borrowed", false, "ssh:builder", &[worktree(false)]),
+            None
+        );
+        // The lossy case is not a disk question, so it still refuses.
+        let reason = restore_refusal("mine", true, "ssh:builder", &[worktree(true)])
+            .expect("a lossy force-delete is a refusal wherever it ran");
+        assert!(reason.contains("uncommitted"), "{reason}");
     }
 
     #[test]
     fn a_lossy_force_delete_keeps_the_uncommitted_work_message() {
         // Thurbox made this one, so `git worktree remove --force` took the
         // directory: the older refusal is the accurate one and wins.
-        let reason = restore_refusal("mine", true, &[worktree(true)])
+        let reason = restore_refusal("mine", true, LOCAL, &[worktree(true)])
             .expect("a lossy force-delete is a refusal");
         assert!(reason.contains("uncommitted"), "{reason}");
     }

@@ -912,6 +912,7 @@ impl SnapshotStore {
                         restore_refusal: crate::session_ops::restore_refusal(
                             &row.name,
                             row.force_deleted,
+                            &row.backend_type,
                             &row.worktrees,
                         ),
                         name: row.name,

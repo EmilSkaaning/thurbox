@@ -356,9 +356,13 @@ second refuses — force-deleted or not — a session holding a **borrowed workt
 that is no longer on disk**, naming the path rather than talking about
 uncommitted work that was never touched: `restore_session` reinstates the stored
 `cwd` untouched and `respawn` anchors on it, so the pane would open at a
-directory that is not there. `--best-effort` says yes to either. The command
-line calls the same function and only appends the `--best-effort` sentence, so
-it and the TUI cannot disagree about what is restorable.
+directory that is not there. That second question is asked only of a **local**
+session: a remote one's checkout lives on its host, so stat'ing the path here
+answers about the wrong filesystem, and the host's own `session restore` — which
+`restore_session_headless` delegates to — asks it again where the path actually
+is. `--best-effort` says yes to either. The command line calls the same function
+and only appends the `--best-effort` sentence, so it and the TUI cannot disagree
+about what is restorable.
 
 Restore still skips a worktree it cannot bring back — branch gone for one
 thurbox cut, directory gone for one it borrowed — rather than failing outright;
